@@ -1,12 +1,24 @@
 """Build Sidedoor.app for macOS with Nuitka (E9.T1), signed and notarized with --sign/--notarize (E9.T2).
 
     <build venv>/bin/python tools/build_macos.py --output <folder outside the repo>
-        [--runtime ~/sidedoor-browser-runtime] [--jobs N]
+        [--arch arm64|x86_64] [--runtime ~/sidedoor-browser-runtime] [--node <Node folder>] [--jobs N]
         [--sign "Developer ID Application: <name> (<team>)" [--notarize <notarytool keychain profile>]]
+
+Two downloads (owner, IN1 a): Apple silicon (--arch arm64) and Intel (--arch x86_64). --arch defaults to
+the build interpreter's own architecture. Nuitka runs under `arch -<arch>` with --macos-target-arch, so
+an Intel build is made on an Apple-silicon Mac under Rosetta from an x86_64 (or universal2) build venv,
+e.g. the python.org universal2 framework's `arch -x86_64 python3.13 -m venv`. Nuitka thins universal
+libraries (python.org's, PyObjC's universal2 wheels) to the target; afterwards every Mach-O in the
+bundle must be that architecture only (`check_arch`), or the build fails. The bundled Node must match
+too: --node names a Node distribution folder (bin/node and LICENSE, e.g. node-v24.22.1-darwin-x64)
+that replaces --runtime's node; @playwright/mcp's node_modules are pure JavaScript (no native addon;
+`check_arch` would refuse one of the wrong architecture) and are shared by both builds.
 
 --sign and --notarize run tools/sign_macos.py last, after every copy into the bundle and the smoke run
 (Nuitka's own ad-hoc signature is replaced); with --notarize the stapled app is also packed as
-<output>/Sidedoor-mac-apple-silicon.zip (Sidedoor-mac-intel.zip on Intel) with its .sha256. A signed build keeps every data file and data
+<output>/Sidedoor-mac-apple-silicon.zip or <output>/Sidedoor-mac-intel.zip with its .sha256. The names
+carry no version (owner: the website links GitHub's "latest release" asset URLs); the version is in the
+release's title and tag and inside the app. A signed build keeps every data file and data
 folder below in Contents/Resources with a symlink at the Contents/MacOS path named here (codesign takes
 every file in Contents/MacOS as code); the program sees the same paths.
 
@@ -45,6 +57,7 @@ import tempfile
 import importlib.metadata
 import importlib.util
 import ast
+import platform
 import re
 
 REPO = Path(__file__).resolve().parents[1]
@@ -110,17 +123,32 @@ From Pillow's wheel (their full licence texts are in Pillow's licence above):
 - libxcb, libXau: MIT (X11).
 - zlib-ng: zlib licence.
 
-From the Python build (Homebrew python@3.13):
-- OpenSSL 3 (libssl, libcrypto): Apache License 2.0.
+From the Python build ({python_build}):
+{python_dylibs}"""
+# What each Python build ships as dylibs: Homebrew's python@3.13 (the arm64 build) links OpenSSL, xz,
+# mpdecimal and sqlite as shared libraries; python.org's framework (the Intel build) links OpenSSL and
+# ncurses as shared libraries and sqlite, mpdecimal and xz into its modules (Pillow's wheel brings liblzma).
+PYTHON_DYLIBS = {
+    "homebrew": """- OpenSSL 3 (libssl, libcrypto): Apache License 2.0.
 - liblzma (XZ Utils): 0BSD.
 - libmpdec (mpdecimal): BSD-2-Clause.
 - sqlite (libsqlite3): public domain.
-"""
+""",
+    "python.org": """- OpenSSL 3 (libssl, libcrypto): Apache License 2.0.
+- ncurses (libncurses): MIT (X11 style).
+- linked into Python's own modules: sqlite (public domain), mpdecimal (BSD-2-Clause), XZ Utils (0BSD).
+- liblzma (XZ Utils, from Pillow's wheel): 0BSD.
+""",
+}
 # Their licence texts on the build machine, appended when present.
 DYLIB_TEXTS = (("OpenSSL 3", "/opt/homebrew/opt/openssl@3/LICENSE.txt"),
                ("XZ Utils (liblzma)", "/opt/homebrew/opt/xz/COPYING.0BSD"),
-               ("mpdecimal (libmpdec)", "/opt/homebrew/opt/mpdecimal/COPYRIGHT.txt"))
+               ("mpdecimal (libmpdec)", "/opt/homebrew/opt/mpdecimal/COPYRIGHT.txt"),
+               ("ncurses (libncurses; python.org build)", "/opt/homebrew/opt/ncurses/COPYING"))
 PERSONAL = ("/private/tmp/claude-501", "/Users/")
+# Mach-O CPU types (mach/machine.h) for the two macOS targets.
+CPU_TYPES = {0x01000007: "x86_64", 0x0100000C: "arm64"}
+ARCHES = ("arm64", "x86_64")
 
 def product_modules():
     """Every top-level product module (pyproject's py-modules) except the manual_* developer tools,
@@ -143,8 +171,68 @@ def make_icns(png, folder):
     return icns
 
 
-def nuitka_command(output, icns, jobs=None):
-    command = [sys.executable, "-m", "nuitka", "--standalone", "--macos-create-app-bundle",
+def host_arch():
+    """The build interpreter's own architecture (x86_64 under Rosetta)."""
+    return {"aarch64": "arm64"}.get(platform.machine(), platform.machine())
+
+
+def macho_arches(path):
+    """The architectures of a Mach-O file read from its header ([] when it is not one): one for a thin
+    file, each slice's for a universal one. Unknown CPU types are named by number."""
+    import struct
+    with open(path, "rb") as handle:
+        head = handle.read(4096)
+    if len(head) < 8:
+        return []
+    magic = head[:4]
+    if magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"):        # thin, little-endian
+        cpu = struct.unpack("<I", head[4:8])[0]
+        return [CPU_TYPES.get(cpu, hex(cpu))]
+    if magic in (b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"):        # thin, big-endian
+        cpu = struct.unpack(">I", head[4:8])[0]
+        return [CPU_TYPES.get(cpu, hex(cpu))]
+    if magic in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):        # universal (fat / fat64)
+        count = struct.unpack(">I", head[4:8])[0]
+        if not 0 < count < 32:         # a Java class file shares this magic
+            return []
+        size = 20 if magic.endswith(b"\xbe") else 32
+        return [CPU_TYPES.get(cpu, hex(cpu)) for cpu in
+                (struct.unpack(">I", head[8 + i * size:12 + i * size])[0] for i in range(count))]
+    return []
+
+
+def check_arch(app, arch):
+    """Every Mach-O file in the bundle is `arch` only (thin, no other slice). Returns their count; raises
+    SystemExit naming each file that is not."""
+    found, wrong = 0, []
+    for folder, _, files in os.walk(app):
+        for name in files:
+            path = Path(folder) / name
+            if path.is_symlink():
+                continue
+            arches = macho_arches(path)
+            if not arches:
+                continue
+            found += 1
+            if arches != [arch]:
+                wrong.append("%s (%s)" % (path.relative_to(app), " ".join(arches)))
+    if wrong:
+        raise SystemExit("not %s only: %s" % (arch, "; ".join(wrong)))
+    return found
+
+
+def nuitka_command(output, icns, jobs=None, arch=None):
+    arch = arch or host_arch()
+    python = sys.executable
+    if arch not in macho_arches(Path(python).resolve()):
+        raise SystemExit("the build interpreter %s cannot run %s (it is %s); use an %s or universal2 build venv"
+                         % (python, arch, " ".join(macho_arches(Path(python).resolve())) or "unknown", arch))
+    # `arch -<arch>` runs the (universal2) interpreter and every compiler Nuitka starts as <arch>.
+    command = ["arch", "-" + arch, python, "-m", "nuitka", "--standalone", "--macos-create-app-bundle",
+               "--macos-target-arch=" + arch,
+               # libpython as the bundled shared library on both builds (Homebrew's default already;
+               # python.org's framework offers no static archive, its libpython3.13.a is the dylib).
+               "--static-libpython=no",
                "--report=" + str(Path(output) / "compilation-report.xml"),
                "--macos-app-name=" + APP, "--macos-app-version=" + version.current(),
                "--macos-app-icon=" + str(icns), "--macos-app-mode=gui",
@@ -163,8 +251,10 @@ def nuitka_command(output, icns, jobs=None):
     return command + [str(ENTRY)]
 
 
-def copy_runtime(runtime, target):
-    """Copy the verified browser runtime into the app (symlinks kept: node_modules/.bin)."""
+def copy_runtime(runtime, target, node=None, arch=None):
+    """Copy the verified browser runtime into the app (symlinks kept: node_modules/.bin). With `node` (a
+    Node distribution folder holding bin/node and LICENSE), its node replaces the runtime's: the
+    Intel build's x64 Node beside the shared node_modules. The bundled node must be `arch`."""
     problems = browser_runtime.verify({"browser_driver": {"runtime_dir": str(runtime)}})
     if problems:
         raise SystemExit("browser runtime at %s refused: %s" % (runtime, "; ".join(problems)))
@@ -181,6 +271,8 @@ def copy_runtime(runtime, target):
         shutil.copy2(REPO / browser_runtime.RUNTIME_FOLDER / name, Path(target) / name)
     for part in RUNTIME_PARTS:
         source, destination = Path(runtime) / part, Path(target) / part
+        if node and part.startswith("node/"):
+            source = Path(node) / part[len("node/"):]
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
             shutil.copytree(source, destination, symlinks=True)
@@ -189,6 +281,10 @@ def copy_runtime(runtime, target):
     problems = browser_runtime.verify({"browser_driver": {"runtime_dir": str(target)}})
     if problems:
         raise SystemExit("bundled browser runtime refused: " + "; ".join(problems))
+    bundled = macho_arches(Path(target) / "node" / "bin" / "node")
+    if arch and bundled != [arch]:
+        raise SystemExit("the bundled node is %s, not %s only (pass --node <a darwin-%s Node folder>)"
+                         % (" ".join(bundled) or "not a Mach-O", arch, "x64" if arch == "x86_64" else arch))
 
 
 def _resolvable(name):
@@ -294,9 +390,12 @@ def third_party_notices(app, report):
             "-" * 40, "\n\n".join("[%s]\n%s" % (file_name, text) for file_name, text in files)))
     if missing:
         raise SystemExit("compiled-in distributions with no licence file: " + ", ".join(missing))
-    parts.append(DYLIBS)
+    flavour = "homebrew" if "/opt/homebrew/" in str(Path(sys.base_prefix).resolve()) else "python.org"
+    parts.append(DYLIBS.format(python_build="Homebrew python@3.13" if flavour == "homebrew"
+                               else "python.org Python %s framework" % sys.version.split()[0],
+                               python_dylibs=PYTHON_DYLIBS[flavour]))
     for label, where in DYLIB_TEXTS:
-        if Path(where).is_file():
+        if Path(where).is_file() and (flavour == "python.org" or "python.org build" not in label):
             parts.append("%s\n%s\n%s" % (label, "-" * 40, Path(where).read_text(encoding="utf-8", errors="replace")))
     parts.append("Node.js and @playwright/mcp: see Contents/MacOS/browser-runtime (node/LICENSE and each "
                  "package's LICENSE under node_modules).\n")
@@ -305,27 +404,31 @@ def third_party_notices(app, report):
     return compiled_distributions(report)
 
 
-def doctor_lines(binary, home):
+def doctor_lines(binary, home, arch=None):
     import json
     environment = dict(os.environ, SIDEDOOR_HOME=str(home))
     environment.pop(browser_runtime.RUNTIME_VARIABLE, None)
-    report = subprocess.run([str(binary), "doctor", "--json"], capture_output=True, text=True,
-                            env=environment, timeout=300).stdout
+    report = subprocess.run(["arch", "-" + (arch or host_arch()), str(binary), "doctor", "--json"],
+                            capture_output=True, text=True, env=environment, timeout=300).stdout
     return {check["name"]: check for check in json.loads(report)["checks"]}
 
 
-def smoke_uncompiled(app):
+def smoke_uncompiled(app, arch=None):
     """The built app imports pystray and fpdf from their folders: doctor's Tray icon (loads pystray)
     and PDF writer (writes a PDF with fpdf2) lines are OK with the folders there, and report the
     library missing with the folders moved away. doctor starts no browser."""
     binary = Path(app) / "Contents" / "MacOS" / BINARY
     folders = [binary.parent / package for package in UNCOMPILED]
     with tempfile.TemporaryDirectory(prefix="sidedoor-smoke-") as home:
-        present = doctor_lines(binary, home)
+        help_text = subprocess.run(["arch", "-" + (arch or host_arch()), str(binary), "--help"],
+                                   capture_output=True, text=True, timeout=120)
+        if help_text.returncode or "usage" not in help_text.stdout.lower():
+            raise SystemExit("`sidedoor --help` failed: " + (help_text.stderr or help_text.stdout)[-500:])
+        present = doctor_lines(binary, home, arch)
         for folder in folders:
             folder.rename(folder.with_name(folder.name + ".aside"))
         try:
-            absent = doctor_lines(binary, home)
+            absent = doctor_lines(binary, home, arch)
         finally:
             for folder in folders:
                 folder.with_name(folder.name + ".aside").rename(folder)
@@ -368,6 +471,10 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True, help="build folder, outside the repository")
     parser.add_argument("--runtime", type=Path, default=Path(os.environ.get(browser_runtime.RUNTIME_VARIABLE)
                                                                 or DEFAULT_RUNTIME).expanduser())
+    parser.add_argument("--arch", choices=ARCHES, default=host_arch(),
+                        help="arm64 (Apple silicon) or x86_64 (Intel); default: this interpreter's (%(default)s)")
+    parser.add_argument("--node", type=Path, help="Node distribution folder (bin/node, LICENSE) for --arch, "
+                                                  "replacing --runtime's node (the Intel build's darwin-x64 Node)")
     parser.add_argument("--jobs", type=int)
     parser.add_argument("--sign", metavar="IDENTITY", help="Developer ID Application identity (tools/sign_macos.py)")
     parser.add_argument("--notarize", metavar="PROFILE", help="notarytool keychain profile; needs --sign")
@@ -389,20 +496,23 @@ def main(argv=None):
             shutil.rmtree(old)
     with tempfile.TemporaryDirectory(prefix="sidedoor-icon-") as scratch:
         icns = make_icns(ICON, scratch)
-        subprocess.run(nuitka_command(output, icns, args.jobs), check=True, cwd=REPO)
+        subprocess.run(nuitka_command(output, icns, args.jobs, args.arch), check=True, cwd=REPO)
     built.rename(app)
-    copy_runtime(args.runtime, app / "Contents" / "MacOS" / browser_runtime.RUNTIME_FOLDER)
+    copy_runtime(args.runtime, app / "Contents" / "MacOS" / browser_runtime.RUNTIME_FOLDER,
+                 args.node.expanduser().resolve() if args.node else None, args.arch)
     copy_uncompiled(app)
-    smoke_uncompiled(app)
+    print("architecture: %d Mach-O files, all %s only" % (check_arch(app, args.arch), args.arch))
+    smoke_uncompiled(app, args.arch)
     clean_and_check(app)
     compiled = third_party_notices(app, output / "compilation-report.xml")
     print("compiled-in distributions: " + ", ".join(compiled))
-    print("built %s (version %s, %.1f MB)" % (app, version.current(), size(app) / 1e6))
+    print("built %s (version %s, %s, %.1f MB)" % (app, version.current(), args.arch, size(app) / 1e6))
     if args.sign:
         # Last: nothing may be written into the bundle after it is sealed.
         sys.path.insert(0, str(REPO / "tools"))
         import sign_macos
         sign_macos.finish(app, args.sign, args.notarize, output)
+        print("architecture after signing: %d Mach-O files, all %s only" % (check_arch(app, args.arch), args.arch))
     return 0
 
 

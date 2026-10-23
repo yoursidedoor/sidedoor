@@ -187,8 +187,13 @@ to one entry per distinct place the role can be done from, as the posting lists 
 "New York; San Francisco" is two entries; "Seattle or Remote (US)" is two, the second with
 city "Remote (US)"): {"city": that place's own verbatim text, "state": its two-letter USPS
 code or null, "country": its ISO 3166-1 alpha-2 code}. Cite the verbatim location text as
-the evidence quote of each entry's /city pointer. Keep facts.country, facts.state and
-facts.city for the first (or only) place, as before. In scope_fit, judge against
+the evidence quote of each entry's /city pointer. Give each entry its own "authorization": the
+owner's recorded status for THAT entry's country, judged exactly as facts.authorization is
+(same map, same three values, the "EU" entry covering member states; STATED_REQUIREMENT_NOT_MET
+only on an entry in the country an OTHER_COUNTRY_AUTHORIZATION_REQUIRED statement names, when the
+map does not record authorization there - other entries keep their own status; null when its country is
+null or the map is absent; no page quote). Keep facts.country, facts.state, facts.city and
+facts.authorization for the first (or only) place, as before. In scope_fit, judge against
 context.scope_targets whether the role's level is one of the owner's target levels (or its
 equivalent at this employer) and whether its specialization is one of the target
 specializations (an empty list means the user named none: any specialization within the
@@ -544,7 +549,9 @@ outcome: the sponsorship half is recorded and was available. request.recorded_fa
 the owner's recorded authorization and sponsorship facts as a jurisdiction map for exactly
 this. A country's own entry answers a question about that country; with none, the "EU" entry
 answers for any European Union member state (not the UK, Switzerland or Norway); "*" applies
-only where no entry covers the place asked about.
+only where no entry covers the place asked about. request.eligible_location, when present, is the
+role's location option the owner's work authorization fits: a "which location", "which office" or
+"where will you work" question is answered with that place.
 The one thing that never bends: do not assert work authorization, a right to work, a
 citizenship or a clearance that the recorded facts do not grant. Choosing the option that
 MATCHES the recorded facts is right; choosing a more favourable one because the form would
@@ -832,7 +839,8 @@ def result_contract(operation):
                           stated_eligibility_requirements=["NONE_STATED or one or more of "
                               + "|".join(sorted(applications.STATED_REQUIREMENTS - {applications.NONE_STATED}))],
                           location_options=[
-                {"city": "one place's own verbatim location text", "state": None, "country": None}]),
+                {"city": "one place's own verbatim location text", "state": None, "country": None,
+                 "authorization": None}]),
             "scope_fit": {dimension: {"in_scope": None, "reason": None} for dimension in applications.SCOPE_DIMENSIONS},
             "compensation": {"verified": False, "currency": None, "minimum": None, "maximum": None, "period": None},
             "history": {"verified": False, "job_key": None, "application": None, "interview": None, "referral": None},

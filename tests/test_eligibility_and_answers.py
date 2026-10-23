@@ -389,6 +389,147 @@ class ApplicationGateTests(unittest.TestCase):
         self.cycle()
         self.assertEqual(self.job(key)["blocker"], "REQUIRED_ELIGIBILITY_ANSWER")
 
+    def test_a_role_with_a_us_location_option_is_not_held_for_the_first_country(self):
+        # Cohere, 2026-10-23: Toronto, Montreal, New York, San Francisco. The read's authorization
+        # verdict was for Canada, its first country; the New York option is a US role.
+        policy = user_profile.load()
+        policy["answers"].pop("open_to_visa_sponsorship")
+        profile_home.use(self, policy)
+        options = [{"city": "Toronto", "country": "CA", "state": None},
+                   {"city": "New York", "country": "US", "state": "NY"}]
+        key = self.eu_role("CA And US", "ca-us-1", lambda result: result["facts"].update(
+            country="CA", region="North America", city="Toronto", work_mode="hybrid",
+            authorization="NOT_AUTHORIZED", location_options=options))
+        self.cycle()
+        self.assertNotEqual(self.job(key)["blocker"], "REQUIRED_ELIGIBILITY_ANSWER")
+
+    def multi_location_role(self, name, requisition, options, policy_changes, first=None):
+        policy = user_profile.load()
+        policy["answers"].pop("open_to_visa_sponsorship", None)
+        policy_changes(policy)
+        profile_home.use(self, policy)
+        first = first if first is not None else options[0]
+        return self.eu_role(name, requisition, lambda result: result["facts"].update(
+            country=first["country"], region=None, city=first["city"], work_mode="hybrid",
+            authorization=first.get("authorization"), location_options=[dict(option) for option in options]))
+
+    @staticmethod
+    def fictional_user(policy, countries, jurisdictions, us_resident=False, us_authorized=False):
+        """A stranger's profile: only their own countries and jurisdiction map decide."""
+        policy["countries"] = countries
+        policy["answers"]["work_authorization_by_jurisdiction"]["value"] = jurisdictions
+        policy["answers"]["us_permanent_resident"] = {"semantic": "us_lawful_permanent_resident",
+                                                      "value": us_resident, "source": "test"}
+        policy["answers"]["us_work_authorized"] = {"semantic": "currently_authorized_to_work_in_us",
+                                                   "value": us_authorized, "source": "test"}
+
+    def test_a_us_resident_option_without_its_own_verdict_is_chosen(self):
+        # An older read (no per-option verdicts): the first country's verdict was NOT_AUTHORIZED; the
+        # US option is labelled from the user's own recorded answers, so it outranks the CA one.
+        key = self.multi_location_role(
+            "Older Read CA US", "j1-older",
+            [{"city": "Toronto", "state": None, "country": "CA"}, {"city": "New York", "state": "NY", "country": "US"}],
+            lambda policy: self.fictional_user(policy, ["CA", "US"], {"US": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED",
+                                                                      "*": "NOT_AUTHORIZED"}, us_resident=True),
+            first={"city": "Toronto", "country": "CA", "authorization": "NOT_AUTHORIZED"})
+        self.cycle()
+        self.assertEqual(self.chosen_location(key)["city"], "New York")
+
+    def test_a_uk_only_user_with_no_first_country_is_matched_by_the_options(self):
+        key = self.multi_location_role(
+            "No First Country", "j1-uk",
+            [{"city": "Berlin", "state": None, "country": "DE", "authorization": "NOT_AUTHORIZED"},
+             {"city": "London", "state": None, "country": "GB", "authorization": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"}],
+            lambda policy: self.fictional_user(policy, ["DE", "GB"], {"GB": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED",
+                                                                      "*": "NOT_AUTHORIZED"}),
+            first={"city": None, "country": None, "authorization": None})
+        self.cycle()
+        self.assertEqual(self.job(key)["state"], "SUBMITTED")
+        self.assertEqual(self.chosen_location(key)["country"], "GB")
+
+    def test_a_user_without_us_authorization_still_applies_through_a_us_option(self):
+        # The existing US rule (owner, 2026-10-14): sponsorship is the employer's decision.
+        key = self.multi_location_role(
+            "No Auth Anywhere CA US", "j1-noauth",
+            [{"city": "Toronto", "state": None, "country": "CA", "authorization": "NOT_AUTHORIZED"},
+             {"city": "Austin", "state": "TX", "country": "US", "authorization": "NOT_AUTHORIZED"}],
+            lambda policy: self.fictional_user(policy, ["CA", "US"], {"*": "NOT_AUTHORIZED"}))
+        self.cycle()
+        self.assertNotEqual(self.job(key)["blocker"], "REQUIRED_ELIGIBILITY_ANSWER")
+        self.assertEqual(self.chosen_location(key)["country"], "US")
+
+    def test_an_option_without_a_verdict_takes_the_first_country_verdict(self):
+        key = self.multi_location_role(
+            "Older Read DE CA", "j1-fallback",
+            [{"city": "Berlin", "state": None, "country": "DE"}, {"city": "Toronto", "state": None, "country": "CA"}],
+            lambda policy: self.fictional_user(policy, ["DE", "CA"], {"EU": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED",
+                                                                      "*": "NOT_AUTHORIZED"}),
+            first={"city": "Berlin", "country": "DE", "authorization": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"})
+        self.cycle()
+        self.assertEqual(self.job(key)["state"], "SUBMITTED")
+        self.assertEqual(self.chosen_location(key)["country"], "DE")
+
+    def chosen_location(self, key):
+        row = self.database.execute("SELECT evidence FROM application_reviews WHERE job_key=? ORDER BY rowid DESC",
+                                    (key,)).fetchone()
+        return json.loads(row["evidence"]).get("eligible_location")
+
+    def test_an_eu_authorized_user_is_matched_to_the_eu_option(self):
+        # J1 A (owner, 2026-10-23): a user authorized in the EU, offered CA, US and DE, is DE.
+        def eu_user(policy):
+            policy["countries"] = ["CA", "US", "DE"]
+            policy["answers"]["us_permanent_resident"] = {"semantic": "us_lawful_permanent_resident",
+                                                          "value": False, "source": "test"}
+            policy["answers"]["work_authorization_by_jurisdiction"]["value"] = {
+                "EU": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED", "*": "NOT_AUTHORIZED"}
+        options = [{"city": "Toronto", "state": None, "country": "CA", "authorization": "NOT_AUTHORIZED"},
+                   {"city": "New York", "state": "NY", "country": "US", "authorization": "NOT_AUTHORIZED"},
+                   {"city": "Berlin", "state": None, "country": "DE", "authorization": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"}]
+        key = self.multi_location_role("CA US DE", "j1-eu", options, eu_user)
+        self.cycle()
+        self.assertEqual(self.job(key)["state"], "SUBMITTED")
+        self.assertEqual(self.chosen_location(key)["country"], "DE")
+        self.assertEqual(self.submissions()[0]["eligible_location"]["city"], "Berlin")
+
+    def test_a_us_permanent_resident_is_matched_to_a_us_option(self):
+        # Cohere, 2026-10-23: Toronto, Montreal, New York, San Francisco.
+        def resident(policy):
+            policy["countries"] = ["CA", "US"]
+            policy["answers"]["us_permanent_resident"] = {"semantic": "us_lawful_permanent_resident",
+                                                          "value": True, "source": "test"}
+        options = [{"city": "Toronto", "state": None, "country": "CA", "authorization": "NOT_AUTHORIZED"},
+                   {"city": "Montreal", "state": None, "country": "CA", "authorization": "NOT_AUTHORIZED"},
+                   {"city": "New York", "state": "NY", "country": "US", "authorization": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"},
+                   {"city": "San Francisco", "state": "CA", "country": "US", "authorization": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"}]
+        key = self.multi_location_role("Cohere SRE", "j1-cohere", options, resident)
+        self.cycle()
+        self.assertNotEqual(self.job(key)["blocker"], "REQUIRED_ELIGIBILITY_ANSWER")
+        self.assertEqual(self.chosen_location(key)["country"], "US")
+
+    def test_no_authorized_option_is_held_naming_every_option(self):
+        def outside(policy):  # a user with no authorization anywhere
+            self.fictional_user(policy, ["CA", "DE"], {"*": "NOT_AUTHORIZED"})
+        options = [{"city": "Toronto", "state": None, "country": "CA", "authorization": "NOT_AUTHORIZED"},
+                   {"city": "Berlin", "state": None, "country": "DE", "authorization": "NOT_AUTHORIZED"}]
+        key = self.multi_location_role("CA DE", "j1-none", options, outside)
+        self.cycle()
+        job = self.job(key)
+        self.assertEqual((job["state"], job["blocker"]), ("BLOCKED", "REQUIRED_ELIGIBILITY_ANSWER"))
+        self.assertIn("Toronto (CA)", job["next_action"])
+        self.assertIn("Berlin (DE)", job["next_action"])
+        self.assertEqual(self.submissions(), [])
+
+    def test_an_option_outside_the_users_countries_is_never_chosen(self):
+        def eu_user(policy):
+            policy["countries"] = ["US", "FR"]
+            policy["answers"]["work_authorization_by_jurisdiction"]["value"] = {
+                "EU": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED", "*": "NOT_AUTHORIZED"}
+        options = [{"city": "Berlin", "state": None, "country": "DE", "authorization": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"},
+                   {"city": "New York", "state": "NY", "country": "US", "authorization": "NOT_AUTHORIZED"}]
+        key = self.multi_location_role("DE US", "j1-scope", options, eu_user)
+        self.cycle()
+        self.assertEqual(self.chosen_location(key)["country"], "US")
+
     def onsite(self, name, requisition, **facts):
         candidate = role(name, requisition)
         key = self.discover(candidate)

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The main executable of an Intel (x86_64) app only: PyObjC's libffi builds its closures in
+	     writable+executable memory on x86_64 (ffi_closure_alloc), which the hardened runtime refuses
+	     without this; `import AppKit` (the tray) then hangs. arm64 libffi uses static trampolines and
+	     its app is signed without any entitlement. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>

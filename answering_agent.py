@@ -318,7 +318,8 @@ def packet_review(review):
     return {"facts": facts if isinstance(facts, dict) else {},
             "compensation": review.get("compensation") if isinstance(review.get("compensation"), dict) else {},
             "official_url": review.get("official_url"), "role": review.get("role"),
-            "form_revision": review.get("form_revision")}
+            "form_revision": review.get("form_revision"),
+            "eligible_location": review.get("eligible_location") if isinstance(review.get("eligible_location"), dict) else None}
 
 
 def max_characters(question):

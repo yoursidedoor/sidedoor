@@ -17,11 +17,13 @@ before, the Mach-O files (the .so modules, the dylibs, Node) stay in Contents/Ma
 Signing is inside-out, with the hardened runtime (--options runtime) and a secure timestamp:
   1. every Mach-O in the bundle other than the main executable (the .so extension modules, the
      .dylibs, Contents/MacOS/Python, the bundled Node binary), deepest path first. Node is signed
-     with tools/entitlements.plist (com.apple.security.cs.allow-jit: V8's JIT); nothing else gets an
-     entitlement;
+     with tools/entitlements.plist (com.apple.security.cs.allow-jit: V8's JIT);
   2. the bundle itself, which signs Contents/MacOS/sidedoor (its CFBundleExecutable) and seals every
      other file (the uncompiled pystray/ and fpdf/ sources, prompts, the runtime's JavaScript and the
-     licences) in Contents/_CodeSignature/CodeResources.
+     licences) in Contents/_CodeSignature/CodeResources. On an Intel (x86_64) app the main executable
+     gets tools/entitlements-x86_64.plist (com.apple.security.cs.allow-unsigned-executable-memory:
+     x86_64 libffi, used by PyObjC for the tray, allocates writable+executable closures, and without it
+     `import AppKit` hangs in ffi_closure_alloc). An arm64 app's main executable gets no entitlement.
 Library validation stays on (no disable-library-validation): every library the binary loads from the
 bundle is signed by the same team. Then `codesign --verify --deep --strict` must pass.
 
@@ -29,9 +31,10 @@ Notarizing zips the app with ditto, submits it with `xcrun notarytool submit --k
 <profile> --wait` (the profile is the owner's, saved with `notarytool store-credentials`; no password
 is read or printed here), prints the notary log on anything but Accepted, staples the ticket,
 validates it and asks Gatekeeper (`spctl --assess --type execute`, which does not launch the app).
-The release zip (Sidedoor-mac-apple-silicon.zip or Sidedoor-mac-intel.zip by the build machine's
-architecture, version-less so releases/latest/download/<name> links keep working; made from the
-stapled app) and its .sha256 go into --release-dir (default: beside the app).
+The release zip (Sidedoor-mac-apple-silicon.zip for Apple silicon, Sidedoor-mac-intel.zip for Intel,
+named from the main executable's architecture; made from the stapled app) and its .sha256 go into
+--release-dir (default: beside the app). The names carry no version (owner: the website downloads from
+GitHub's "latest release" asset URLs); the version is in the release title and tag and inside the app.
 """
 
 import argparse
@@ -48,6 +51,9 @@ import tempfile
 
 REPO = Path(__file__).resolve().parents[1]
 ENTITLEMENTS = REPO / "tools" / "entitlements.plist"
+# The main executable's entitlements per architecture (None: none). x86_64 libffi (PyObjC, the tray)
+# needs writable+executable memory; arm64 needs nothing, so its posture is unchanged.
+MAIN_ENTITLEMENTS = {"x86_64": REPO / "tools" / "entitlements-x86_64.plist", "arm64": None}
 # Executables that get ENTITLEMENTS, relative to Contents/MacOS.
 JIT_EXECUTABLES = ("browser-runtime/node/bin/node",)
 THIN_MAGIC = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"}
@@ -174,7 +180,10 @@ def sign(app, identity):
         for path in level:
             if path in jit:
                 codesign(identity, [path], ENTITLEMENTS)
-    codesign(identity, [app])
+    main_entitlements = MAIN_ENTITLEMENTS[app_arch(app)]
+    if main_entitlements:
+        print("  %s  (entitlements: %s)" % (main_executable(app).relative_to(app), main_entitlements.name))
+    codesign(identity, [app], main_entitlements)
     verify(app)
 
 
@@ -230,12 +239,25 @@ def notarize(app, profile):
     return submission
 
 
+# The download each architecture is published as (owner, IN1 a: Apple silicon and Intel), fixed names so
+# releases/latest/download/<name> links keep working (the website links to them by name).
 ASSET_NAMES = {"arm64": "Sidedoor-mac-apple-silicon.zip", "x86_64": "Sidedoor-mac-intel.zip"}
 
 
-def asset_name(machine=None):
-    """The release asset's fixed name for this architecture (the website links to it by name)."""
-    machine = machine or platform.machine()
+def app_arch(app):
+    """The main executable's one architecture (a universal or unknown one is refused: the release has one
+    download per architecture). An Intel build made under Rosetta is named from what it is, not the Mac."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import build_macos
+    arches = build_macos.macho_arches(main_executable(app))
+    if len(arches) != 1 or arches[0] not in ASSET_NAMES:
+        raise SystemExit("main executable is %s; expected arm64 or x86_64 only" % (" ".join(arches) or "not a Mach-O"))
+    return arches[0]
+
+
+def asset_name(machine=None, app=None):
+    """The release asset's fixed name for this architecture: `machine`, else the app's, else this Mac's."""
+    machine = machine or (app_arch(app) if app else platform.machine())
     if machine not in ASSET_NAMES:
         raise SystemExit("no release asset name for architecture %s" % machine)
     return ASSET_NAMES[machine]
@@ -244,7 +266,7 @@ def asset_name(machine=None):
 def release_zip(app, folder):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / asset_name()
+    target = folder / asset_name(app=app)
     if target.exists():
         target.unlink()
     subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(target)], check=True)

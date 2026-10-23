@@ -1348,21 +1348,21 @@ def assess(review, job, policy, now):
     # citizenship value is not a reason to stop, so each is read with .get and decides only
     # when present.
     country = facts.get("country")
-    if country is None:
-        authorization = True
-    elif country == "US":
-        # A user without US work authorization still applies; sponsorship is the employer's
-        # decision (owner, 2026-10-14: "Let them apply and leave sponsorship to employer").
-        # Only the read's own stated conflict holds.
-        authorization = facts.get("authorization") in {None} | US_AUTHORIZATION_LABELS
+    # Per-location authorization (owner, 2026-10-23, J1 A): the read judges the owner's map for
+    # each location option; the role passes when ANY option in the user's countries passes the
+    # per-country rule, and that option is recorded as the place the owner applies for.
+    # An option where the owner holds authorization is chosen over one applied to without it
+    # (a user authorized in the EU, offered CA, US and DE, is matched to DE); then a known country;
+    # then the posting's order.
+    candidates = authorization_candidates(facts, policy)
+    ranked = sorted(((country_authorized(option["country"], option["authorization"], review, policy, now), option)
+                     for option in candidates), key=lambda pair: (-pair[0], pair[1]["country"] is None))
+    chosen = ranked[0][1] if ranked and ranked[0][0] else None
+    authorization = chosen is not None
+    if chosen is not None and chosen["country"] is not None and chosen.get("option") is not None:
+        review["eligible_location"] = chosen["option"]
     else:
-        # The read's judgment that the owner's recorded map authorizes them in the role's
-        # country without sponsorship is authorization (owner, 2026-10-21).
-        authorization = ((facts.get("authorization") == "COUNTRY_SPECIFIC_AUTHORIZATION_VERIFIED"
-                          and fresh(review.get("country_authorization_evidence", {}), now))
-                         or facts.get("authorization") in {"AUTHORIZED_NO_SPONSORSHIP_REQUIRED",
-                                                           "JURISDICTION_MAP:AUTHORIZED_NO_SPONSORSHIP_REQUIRED"}
-                         or pursue_without_authorization(review, policy))
+        review.pop("eligible_location", None)
     stated = stated_requirements(review)
     if facts.get("citizenship_clearance_requirements_met") is False:
         # Owner, 2026-09-29: a posting that requires US citizenship or a security clearance is out
@@ -1376,25 +1376,15 @@ def assess(review, job, policy, now):
                  if needs else "The posting has a citizenship or clearance requirement the owner does not meet")
                 + ". Retain evidence; do not submit.")
     if not authorization:
-        # Owner, 2026-09-29: the hold states its actual cause.
-        if country == "US" and "OTHER_COUNTRY_AUTHORIZATION_REQUIRED" in stated:
-            reason = "The posting for this US role requires work authorization in another country, which the owner does not hold"
-        elif country == "US" and facts.get("authorization") == STATED_REQUIREMENT_NOT_MET:
-            reason = "The read reported that the owner does not meet this US role's stated work-authorization requirement"
-        elif country == "US":
-            reason = ("The read reported work authorization for this US role as " + repr(facts.get("authorization"))[:80]
-                      + ", not as met by the owner's permanent residence")
-        elif "OTHER_COUNTRY_AUTHORIZATION_REQUIRED" in stated:
-            reason = ("The role is in " + str(country) + " and the posting requires an existing right to work there, "
-                      "which the owner does not hold")
-        elif employer_refuses_sponsorship(review):
-            reason = ("The role is in " + str(country) + ", where the owner holds no work authorization, and the "
-                      "posting says the employer will not sponsor a visa")
-        elif policy_answer(policy, "open_to_employer_visa_sponsorship") is not True:
-            reason = ("The role is in " + str(country) + ", where the owner holds no work authorization, and the "
-                      "owner's policy does not record openness to employer visa sponsorship")
+        # Owner, 2026-09-29: the hold states its actual cause - for every location option.
+        reasons = [authorization_hold_reason(option["country"], option["authorization"], review, policy, stated)
+                   for option in candidates]
+        if len(candidates) == 1:
+            reason = reasons[0]
         else:
-            reason = "The role is in " + str(country) + ", where the owner holds no recorded work authorization"
+            reason = "No location option fits the owner's work authorization: " + "; ".join(
+                (str(option["option"].get("city") or option["country"]) + " (" + str(option["country"]) + "): " + text)
+                for option, text in zip(candidates, reasons))
         return "BLOCKED", "REQUIRED_ELIGIBILITY_ANSWER", reason + ". Retain evidence; do not submit."
     # Owner, 2026-09-19 ("submit an application at all cost"): an AI judgment that the resume
     # does not meet every listed requirement is recorded as a warning, not a block.
@@ -1410,6 +1400,87 @@ def assess(review, job, policy, now):
         return ("INELIGIBLE", "BASE_SALARY_BELOW_RELAXED_FLOOR", salary["note"]
                 + " Retain evidence; raise salary_relaxation.tolerance_below_minimum or the recorded minimum to pursue roles at this level")
     return None
+
+
+def authorization_candidates(facts, policy):
+    """The places whose authorization decides the role: one per location option, else facts.country.
+
+    Each is {"country", "authorization", "option"}. An option without its own verdict (an older
+    read) whose country is facts.country takes facts.authorization, which was judged for it; any
+    other option without a verdict has none. An option whose known country is outside the user's
+    `countries` is never a candidate, so it can never be the eligible location.
+    """
+    options = location_options(facts)
+    if options is None:
+        return [{"country": facts.get("country"), "authorization": facts.get("authorization"), "option": None}]
+    countries = target_countries(policy)
+    candidates = []
+    for option in options:
+        code = option.get("country") if isinstance(option.get("country"), str) and ISO_ALPHA2.fullmatch(option["country"]) else None
+        if countries and code is not None and code not in countries:
+            continue
+        verdict = option.get("authorization")
+        if verdict not in OPTION_AUTHORIZATION_VALUES:
+            verdict = facts.get("authorization") if code is not None and code == facts.get("country") else None
+        if code == "US" and verdict != STATED_REQUIREMENT_NOT_MET and verdict not in US_AUTHORIZATION_LABELS:
+            # A US option's raw status, or none at all, is labelled from the recorded answers as
+            # derive_silent_eligibility_facts labels facts.country: a permanent resident is
+            # authorized; a user without US authorization still applies (owner, 2026-10-14).
+            verdict = us_authorization_label(policy, verdict if verdict in JURISDICTION_STATUSES else None)
+        candidates.append({"country": code, "authorization": verdict, "option": option})
+    if not candidates:
+        return [{"country": facts.get("country"), "authorization": facts.get("authorization"), "option": None}]
+    return candidates
+
+
+AUTHORIZED, APPLIES_ANYWAY = 2, 1
+
+
+def country_authorized(country, verdict, review, policy, now):
+    """The per-country authorization rule `assess` applies to one place.
+
+    AUTHORIZED (2) when the owner holds authorization there, APPLIES_ANYWAY (1) when the role
+    is applied to without it (US: the employer decides sponsorship, owner 2026-10-14; elsewhere
+    `pursue_without_authorization`), 0 when it does not pass. A country the read did not report
+    decides nothing (1).
+    """
+    if country is None:
+        return APPLIES_ANYWAY
+    if country == "US":
+        # A user without US work authorization still applies; sponsorship is the employer's
+        # decision (owner, 2026-10-14: "Let them apply and leave sponsorship to employer").
+        # Only the read's own stated conflict holds.
+        if verdict in US_AUTHORIZATION_LABELS:
+            return AUTHORIZED
+        return APPLIES_ANYWAY if verdict is None else 0
+    # The read's judgment that the owner's recorded map authorizes them in the place's country
+    # without sponsorship is authorization (owner, 2026-10-21).
+    if ((verdict == "COUNTRY_SPECIFIC_AUTHORIZATION_VERIFIED"
+         and fresh(review.get("country_authorization_evidence", {}), now))
+            or verdict in {"AUTHORIZED_NO_SPONSORSHIP_REQUIRED", "JURISDICTION_MAP:AUTHORIZED_NO_SPONSORSHIP_REQUIRED"}):
+        return AUTHORIZED
+    return APPLIES_ANYWAY if pursue_without_authorization(review, policy) else 0
+
+
+def authorization_hold_reason(country, verdict, review, policy, stated):
+    """Why one place does not pass `country_authorized` (owner, 2026-09-29: the hold states its cause)."""
+    if country == "US" and "OTHER_COUNTRY_AUTHORIZATION_REQUIRED" in stated:
+        return "The posting for this US role requires work authorization in another country, which the owner does not hold"
+    if country == "US" and verdict == STATED_REQUIREMENT_NOT_MET:
+        return "The read reported that the owner does not meet this US role's stated work-authorization requirement"
+    if country == "US":
+        return ("The read reported work authorization for this US role as " + repr(verdict)[:80]
+                + ", not as met by the owner's permanent residence")
+    if "OTHER_COUNTRY_AUTHORIZATION_REQUIRED" in stated:
+        return ("The role is in " + str(country) + " and the posting requires an existing right to work there, "
+                "which the owner does not hold")
+    if employer_refuses_sponsorship(review):
+        return ("The role is in " + str(country) + ", where the owner holds no work authorization, and the "
+                "posting says the employer will not sponsor a visa")
+    if policy_answer(policy, "open_to_employer_visa_sponsorship") is not True:
+        return ("The role is outside the US (country code " + str(country) + "), where the owner holds no work "
+                "authorization, and the owner's policy does not record openness to employer visa sponsorship")
+    return "The role is in " + str(country) + ", where the owner holds no recorded work authorization"
 
 
 US_PERMANENT_RESIDENT_ACCEPTED = "US_PERMANENT_RESIDENT_ACCEPTED"
@@ -1471,6 +1542,7 @@ SPONSORSHIP_REFUSALS = frozenset({"NO_VISA_SPONSORSHIP", "OTHER_COUNTRY_AUTHORIZ
 # A stated requirement the owner's US permit satisfies on a US role (per the jurisdiction map).
 US_PERMIT_SATISFIES = frozenset({"US_WORK_AUTHORIZATION_REQUIRED", "NO_VISA_SPONSORSHIP", "SPONSORSHIP_AVAILABLE"})
 STATED_REQUIREMENT_NOT_MET = "STATED_REQUIREMENT_NOT_MET"
+OPTION_AUTHORIZATION_VALUES = JURISDICTION_STATUSES | {STATED_REQUIREMENT_NOT_MET}
 
 
 def stated_requirements(review):
@@ -2808,11 +2880,13 @@ BLOCKING_FACTS = tuple(field for field in REQUIRED_FACTS if field not in INFORMA
 # 2026-09-27: bumped with the owner's four-step application workflow. The host no longer
 # derives identity, official-destination, freshness, missing-fact or on-page-history holds from
 # a read, so a read recorded as inconclusive under the old contract says nothing about this one.
-READ_CONTRACT_REVISION = "inspect-contract-2026-09-27-four-step-workflow"
+# 2026-10-23: bumped with per-location authorization verdicts (J1 A), so a saved read without
+# them is not reused and every job is read again with one verdict per location option.
+READ_CONTRACT_REVISION = "inspect-contract-2026-10-23-per-location-authorization"
 # When READ_CONTRACT_REVISION last changed (at or before its install). Inspect claims made
 # before it were read under a superseded contract and do not count toward the per-scope
 # inspect cap (`application_connection.inspect_scope_start`). Bump both together.
-READ_CONTRACT_REVISION_AT = "2026-09-27T22:34:00+00:00"
+READ_CONTRACT_REVISION_AT = "2026-10-23T00:00:00+00:00"
 # Seven days, deliberately (owner, 2026-09-22, after trying two). This is how long an
 # inconclusive read suppresses the next one. Shortening it treats the symptom: the suppression
 # is keyed on the job's INPUT and cannot see that the reading code changed, so a shorter window
@@ -4116,6 +4190,9 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         answers = {key: value for key, value in answers.items() if key not in attachments}
         submission = {"job": job, "attempt_id": attempt_id, "idempotency_key": job["job_key"], "answers": answers, "resume": str(resume), "form_revision": review.get("form_revision"), "no_extra_answers": True,
                       "recorded_facts": recorded_authorization_facts(policy)}
+        if isinstance(review.get("eligible_location"), dict):
+            # The location option `assess` found the owner authorized for (owner, 2026-10-23, J1 A).
+            submission["eligible_location"] = review["eligible_location"]
         if email_application(review) is not None:
             submission["email_application"] = email_application(review)
         if attachments:

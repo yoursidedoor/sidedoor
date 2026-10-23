@@ -475,7 +475,7 @@ class DesktopAdapter:
             if payload.get("attachments"):
                 body["attachments"] = payload["attachments"]
             body.update({key: payload[key] for key in ("questions", "conditional_questions_deferred",
-                                                       "candidate_email_binding", "recorded_facts")
+                                                       "candidate_email_binding", "recorded_facts", "eligible_location")
                          if key in payload})
             body["resume_sha256"] = policy["resume"]["sha256"]
         return body

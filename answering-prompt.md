@@ -111,6 +111,12 @@ name places (not whether they are willing) is `ROLE_SPECIFIC_FREE_TEXT`: name th
 locations (`/review/facts/**`) that fall inside a region their `location_priority` allows, first the
 primary one, e.g. "Helsinki, Finland". Do not refuse it because no single city was pre-selected.
 
+`/review/eligible_location`, when present, is the role's location option the owner's recorded
+work authorization fits (the role was judged eligible for that place). It wins: a question that
+asks which location, office or country the owner is applying for or will work in is answered with
+that place first; the role's other places, when the field takes several, follow in the order
+their `location_priority` allows (as in the rule above). Without it, the rule above alone decides.
+
 Read every question's polarity yourself. "Are you unable to come into the office?" is
 answered `true` only if the owner is in fact unable to.
 
