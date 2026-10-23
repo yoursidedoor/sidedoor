@@ -608,6 +608,11 @@ def check_app_location():
     if problem:
         return _line(WARN, "App location", "Sidedoor runs from %s, so it can't start at login."
                      % login_item.scheduler_loop.program(), problem)
+    if login_item.scheduler_loop.frozen():
+        # The built app names the program every child and the login entry run (WB2: the build's smoke
+        # checks it is the built sidedoor.exe / Sidedoor binary itself).
+        return _line(OK, "App location", "Fine for start at login (Sidedoor runs from %s)."
+                     % login_item.scheduler_loop.program())
     return _line(OK, "App location", "Fine for start at login.")
 
 

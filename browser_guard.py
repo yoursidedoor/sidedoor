@@ -64,6 +64,8 @@ import sys
 import threading
 import time
 
+import portable
+
 
 OPERATIONS = ("linkedin", "webmail", "inspect", "investigate", "submit", "verify", "reconcile")
 # Every tool @playwright/mcp 0.0.83 lists; every one is approved in every operation (live: any cua_repl call).
@@ -525,7 +527,7 @@ class Proxy:
         # The browser server (and the Chrome it starts) gets this server's whole environment, which carries
         # the user's session variables codex was given (browser_runtime.session_environment).
         self.child = subprocess.Popen(child_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-                                      bufsize=1, encoding="utf-8", env=dict(os.environ))
+                                      bufsize=1, encoding="utf-8", env=dict(os.environ), **portable.no_window())
         # The arm and CAPTCHA tools are built from the same private files the self-spawned servers read.
         if arm_binding is None and claim:
             import application_browser

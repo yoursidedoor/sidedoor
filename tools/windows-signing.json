@@ -1,0 +1,18 @@
+{
+  "azure": {
+    "endpoint": "https://eus.codesigning.azure.net/",
+    "account": "sidedoorsigning",
+    "certificate_profile": "sidedoor",
+    "exclude_credentials": [
+      "EnvironmentCredential",
+      "WorkloadIdentityCredential",
+      "ManagedIdentityCredential",
+      "SharedTokenCacheCredential",
+      "VisualStudioCredential",
+      "VisualStudioCodeCredential",
+      "AzurePowerShellCredential",
+      "AzureDeveloperCliCredential",
+      "InteractiveBrowserCredential"
+    ]
+  }
+}

@@ -155,7 +155,8 @@ def _run(argv):
     try:
         # errors="replace": schtasks /Query /XML can print bytes that are not UTF-8 (a user name like
         # "Müller" in the console code page); undecodable bytes never raise here.
-        done = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=CALL_TIMEOUT)
+        done = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=CALL_TIMEOUT,
+                              **portable.no_window())
     except FileNotFoundError:
         return 127, "%s: not found" % argv[0]
     except subprocess.TimeoutExpired:

@@ -13,6 +13,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 import decision_transport
+import portable
 import provider_limits
 import user_profile
 
@@ -2113,7 +2114,7 @@ class CommandAdapter:
         if not isinstance(self.command, list) or not Path(self.command[0]).is_absolute():
             raise AdapterUnavailable("ATS_ADAPTER_REQUIRES_ABSOLUTE_EXECUTABLE")
         result = subprocess.run(self.command + [operation], input=json.dumps(payload), text=True,
-                                capture_output=True, timeout=120, check=True)
+                                capture_output=True, timeout=120, check=True, **portable.no_window())
         return json.loads(result.stdout)
 
 

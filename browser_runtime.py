@@ -111,7 +111,7 @@ def verify(config=None, run=None):
         problems.append("@playwright/mcp is %s, not %s" % (version, PLAYWRIGHT_MCP_VERSION))
     try:
         node = (run or subprocess.run)([str(node_path(config)), "--version"], capture_output=True, text=True,
-                                       timeout=30).stdout.strip()
+                                       timeout=30, **portable.no_window()).stdout.strip()
     except (OSError, ValueError) as error:
         node = "unrunnable (%s)" % type(error).__name__
     if node != "v" + NODE_VERSION:

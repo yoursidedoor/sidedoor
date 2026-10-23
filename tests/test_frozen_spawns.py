@@ -52,6 +52,9 @@ SITES = {
     ("login_item.py", "windowed_program"): 2,  # source branch only (pythonw.exe); frozen: program()
     ("reply_tools.py", "server_argv"): 1,      # source branch only; frozen: [program(), "reply-tools"]
     ("tools/build_macos.py", "nuitka_command"): 1,  # the build venv's python runs Nuitka (not shipped)
+    ("tools/build_windows.py", "nuitka_command"): 1,  # the same, on Windows (not shipped)
+    ("tools/build_windows.py", "zig_command"): 1,     # the build venv's ziglang makes sidedoor-cli.exe
+    ("tools/build_windows.py", "host_arch"): 2,       # reads the build python's PE header (not shipped)
     ("portable.py", "ensure_utf8_mode"): 1,    # Windows source runs only; frozen: returns before it (W1 a)
 }
 

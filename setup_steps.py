@@ -1204,7 +1204,7 @@ def codex_login_status(path, run=subprocess.run):
     """SIGNED_IN (ChatGPT), API_KEY, NOT_SIGNED_IN or UNAVAILABLE, from the local
     `codex login status` (step 6's check; its output is never stored or shown)."""
     try:
-        completed = run([path, "login", "status"], capture_output=True, text=True, timeout=30)
+        completed = run([path, "login", "status"], capture_output=True, text=True, timeout=30, **portable.no_window())
     except (OSError, subprocess.SubprocessError):
         return "UNAVAILABLE"
     output = (completed.stdout or "") + "\n" + (completed.stderr or "")

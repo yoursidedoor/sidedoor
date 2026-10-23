@@ -199,6 +199,13 @@ def worker_spawn_options(core=True):
     return {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_SUSPENDED}
 
 
+def no_window():
+    """Popen options for a console program (schtasks, codex, node) started from Sidedoor: on Windows no
+    console window of its own (CREATE_NO_WINDOW; the windowed sidedoor.exe has no console to share, so
+    each such child would otherwise flash one, WB3). Elsewhere: none."""
+    return {"creationflags": CREATE_NO_WINDOW} if WINDOWS else {}
+
+
 _jobs = {}
 _jobs_lock = threading.Lock()
 
