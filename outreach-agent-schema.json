@@ -1,24 +1,95 @@
 {
-  "type": "object", "additionalProperties": false,
-  "required": ["output_version", "source_sha256", "decision", "reason", "next_action", "findings", "conversation_id", "receipt_observation", "receipt_message", "route"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "output_version",
+    "source_sha256",
+    "decision",
+    "reason",
+    "next_action",
+    "findings",
+    "conversation_id",
+    "receipt_observation",
+    "receipt_message",
+    "route"
+  ],
   "properties": {
-    "output_version": {"type": "string", "const": "outreach-decision-v1"},
-    "source_sha256": {"type": "string"},
-    "decision": {"type": "string", "enum": ["READY", "BLOCKED", "UNKNOWN", "SENT", "NOT_SENT"]},
-    "reason": {"type": "string", "minLength": 1, "maxLength": 700},
-    "next_action": {"type": "string", "minLength": 1, "maxLength": 700},
-    "conversation_id": {"type": ["string", "null"]},
-    "route": {"type": "string", "enum": ["EXISTING_THREAD", "INVITATION", "UNKNOWN"]},
-    "receipt_observation": {"type": ["integer", "null"], "minimum": 0},
-    "receipt_message": {"type": ["integer", "null"], "minimum": 0},
+    "output_version": {
+      "type": "string",
+      "const": "outreach-decision-v1"
+    },
+    "source_sha256": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "READY",
+        "BLOCKED",
+        "UNKNOWN",
+        "SENT",
+        "NOT_SENT"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 700
+    },
+    "next_action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 700
+    },
+    "conversation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "route": {
+      "type": "string",
+      "enum": [
+        "EXISTING_THREAD",
+        "INVITATION"
+      ]
+    },
+    "receipt_observation": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "receipt_message": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
     "findings": {
-      "type": "object", "additionalProperties": false,
-      "required": ["prior_outreach", "has_reply", "negative_reply", "opt_out"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prior_outreach",
+        "has_reply",
+        "negative_reply",
+        "opt_out"
+      ],
       "properties": {
-        "prior_outreach": {"type": ["boolean", "null"]},
-        "has_reply": {"type": ["boolean", "null"]},
-        "negative_reply": {"type": ["boolean", "null"]},
-        "opt_out": {"type": ["boolean", "null"]}
+        "prior_outreach": {
+          "type": "boolean"
+        },
+        "has_reply": {
+          "type": "boolean"
+        },
+        "negative_reply": {
+          "type": "boolean"
+        },
+        "opt_out": {
+          "type": "boolean"
+        }
       }
     }
   }

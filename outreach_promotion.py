@@ -176,15 +176,32 @@ def fit_text(text, limit):
     Owner, 2026-09-23: "remove every single piece of code that can cause the outreach to fail
     after AI generation ... Remove it all. I dont care." An invitation one character over
     LinkedIn's 300 spent an attempt and sent nothing. The limit belongs to the provider, so the
-    text is cut to it at a word boundary and the note goes out.
+    text is cut to it and the note goes out.
+
+    Owner, 2026-10-23 ("Please fix this"): a cut mid-sentence went out ("Would the first few months
+    focus more on agents or", Lambert Nguyen). The composer is now asked to shorten an over-long
+    note itself (`outreach_agent._validate_composition`); what still needs a cut here ends at the
+    last complete sentence that fits, and only a text with no sentence end inside the limit is cut
+    at a word boundary.
     """
     if not isinstance(text, str):
         return text
     text = " ".join(text.split())
     if len(text) <= limit:
         return text
+    cut = text[:limit + 1]
+    ends = [match.end() for match in SENTENCE_END.finditer(cut) if match.end() <= limit]
+    # A sentence end that keeps less than half the note ("Hi Lambert.") is no better than a word cut,
+    # which the send judge then hands back to the writer as unfinished.
+    if ends and ends[-1] >= limit // 2:
+        return cut[:ends[-1]].rstrip()
     cut = text[:limit]
     return (cut.rsplit(" ", 1)[0] if " " in cut[max(0, limit - 30):] else cut).rstrip(" ,;:-")
+
+
+# A sentence ends at ".", "?" or "!" (closing quotes or brackets after it included) followed by the end
+# of the text or a space and a capital letter or digit, so "e.g. ranking" or "Microsoft. on" is not one.
+SENTENCE_END = re.compile(r"[.?!][\"')\]\u2019\u201d]*(?=$|\s+[A-Z0-9\"'\u201c])")
 
 
 def text_gates(invitation, first_message):

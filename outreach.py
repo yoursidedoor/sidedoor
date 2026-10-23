@@ -417,7 +417,7 @@ def final_campaign_guard(database, config, client, campaign_id, now=None):
     # provider_snapshot_complete is no longer required (owner, 2026-09-30): an incomplete HeyReach
     # read is not evidence of prior contact. What the read DID show still refuses below.
     if (proof.get("identity") not in engagement.identity_keys(database, claim["identity"])
-            or proof.get("sender_id") != config["sender_id"] or proof.get("agent_decision") != "READY"
+            or proof.get("sender_id") != config["sender_id"] or proof.get("agent_decision") not in PROCEED_DECISIONS
             or proof.get("route") != "INVITATION"
             or proof.get("capability_gates") or not proof.get("evidence")
             or not _fresh(proof.get("checked_at"), proof_clock, config.get("outreach_history_max_age_seconds", 3600))
@@ -807,6 +807,13 @@ def _claim_read(database, action_id, phase, now):
             token=?,lease_until=?,next_at=NULL,updated_at=? WHERE action_id=? AND phase=?""",
             (token, (now + dt.timedelta(seconds=600 if phase == "INSPECTION" else 300)).isoformat(), now.isoformat(), action_id, phase))
         return token
+
+
+# Owner, 2026-10-23: "unknown should never block". A send judge's UNKNOWN (a fact it could not settle)
+# goes ahead like READY; only BLOCKED holds a send. Every Python guard still applies (prior contact
+# from our records, opt-out, stops, closure, exclusions, duplicate claims). Reconciliation's UNKNOWN
+# (whether an attempt was sent) is a different question and still never allows a resend.
+PROCEED_DECISIONS = frozenset({"READY", "UNKNOWN"})
 
 
 def _finish_read(database, action_id, phase, token, now, outcome, error=None, retry_at=None):
@@ -1417,7 +1424,7 @@ def _reply_gates(database, config, action, proof, now):
                             ("provider_restriction_observed", False)):
         if proof.get(field) is not expected:
             gates.append(field.upper() + "_UNVERIFIED")
-    if proof.get("agent_decision") != "READY":
+    if proof.get("agent_decision") not in PROCEED_DECISIONS:
         gates.append("AGENT_DECISION_NOT_READY")
     if proof.get("provider_snapshot_complete") is not True:
         gates.append("PROVIDER_SNAPSHOT_INCOMPLETE")
@@ -1570,7 +1577,7 @@ def action_gates(database, config, action, proof, now):
     import outreach_campaign
     gates.extend(outreach_campaign.reservation_gates(database, identity, action["action_id"], continuation=continuation))
     gates.extend(_immutable_claim_gates(database, identity, action["action_id"], continuation=continuation, reply=reply))
-    if "agent_decision" in proof and proof["agent_decision"] != "READY":
+    if "agent_decision" in proof and proof["agent_decision"] not in PROCEED_DECISIONS:
         gates.append("AGENT_DECISION_NOT_READY")
     # An incomplete HeyReach snapshot no longer holds an invitation (owner, 2026-09-30: "assuming
     # that the person hasnt been contacted because a snapshot was incomplete is kind of dumb.
@@ -1663,7 +1670,7 @@ def action_gates(database, config, action, proof, now):
     if contextual_followup:
         import followup_execution
         gates.extend(followup_execution.proof_gates(database, config, action, proof, now))
-        if proof.get("agent_decision") != "READY" or proof.get("provider_snapshot_complete") is not True:
+        if proof.get("agent_decision") not in PROCEED_DECISIONS or proof.get("provider_snapshot_complete") is not True:
             gates.append("FOLLOWUP_FRESH_SEND_JUDGMENT_REQUIRED")
     if database.execute("SELECT 1 FROM outreach_actions WHERE identity IN (" + placeholders + ") AND action_id<>? AND state IN ('CLAIMED','DISPATCHING','REQUEST_STARTED','ACKNOWLEDGED_UNCONFIRMED','UNCERTAIN_NO_RETRY','WRITE_RETRY_WAIT')",
                         (*identities, action["action_id"])).fetchone():
@@ -2119,8 +2126,7 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
                 invalid_proof = any(type(proof.get(field)) is not bool
                                     and not (agent_proof and proof.get(field) is None)
                                     for field in required_booleans)
-                unresolved_proof = agent_proof and (proof["agent_decision"] == "UNKNOWN"
-                                                    or any(proof.get(field) is None for field in required_booleans))
+                unresolved_proof = agent_proof and any(proof.get(field) is None for field in required_booleans)
                 if "provider_snapshot_complete" in proof and proof["provider_snapshot_complete"] is not True:
                     unresolved_proof = True
                 if invalid_proof:

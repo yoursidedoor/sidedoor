@@ -863,7 +863,7 @@ class FollowupBase(Base):
         return json.dumps({"output_version": outreach_agent.VERSION, "source_sha256": packet["source_sha256"],
                            "decision": "READY", "reason": "The follow-up fits the thread.", "next_action": "Send it.",
                            "conversation_id": packet["action"]["conversation_id"], "receipt_observation": None,
-                           "receipt_message": None,
+                           "receipt_message": None, "route": "EXISTING_THREAD",
                            "findings": {"prior_outreach": True, "has_reply": False, "negative_reply": False,
                                         "opt_out": False}})
 
@@ -1784,7 +1784,7 @@ class ReplyBase(FollowupBase):
             return json.dumps({"output_version": outreach_agent.VERSION, "source_sha256": packet["source_sha256"],
                                "decision": "READY", "reason": "The reply fits the thread.", "next_action": "Send it.",
                                "conversation_id": packet["action"]["conversation_id"], "receipt_observation": None,
-                               "receipt_message": None,
+                               "receipt_message": None, "route": "EXISTING_THREAD",
                                "findings": {"prior_outreach": True, "has_reply": True, "negative_reply": False,
                                             "opt_out": False}})
         return super().model(config, prompt, schema, timeout)

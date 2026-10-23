@@ -51,7 +51,7 @@ For an INITIAL candidate, explicitly return route=INVITATION when the local reco
 pending_invitation, has_reply, negative_reply and opt_out all false), no supplemental provider
 read shows prior contact, and the exact supplied invitation supports a cold connection request.
 Use route=EXISTING_THREAD only for an actually observed matching thread with a
-supported appropriate message route, otherwise UNKNOWN. An absent conversation
+supported appropriate message route, otherwise INVITATION. An absent conversation
 does not block the invitation route. A providerLeadNotFound observation means
 only NOT_PRESENT_WITHIN_PROVIDER; no existing HeyReach lead ID is required for
 INVITATION. Campaign membership requires investigation of actual send status,
@@ -60,6 +60,14 @@ prior outreach. Check action.invitation for grounded wording
 and the 300-character limit. READY on INVITATION authorizes only handoff to the
 existing guarded single-contact campaign preparer, never SendMessage or a guessed
 campaign identifier. Existing account restrictions still apply.
+
+Read the exact text that would be sent (invitation note, message, follow-up or
+reply) as its recipient would. If it reads unfinished (it ends mid-sentence, a
+question is cut off, a word or name dangles at the end), decide BLOCKED with a
+reason starting "TEXT_UNFINISHED:" that quotes the unfinished ending, and a
+next_action telling the writer how to finish it within the character limit.
+This hands the text back to its writer for another turn; it is not a refusal of
+the contact.
 
 INSPECTION: decide READY, BLOCKED or UNKNOWN. Interpret conversation purpose,
 prior outreach, actual replies, negative responses and opt-outs. An empty provider
@@ -166,7 +174,9 @@ authenticated terminal rejection proving the exact attempt did not and cannot
 later execute; the standard inbox readers may not expose that evidence. Do not
 invent message IDs, timestamps or API capabilities. This judgment never retries.
 
-Use null for unknown findings and unused receipt indices. Explain the evidence
+Always answer: route is INVITATION or EXISTING_THREAD, and every finding is true or
+false, never null (true only on evidence of it, otherwise false). Use null only for
+unused receipt indices. Explain the evidence
 and uncertainty in reason. next_action must name a bounded supported investigation
 or the specific missing access/fact. Investigate before asking the user; do not ask
 routine sending permission. Do not create a draft, send anything or manufacture a

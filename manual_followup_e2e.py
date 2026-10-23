@@ -256,7 +256,7 @@ class ProviderFixture(Fixture):
             "decision": decision, "reason": "Synthetic independent contextual assessment of the exact follow-up.",
             "next_action": "Use the existing guard or independently reconcile this attempt.",
             "conversation_id": packet["action"]["conversation_id"],
-            "receipt_observation": observation_index, "receipt_message": message_index,
+            "receipt_observation": observation_index, "receipt_message": message_index, "route": "EXISTING_THREAD",
             "findings": {"prior_outreach": True, "has_reply": False, "negative_reply": False, "opt_out": False}})
 
     def run(self, dispatch=False, candidates=None):

@@ -81,7 +81,7 @@ class ResumeWorkerTests(unittest.TestCase):
                                "decision": "READY", "reason": "Synthetic evidence-bound inspection",
                                "next_action": "Synthetic review only", "conversation_id": "selected",
                                "findings": dict.fromkeys(("prior_outreach", "has_reply", "negative_reply", "opt_out"), False),
-                               "receipt_observation": None, "receipt_message": None})
+                               "receipt_observation": None, "receipt_message": None, "route": "EXISTING_THREAD"})
 
         adapter = reply_execution.Adapter(ROOT, self.worker.database, self.worker.config, Mock(), execute=execute)
         handoff = {"classification": {"reply_proposal": {"text": action["message"]}}}

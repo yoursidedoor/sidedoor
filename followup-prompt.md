@@ -53,6 +53,10 @@ Acceptance cannot reset prior invitation-note outreach. Any reply, negative mess
 opt-out, closure, conflict, changed thread, uncertain prior send or unnecessary
 pursuit prevents READY. Preserve null quotation/forwarding metadata; assess actual
 speaker context rather than inventing flags. Every claim must be grounded.
+If the proposed message reads unfinished (it ends mid-sentence, a question is cut
+off, a word or name dangles at the end), decide BLOCKED with a reason starting
+"TEXT_UNFINISHED:" that quotes the unfinished ending, and a next_action telling the
+writer how to finish it; this hands it back for another writing turn.
 The supplied historical_context retains original team/role timestamps and age;
 fresh account/thread identity does not refresh those facts. Do not demand cold-contact
 team freshness for a grounded existing-conversation follow-up, and never approve
@@ -64,7 +68,8 @@ quota is unknown and enforced by the existing provider, not fabricated or assume
 unlimited. No purchase, new account, alternate route or changed wording. Select only
 the authenticated action conversation. Do not demand new-contact all-time invitation
 clearance for this confirmed existing outreach lifecycle. Return findings from the
-actual current sources; unknown findings remain null.
+actual current sources; answer every finding true or false (true only on evidence
+of it), never null, and route EXISTING_THREAD.
 
 RECONCILIATION: interpret only this exact immutable claimed attempt. SENT requires a
 fresh independently read outbound message with exact text/account/thread and timestamp

@@ -42,6 +42,25 @@ class NuitkaCommandTests(unittest.TestCase):
         self.assertFalse(any(item.startswith("--macos") or item == "arch" for item in command))
         self.assertEqual(command[-1], str(build_windows.ENTRY))
 
+    def test_each_build_gets_an_empty_zig_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            stale = Path(folder) / build_windows.ZIG_LOCAL_CACHE / "h" / "old.txt"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("old")
+            environment = build_windows.nuitka_environment(Path(folder))
+            self.assertEqual(environment["ZIG_LOCAL_CACHE_DIR"], str(Path(folder) / build_windows.ZIG_LOCAL_CACHE))
+            self.assertEqual(list(Path(environment["ZIG_LOCAL_CACHE_DIR"]).iterdir()), [])
+
+    def test_a_stale_constants_blob_fails_the_build(self):
+        with tempfile.TemporaryDirectory() as folder:
+            exe, blob = Path(folder) / "sidedoor.exe", Path(folder) / "__constant.bin"
+            blob.write_bytes(b"constants of this build")
+            exe.write_bytes(b"MZ...constants of an older build...")
+            with self.assertRaises(SystemExit):
+                build_windows.check_constants(exe, blob)
+            exe.write_bytes(b"MZ...constants of this build...")
+            build_windows.check_constants(exe, blob)
+
     def test_msvc_and_jobs(self):
         command = self.command(compiler="msvc", jobs=4)
         self.assertNotIn("--zig", command)

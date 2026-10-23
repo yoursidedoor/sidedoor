@@ -137,7 +137,7 @@ def reservation_gates(database, identity, action_id=None, campaign_id=None, *, c
 
 def _guard(database, config, action, proof, now, *, before_list=False):
     _require(action.get("purpose") == "PREPARE_CAMPAIGN", "CAMPAIGN_PURPOSE_REQUIRED")
-    _require(proof.get("agent_decision") == "READY" and proof.get("route") == "INVITATION",
+    _require(proof.get("agent_decision") in outreach.PROCEED_DECISIONS and proof.get("route") == "INVITATION",
              "AI_INVITATION_DECISION_REQUIRED")
     # HISTORY_CAPABILITY_GATED deleted (owner, 2026-09-23). It refused on ANY capability gate
     # recorded by the history collector, including the coverage gate that no longer blocks at

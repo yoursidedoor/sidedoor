@@ -153,10 +153,12 @@ def _validate(raw, packet):
     output = json.loads(raw, object_pairs_hook=reply_worker._unique_object)
     fields = {"output_version", "source_sha256", "decision", "reason", "next_action", "findings",
               "conversation_id", "receipt_observation", "receipt_message"}
-    if not isinstance(output, dict) or set(output) not in (fields, fields | {"route"}) or output["output_version"] != VERSION or output["source_sha256"] != digest(packet):
+    if not isinstance(output, dict) or set(output) != fields | {"route"} or output["output_version"] != VERSION or output["source_sha256"] != digest(packet):
         raise ValueError("OUTREACH_DECISION_BINDING_INVALID")
-    if "route" in output and output["route"] not in {"EXISTING_THREAD", "INVITATION", "UNKNOWN"}:
-        raise ValueError("OUTREACH_ROUTE_INVALID")
+    # Owner, 2026-10-23: "a judge must give an answer. leaving things blank introduces ambiguity."
+    # The route and every finding are answered; a blank goes back to the judge as a repair turn.
+    if output["route"] not in {"EXISTING_THREAD", "INVITATION"}:
+        raise ValueError("OUTREACH_ROUTE_MUST_BE_ANSWERED: route is INVITATION or EXISTING_THREAD")
     if output["decision"] not in {"READY", "BLOCKED", "UNKNOWN", "SENT", "NOT_SENT"}:
         raise ValueError("OUTREACH_DECISION_INVALID")
     for field in ("reason", "next_action"):
@@ -165,8 +167,8 @@ def _validate(raw, packet):
     findings = output["findings"]
     if not isinstance(findings, dict) or set(findings) != {"prior_outreach", "has_reply", "negative_reply", "opt_out"}:
         raise ValueError("OUTREACH_FINDINGS_INVALID")
-    if any(value is not None and type(value) is not bool for value in findings.values()):
-        raise ValueError("OUTREACH_UNKNOWN_FACTS_MUST_REMAIN_UNKNOWN")
+    if any(type(value) is not bool for value in findings.values()):
+        raise ValueError("OUTREACH_FINDINGS_MUST_BE_ANSWERED: each finding is true or false, never null")
     if output["conversation_id"] is not None and (not isinstance(output["conversation_id"], str) or not output["conversation_id"]):
         raise ValueError("OUTREACH_THREAD_INVALID")
     for field in ("receipt_observation", "receipt_message"):
@@ -554,7 +556,7 @@ class Adapter(outreach.HeyReachActionAdapter):
                  "company_count_evidence": direct.get("company_count_evidence"),
                  "followups_sent": direct.get("followups_sent"), "initial_message_sent": direct.get("initial_message_sent"),
                  "agent_decision": decision["decision"], "next_action": decision["next_action"], **findings}
-        proof["route"] = decision.get("route", "EXISTING_THREAD" if thread else "UNKNOWN")
+        proof["route"] = decision["route"]
         provider_gates = []
         if action.get("purpose") in {"INITIAL", "FIRST_MESSAGE", "PREPARE_CAMPAIGN", "INVITE"}:
             capability = observation.get("operation_capabilities", {}).get(proof["route"], {})
@@ -963,14 +965,21 @@ def _output_with_repair_turns(execute, config, template, schema, timeout, packet
     `repair_feedback`, which changes digest(packet), so the prompt is rebuilt each turn and the
     model must echo the new source_sha256 - the binding stays exact.
     """
-    feedback, seen = [], set()
+    feedback, seen, fallback = [], set(), None
     while True:
         try:
             return validate(raw, packet), packet
         except (ValueError, KeyError, TypeError) as error:
+            # Only length is accepted when the round cannot go on (TooLong); every other error still fails.
+            # The first over-long but otherwise valid note is kept for the whole round, so a later
+            # shortening turn that comes back malformed never costs the note (review, 2026-10-23).
+            if fallback is None and isinstance(error, TooLong):
+                fallback = (error.output, packet)
             text = raw if isinstance(raw, str) else str(raw)
             fingerprint = reply_worker.sha(text)
             if fingerprint in seen:
+                if fallback:
+                    return fallback
                 raise
             seen.add(fingerprint)
             feedback = feedback + [{"previous_output": text[:4000],
@@ -980,11 +989,33 @@ def _output_with_repair_turns(execute, config, template, schema, timeout, packet
             candidate = dict(packet, repair_feedback=feedback)
             prompt = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + encoded({"source_sha256": digest(candidate), **candidate})
             if len(prompt.encode()) > prompt_limit(config):
+                if fallback:
+                    return fallback
                 raise
             if reserve is not None and not reserve(len(feedback)):
+                if fallback:
+                    return fallback
                 raise
             packet = candidate
-            raw = execute(config, prompt, schema, timeout)
+            try:
+                raw = execute(config, prompt, schema, timeout)
+            except Exception:
+                if fallback:   # a failed shortening call keeps the note it was asked to shorten
+                    return fallback
+                raise
+
+
+LENGTH_REPAIR_TURNS = 2
+
+
+class TooLong(ValueError):
+    """A composed note over the provider's limit: worth a shortening turn, never a lost attempt. When the
+    repair round cannot go on (the same text again, no compute, prompt too large) the note is used as it
+    is and cut at a sentence end."""
+
+    def __init__(self, output, message):
+        super().__init__(message)
+        self.output = output
 
 
 def _validate_composition(raw, packet):
@@ -996,6 +1027,19 @@ def _validate_composition(raw, packet):
         raise ValueError("OUTREACH_COMPOSITION_BINDING_INVALID")
     if output["decision"] not in {"COMPOSED", "INSUFFICIENT_FACTS"}:
         raise ValueError("OUTREACH_COMPOSITION_DECISION_INVALID")
+    # Owner, 2026-10-23: a note cut to fit went out mid-sentence. An over-long note goes back to the
+    # composer to shorten (at most LENGTH_REPAIR_TURNS turns); after that it is accepted and
+    # `outreach_promotion.fit_text` cuts it at a sentence end, so no attempt is lost to length.
+    if len(packet.get("repair_feedback") or ()) < LENGTH_REPAIR_TURNS:
+        for field, limit in (("invitation", outreach_promotion.INVITATION_LIMIT),
+                             ("first_message", outreach_promotion.FIRST_MESSAGE_LIMIT)):
+            text = output.get(field)
+            if isinstance(text, str):
+                size = len(" ".join(outreach_promotion.without_dashes(text).split()))
+                if size > limit:
+                    raise TooLong(output, "OUTREACH_COMPOSITION_TOO_LONG: %s is %d characters; the limit is %d. Rewrite it "
+                                     "at most %d characters, as complete sentences, keeping the question."
+                                     % (field, size, limit, limit))
     return output
 
 
@@ -1047,7 +1091,8 @@ def _judge_text_rejection(proof):
     feedback for one repair turn, in the same shape answering_agent uses, or None when the
     rejection was not about the text and recomposing could not possibly help.
     """
-    if not isinstance(proof, dict) or proof.get("agent_decision") not in {"BLOCKED", "UNKNOWN"}:
+    # Only BLOCKED objects to the text; UNKNOWN goes ahead (owner, 2026-10-23).
+    if not isinstance(proof, dict) or proof.get("agent_decision") != "BLOCKED":
         return None
     # No history revalidation here (owner, 2026-09-23: "Theres no need for us to revalidate.
     # we've done this earlier in the pipeline."). Rewriting text cannot widen who may be
@@ -1226,7 +1271,8 @@ def compose_draft(root, database, config, row, execute=None, now=None, *, repair
         raise
     observations = composition_observations(database, output, packet, sources)
     # Correct the text rather than refuse it (owner, 2026-09-23): strip the dashes the owner's
-    # style rule bars, and trim to the provider's own limits at a word boundary.
+    # style rule bars, and trim to the provider's own limits at a sentence end (2026-10-23; the
+    # composer was already asked to shorten it, `_validate_composition`).
     limits = {"invitation": outreach_promotion.INVITATION_LIMIT,
               "first_message": outreach_promotion.FIRST_MESSAGE_LIMIT}
     for field in ("invitation", "first_message", "question"):

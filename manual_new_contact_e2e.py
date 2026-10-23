@@ -113,13 +113,14 @@ class Fixture:
         rooms = [(index, entry) for index, entry in enumerate(packet["observation"]["observations"])
                  if entry["operation"] == "get_chatroom" and entry["raw"].get("messages")]
         sent = packet["phase"] == "RECONCILIATION" and bool(rooms)
-        findings = {field: packet["direct_history"].get(field) for field in
+        findings = {field: packet["direct_history"].get(field) is True for field in
                     ("prior_outreach", "has_reply", "negative_reply", "opt_out")}
         result = {"output_version": outreach_agent.VERSION, "source_sha256": source_hash,
             "decision": "SENT" if sent else "BLOCKED" if findings["prior_outreach"] else "READY",
             "reason": "Synthetic source-bound judgment", "next_action": "Use the shared guard",
             "findings": findings, "conversation_id": "mock-thread",
-            "receipt_observation": rooms[0][0] if sent else None, "receipt_message": 0 if sent else None}
+            "receipt_observation": rooms[0][0] if sent else None, "receipt_message": 0 if sent else None,
+            "route": "EXISTING_THREAD"}
         if self.case == "cold":
             result.update(route="INVITATION", conversation_id=None)
         return json.dumps(result)

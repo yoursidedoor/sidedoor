@@ -94,7 +94,7 @@ class Base(unittest.TestCase):
         return json.dumps({"output_version": outreach_agent.VERSION, "source_sha256": packet["source_sha256"],
                            "decision": "READY", "reason": "The follow-up fits the thread.", "next_action": "Send it.",
                            "conversation_id": packet["action"]["conversation_id"], "receipt_observation": None,
-                           "receipt_message": None,
+                           "receipt_message": None, "route": "EXISTING_THREAD",
                            "findings": {"prior_outreach": True, "has_reply": False, "negative_reply": False, "opt_out": False}})
 
     def run_cycle(self):

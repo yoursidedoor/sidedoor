@@ -233,6 +233,32 @@ def nuitka_command(output, ico, jobs=None, compiler="zig", python=None):
     return command + [str(ENTRY)]
 
 
+# A fresh Zig object cache for every build (2026-10-23). Nuitka's constants file
+# (__constants_data___constant.c) is the same text in every build and pulls the build's constants blob in
+# with C23 #embed; Zig's local cache keyed it on that unchanged text and the first build's blob path, so
+# every later build linked the first build's blob: v0.0.7 reported "Sidedoor 0.0.6" (its strings came from
+# an older build) and the 0.0.8 build crashed at start with an access violation (a constant it needed was
+# missing). Nuitka keeps a ZIG_LOCAL_CACHE_DIR that is already set; the shared global cache can stay.
+ZIG_LOCAL_CACHE = "zig-local-cache"
+
+
+def nuitka_environment(output):
+    """The environment Nuitka compiles in: this one, with Zig's local cache in an empty folder of `output`."""
+    cache = Path(output) / ZIG_LOCAL_CACHE
+    if cache.exists():
+        shutil.rmtree(cache)
+    cache.mkdir(parents=True)
+    return dict(os.environ, ZIG_LOCAL_CACHE_DIR=str(cache))
+
+
+def check_constants(exe, blob):
+    """The built program must carry this build's own constants blob, byte for byte (see ZIG_LOCAL_CACHE)."""
+    data, constants = Path(exe).read_bytes(), Path(blob).read_bytes()
+    if not constants or constants not in data:
+        raise SystemExit("%s does not contain this build's constants (%s): a stale compiler cache was linked"
+                         % (exe, blob))
+
+
 def copy_runtime(runtime, node, target, arch):
     """The browser runtime into the app: node.exe and LICENSE from `node` (a win-<arch> Node folder),
     node_modules from `runtime` (an `npm ci` of browser-runtime/package-lock.json, pure JavaScript),
@@ -682,7 +708,9 @@ def main(argv=None):
         elif old.exists():
             old.unlink()
     ico = make_ico(ICON, output)
-    subprocess.run(nuitka_command(output, ico, args.jobs, args.compiler), check=True, cwd=REPO)
+    subprocess.run(nuitka_command(output, ico, args.jobs, args.compiler), check=True, cwd=REPO,
+                   env=nuitka_environment(output))
+    check_constants(built / EXE, output / (ENTRY.stem + ".build") / "blobs" / "__constant.bin")
     built.rename(app)
     build_cli(app, arch)
     copy_runtime(args.runtime.expanduser().resolve(), args.node.expanduser().resolve(),

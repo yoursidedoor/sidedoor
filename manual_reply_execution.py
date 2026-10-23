@@ -276,7 +276,8 @@ class Fixture:
                   "findings": {"prior_outreach": False, "has_reply": True,
                                "negative_reply": False, "opt_out": False},
                   "conversation_id": action["conversation_id"],
-                  "receipt_observation": receipt_observation, "receipt_message": receipt_message}
+                  "receipt_observation": receipt_observation, "receipt_message": receipt_message,
+                  "route": "EXISTING_THREAD"}
         if packet["phase"] == "INSPECTION" and self.after_inspection:
             callback, self.after_inspection = self.after_inspection, None
             callback()

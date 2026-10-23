@@ -575,8 +575,19 @@ class GuardContractTests(unittest.TestCase):
         # Reading again never sends.
         self.transport.assert_not_called()
 
-    def test_agent_unknown_with_passing_booleans_never_sends_or_resets_budget(self):
-        self.assert_unresolved_backoff({"agent_decision": "UNKNOWN"}, "AGENT_DECISION_NOT_READY")
+    def test_agent_unknown_never_blocks(self):
+        # Owner, 2026-10-23: "unknown should never block" ("same applies for reply and followups").
+        self.proof.update(agent_decision="UNKNOWN")
+        self.queue()
+        result = self.cycle()
+        self.assertNotIn("AGENT_DECISION_NOT_READY", json.dumps(result))
+        self.assertNotIn("SOURCE_EVIDENCE_UNRESOLVED", json.dumps(result))
+
+    def test_agent_blocked_still_holds(self):
+        self.proof.update(agent_decision="BLOCKED")
+        self.queue()
+        self.assertIn("AGENT_DECISION_NOT_READY", json.dumps(self.cycle()))
+        self.transport.assert_not_called()
 
     def test_agent_nullable_boolean_no_longer_blocks_when_decision_ready(self):
         """Owner, 2026-09-23: "A 'dont know' also shouldnt be evidence to block an outreach."
