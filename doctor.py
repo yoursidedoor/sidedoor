@@ -309,10 +309,10 @@ def check_credentials(home):
 def check_codex(home, run=None, config=None, online=False, transport=None):
     import subprocess
     state = setup_steps.load_state(home)
-    path = next((candidate for candidate in setup_steps.codex_candidates(state.get("codex_path"))
-                 if setup_steps._usable(candidate)), None)
+    path = setup_steps.find_codex(state.get("codex_path"))
     if not path:
         return _line(FAIL, "Codex", "Codex is not installed.", "Install Codex (see Settings > Connections).")
+    setup_steps.extend_path(path)   # an npm Codex needs node's folder
     import openai_auth
     if openai_auth.api_key_mode(home):
         return check_openai_key(home, config, online, transport)

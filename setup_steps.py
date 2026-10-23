@@ -195,7 +195,9 @@ def _rederived_steps(home, root, run=subprocess.run):
         clean, errors = validate_profile(form, {})
         if not errors:
             steps["profile"] = {"status": "done", "message": "Saved. " + REDERIVED_MESSAGE, "form": clean}
-    codex = next((candidate for candidate in codex_candidates() if _usable(candidate)), None)
+    codex = find_codex()
+    if codex:
+        extend_path(codex)   # an npm Codex needs node's folder, which a Dock-opened app's PATH lacks
     if codex and codex_login_status(codex, run) == "SIGNED_IN":
         steps["codex"] = {"status": "done", "message": "Codex is installed and signed in. " + REDERIVED_MESSAGE}
         extra["codex_path"] = codex
@@ -1149,16 +1151,105 @@ def license_chip(home=None):
 
 # --- Step 6: Codex and ChatGPT ---------------------------------------------------------------------
 
+def _windows_user_path():
+    """The PATH Windows keeps for this user and the machine, read fresh from the registry: an app opened
+    before Codex was installed still has the old PATH in its environment."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    folders = []
+    for root, key in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                      (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(root, key) as opened:
+                value = winreg.QueryValueEx(opened, "Path")[0]
+        except OSError:
+            continue
+        folders += [os.path.expandvars(part) for part in str(value).split(os.pathsep) if part.strip()]
+    return folders
+
+
+def install_folders():
+    """Folders where the usual installers put Codex, searched besides the PATH Sidedoor started with. An app
+    opened from the Dock, Finder or the Start menu does not get the PATH a terminal has (macOS gives it
+    only /usr/bin:/bin:/usr/sbin:/sbin), so Homebrew's and npm's folders are listed here."""
+    home = Path.home()
+    if sys.platform.startswith("win"):
+        local = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        roaming = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
+        folders = [roaming / "npm", local / "Microsoft" / "WinGet" / "Links", home / "scoop" / "shims",
+                   local / "pnpm", home / ".volta" / "bin", home / ".local" / "bin"]
+        folders += [Path(os.environ.get("ProgramFiles") or r"C:\Program Files") / "nodejs"]
+        return [str(folder) for folder in folders] + _windows_user_path()
+    folders = [home / ".local" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin"),
+               home / ".npm-global" / "bin", home / ".volta" / "bin", home / ".bun" / "bin",
+               home / "Library" / "pnpm", home / ".local" / "share" / "pnpm"]
+    # nvm keeps one folder per Node version; the newest first.
+    folders += sorted((home / ".nvm" / "versions" / "node").glob("*/bin"), reverse=True)
+    return [str(folder) for folder in folders]
+
+
 def codex_candidates(saved=None, search_path=None):
-    """Where Codex may be: the saved path, the PATH the dashboard started with, ~/.local/bin."""
+    """Where Codex may be: the saved path, the PATH the dashboard started with, then the usual install
+    folders (`install_folders`: Homebrew, npm, winget, Scoop, ~/.local/bin)."""
     names = ("codex.exe", "codex.cmd", "codex") if sys.platform.startswith("win") else ("codex",)
     found = [saved] if saved else []
+    folders = install_folders()
     for name in names:
         on_path = shutil.which(name, path=search_path)
         if on_path:
             found.append(on_path)
-        found.append(str(Path.home() / ".local" / "bin" / name))
+        found += [str(Path(folder) / name) for folder in folders]
     return list(dict.fromkeys(found))
+
+
+def find_codex(saved=None, search_path=None):
+    """The first Codex that can run, or None."""
+    return next((candidate for candidate in codex_candidates(saved, search_path) if _usable(candidate)), None)
+
+
+def with_codex(config, home=None):
+    """`config` with the Codex setup found (`codex_path`) as `codex`, and that Codex's folder and its node's
+    on this process's PATH, so every job starts the Codex the user installed, wherever it is. config.json is
+    bundled and names /opt/homebrew/bin/codex; it is kept only when nothing was saved and it can run."""
+    if not isinstance(config, dict):
+        return config
+    try:
+        saved = load_state(home).get("codex_path")
+    except Exception:
+        saved = None
+    if "codex" not in config:
+        return config
+    path = saved if _usable(saved) else (config["codex"] if _usable(config["codex"]) else find_codex())
+    if not path:
+        return config
+    extend_path(path)
+    return dict(config, codex=path)
+
+
+def use_saved_codex(home=None):
+    """At dashboard start: the saved Codex's folders on this process's PATH, so every Codex the dashboard
+    starts (the email check, Settings) runs from an app opened from the Dock or Start menu. Never raises."""
+    try:
+        path = load_state(home).get("codex_path")
+        if _usable(path):
+            extend_path(path)
+    except Exception as error:
+        LOG.warning("saved Codex PATH skipped: %s", type(error).__name__)
+
+
+def extend_path(codex_path):
+    """Put the Codex's folder, its real folder (after symlinks) and its node's in front of this process's
+    PATH; the jobs it starts inherit it. An npm Codex is a node script that fails with "env: node: No such
+    file or directory" when node's folder is missing (the login entry's PATH does the same, L1)."""
+    current = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    codex = Path(codex_path)
+    wanted = [str(codex.parent), str(Path(os.path.realpath(codex)).parent)]
+    node = shutil.which("node", path=os.pathsep.join(wanted + current + install_folders()))
+    if node:
+        wanted.append(str(Path(node).parent))
+    os.environ["PATH"] = os.pathsep.join(dict.fromkeys(wanted + current))
 
 
 def _usable(path):
@@ -1169,12 +1260,12 @@ def check_codex(home=None, run=subprocess.run, search_path=None):
     """Is Codex installed and signed in with ChatGPT? Saves the full path it found (step 6).
     Reads `codex login status`; its output is never stored or shown (it may name an API key)."""
     state = load_state(home)
-    path = next((candidate for candidate in codex_candidates(state.get("codex_path"), search_path)
-                 if _usable(candidate)), None)
+    path = find_codex(state.get("codex_path"), search_path)
     if not path:
         update_state(lambda value: value.pop("codex_path", None), home)
         return record(home, "codex", "failed", "Codex is not installed.")
     update_state(lambda value: value.update(codex_path=path), home)
+    extend_path(path)   # `codex login status` below may need node's folder (an npm Codex)
     refresh_login_entry(home)  # the entry's PATH follows the Codex found now (E5.T2)
     if openai_auth.api_key_mode(home):
         # E0.T8: signed in with the user's OpenAI API key; Codex's own login is not used.
@@ -1436,6 +1527,7 @@ def save_sender(home, account_id, own_profile):
 def with_sender(config, home=None):
     """`config` with the saved sender laid over `sender_id` / `sender_profile` on a Unipile install
     (`linkedin_provider` "unipile"); unchanged otherwise or while none is saved."""
+    config = with_codex(config, home)   # every job's config reader comes through here (orchestrator)
     if not isinstance(config, dict) or config.get("linkedin_provider") != "unipile":
         return config
     saved = saved_sender(home)
@@ -1764,6 +1856,8 @@ def read_signed_in_account(webmail_url, codex_path, profile, config=None, execut
     config = dict(config, browser_driver=driver, _browser_operation="webmail")
     if codex_path:
         config["codex"] = codex_path
+        if _usable(codex_path):
+            extend_path(codex_path)
     if browser_runtime.missing(config):
         raise MailboxReadNotBuilt("The email check needs Sidedoor's browser, which is not installed on this "
                                   "computer. Reinstall Sidedoor, then click Run check again.")

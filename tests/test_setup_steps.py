@@ -353,7 +353,8 @@ class SetupStepsTest(unittest.TestCase):
         if install:
             fake_executables.stub(directory / "codex")
         run = mock.Mock(return_value=subprocess.CompletedProcess([], returncode, output, ""))
-        with mock.patch.object(setup_steps.Path, "home", return_value=self.home / "nohome"):
+        with mock.patch.object(setup_steps.Path, "home", return_value=self.home / "nohome"), \
+                mock.patch.object(setup_steps, "install_folders", return_value=[]):
             state = setup_steps.check_codex(self.home, run=run, search_path=str(directory))
         return state, run
 
@@ -371,6 +372,54 @@ class SetupStepsTest(unittest.TestCase):
         state, _ = self.codex("", install=False)
         self.assertEqual(state["steps"]["codex"]["message"], "Codex is not installed.")
         self.assertNotIn("codex_path", state)
+
+    def test_a_homebrew_codex_is_found_when_the_app_was_opened_from_the_dock(self):
+        # A user: "Sidedoor can't find codex if it's installed through Homebrew." An app opened from the
+        # Dock gets only /usr/bin:/bin:/usr/sbin:/sbin, so the Homebrew folder is searched on its own.
+        brew = self.home / "homebrew-bin"
+        brew.mkdir()
+        fake_executables.stub(brew / "codex")
+        run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "Logged in using ChatGPT\n", ""))
+        with mock.patch.object(setup_steps, "install_folders", return_value=[str(brew)]), \
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            state = setup_steps.check_codex(self.home, run=run, search_path="/usr/bin:/bin")
+            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(brew))   # its node is found too
+        self.assertEqual(state["codex_path"], str(brew / CODEX))
+        self.assertEqual(state["steps"]["codex"]["status"], "done")
+
+    def test_jobs_run_the_codex_setup_found(self):
+        # config.json is bundled and names /opt/homebrew/bin/codex; the jobs use the one setup saved.
+        brew = self.home / "usr-local-bin"
+        brew.mkdir()
+        fake_executables.stub(brew / "codex")
+        setup_steps.update_state(lambda value: value.update(codex_path=str(brew / CODEX)), self.home)
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            config = setup_steps.with_sender({"codex": "/nowhere/codex", "model": "m"}, self.home)
+            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(brew))
+        self.assertEqual(config["codex"], str(brew / CODEX))
+        self.assertEqual(setup_steps.with_sender({"sender_id": 5}, self.home), {"sender_id": 5})
+
+    def test_the_dashboard_puts_the_saved_codex_on_its_path(self):
+        # Review: a reopened Dock app ran the email check's npm Codex without node's folder.
+        folder = self.home / "npm-bin"
+        folder.mkdir()
+        fake_executables.stub(folder / "codex")
+        setup_steps.update_state(lambda value: value.update(codex_path=str(folder / CODEX)), self.home)
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            setup_steps.use_saved_codex(self.home)
+            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(folder))
+
+    def test_windows_install_folders(self):
+        with mock.patch.object(setup_steps.sys, "platform", "win32"), \
+                mock.patch.dict(os.environ, {"APPDATA": r"C:\Users\u\AppData\Roaming",
+                                             "LOCALAPPDATA": r"C:\Users\u\AppData\Local"}), \
+                mock.patch.object(setup_steps, "_windows_user_path", return_value=[r"C:\tools"]):
+            folders = setup_steps.install_folders()
+            candidates = setup_steps.codex_candidates(search_path="")
+        self.assertIn(str(Path(r"C:\Users\u\AppData\Roaming") / "npm"), folders)
+        self.assertIn(str(Path(r"C:\Users\u\AppData\Local") / "Microsoft" / "WinGet" / "Links"), folders)
+        self.assertIn(r"C:\tools", folders)
+        self.assertIn(str(Path(r"C:\Users\u\AppData\Roaming") / "npm" / "codex.cmd"), candidates)
 
     def test_codex_is_looked_for_in_local_bin(self):
         with mock.patch.object(setup_steps.Path, "home", return_value=Path("/u")):

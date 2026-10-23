@@ -1239,6 +1239,7 @@ def _serve(open_browser, home, path, start, scheduler, tray=False):
         print("Sidedoor could not move its keys this start (%s); it tries again next start." % type(error).__name__,
               file=sys.stderr, flush=True)
     setup_steps.refresh_login_entry(home)  # a moved program, folder or Codex: rewrite the entry (E5.T2)
+    setup_steps.use_saved_codex(home)      # the Codex setup found runs from a Dock-opened app (npm: node)
     login_item.sweep_own_logs(root)
     close_orphaned_browser(root)   # a session Chrome the last run left behind (it was stopped mid-session)
     rotation = login_item.start_hourly_rotation(root)
