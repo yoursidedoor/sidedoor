@@ -695,3 +695,18 @@ class WindowsCredentialsTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuiltAppReadsTheStore(unittest.TestCase):
+    """2026-10-23: fpdf.sign imports unittest.mock, so the built app looked like a test run and
+    refused every keychain read. A built app always may read; a source run under tests may not."""
+
+    def test_a_built_app_is_never_taken_for_a_test_run(self):
+        import credentials
+        with mock.patch.object(credentials.sys, "frozen", True, create=True):
+            self.assertTrue(credentials._real_store_allowed())
+
+    def test_a_source_run_under_tests_is_still_refused(self):
+        import credentials
+        with mock.patch.dict(credentials.os.environ, {credentials.ALLOW_IN_TESTS_VARIABLE: ""}):
+            self.assertFalse(credentials._real_store_allowed())

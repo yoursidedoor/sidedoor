@@ -98,6 +98,11 @@ class Locked(Unavailable):
 
 
 def _real_store_allowed():
+    # The built app never runs the unit tests, and a library it ships imports unittest (fpdf.sign
+    # imports unittest.mock), which made every keychain read refused once a PDF had been written or
+    # doctor had checked the PDF writer (2026-10-23: "Waiting for keychain", scheduler held).
+    if bool(getattr(sys, "frozen", False)) or "__compiled__" in globals():
+        return True
     return "unittest" not in sys.modules or os.environ.get(ALLOW_IN_TESTS_VARIABLE) == "1"
 
 
