@@ -212,7 +212,11 @@ def build(home, root, config, token):
     import overview_page
     import paths
     import setup_steps
+    import user_profile
     import version as version_module
+    # The dashboard passes home=None when it runs on the default Sidedoor home (every real install):
+    # resolve it, or every read below looks for "None/profile.json" and the summary is refused.
+    home = Path(home) if home is not None else user_profile.home()
     label, current = platform_label(), version_module.current()
     homes = [Path.home(), Path(home).resolve() if home else None, home, Path(root).resolve() if root else None, root]
     homes = [str(h) for h in homes if h]

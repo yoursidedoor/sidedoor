@@ -8,6 +8,7 @@ import json
 import shutil
 import sqlite3
 import tempfile
+import os
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -87,6 +88,9 @@ class UrlTest(unittest.TestCase):
         self.assertEqual(report_problem.platform_label("linux", "x86_64"), "Other")
 
 
+FAKE_USER_HOME = Path("/home/u7")   # a fixed user home: no dot, so never read as a web address
+
+
 class SummaryTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -97,6 +101,12 @@ class SummaryTest(unittest.TestCase):
         self.directory.cleanup()
 
     def build(self):
+        # A fixed user home, so the summary never depends on where the run's HOME happens to be: a
+        # temporary HOME like ".../verify-export.ABCDEF/home" reads as a web address to the redactor.
+        with mock.patch.object(Path, "home", return_value=FAKE_USER_HOME):
+            return self._build()
+
+    def _build(self):
         planted = [  # every kind of thing that must never reach the summary, in the checks' own lines
             {"status": "OK", "name": "Profile", "line": "Complete for %s %s (%s, %s)." % (NAME, SURNAME, EMAIL, PHONE), "todo": ""},
             {"status": "WARN", "name": "Résumé", "line": "Read %s/resume/original.pdf: %s %s." % (self.home, RESUME, COMPANY), "todo": ""},
@@ -122,7 +132,7 @@ class SummaryTest(unittest.TestCase):
     def test_no_secret_or_personal_detail_reaches_the_summary_or_the_address(self):
         text, url = self.build()
         for planted in (LICENSE, "7Q2W", OPENROUTER, base.SECRET, NAME, SURNAME, EMAIL, PHONE, "7946", LINKEDIN,
-                        "linkedin.com", "Zed Q", COMPANY, "Acmeplanted", ROLE, RESUME, str(self.home), str(Path.home()),
+                        "linkedin.com", "Zed Q", COMPANY, "Acmeplanted", ROLE, RESUME, str(self.home), str(FAKE_USER_HOME), str(Path.home()),
                         "someone", "Tallahassee", "@", "https://"):
             self.assertNotIn(planted.lower(), text.lower(), planted)
             if planted != "https://":
@@ -134,6 +144,15 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("OK  Home folder: Writes to [path] and [path].", text)
         self.assertIn("OK  LinkedIn: connected\n", text)
         self.assertIn("Recent failure codes: REQUIRED_ELIGIBILITY_ANSWER, RETRY:reply-monitor", text)
+
+    def test_builds_on_the_default_home_the_dashboard_passes_as_none(self):
+        # 2026-10-23: the running app passes home=None; the summary was refused ("None/profile.json").
+        with mock.patch.dict(os.environ, {"SIDEDOOR_HOME": str(self.home)}):
+            original = report_problem.build
+            with mock.patch.object(report_problem, "build", lambda home, *rest: original(None, *rest)):
+                text, url = self.build()
+        self.assertIn("Version: ", text)
+        self.assertTrue(report_problem.allowed_url(url))
 
     def test_hidden_while_the_keychain_is_locked(self):
         with mock.patch.object(failures_page, "_redaction_complete", return_value=False), \
