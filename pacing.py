@@ -11,7 +11,8 @@ Rules (defaults in `DEFAULTS`, overridable in config["pacing"]):
 - warm-up: the daily cap is 20 in the account's first week (counted from its first INVITE request on
   our records), then the full cap (25) from day 7 (owner, 2026-10-22: "make it 20/day starting then
   ramp up after a week"; was 5, 10, 15, 20);
-- working hours: Monday-Friday, `start_hour` to `end_hour` in config["timezone"];
+- working hours: off by default (`around_the_clock`, owner 2026-10-23); when off, Monday-Friday,
+  `start_hour` to `end_hour` in config["timezone"];
 - jitter: each request at least 4-12 minutes (random, fixed per previous request) after the last one.
 """
 
@@ -23,8 +24,10 @@ from zoneinfo import ZoneInfo
 import sequence
 
 
+# around_the_clock (owner, 2026-10-23: "All around the clock, if there is available capacity"): sends go
+# out any hour, any day, within the caps, warm-up and jitter; False brings back the working-hours window.
 DEFAULTS = {"daily_cap": 25, "weekly_cap": 100, "start_hour": 9, "end_hour": 18,
-            "jitter_minutes": [4, 12], "warmup_start": 20, "warmup_step": 5}
+            "jitter_minutes": [4, 12], "warmup_start": 20, "warmup_step": 5, "around_the_clock": True}
 
 
 def _settings(config):
@@ -78,7 +81,8 @@ def check(database, config, now=None):
     times = request_times(database)
     waits = []
     local = now.astimezone(ZoneInfo(settings["timezone"]))
-    if local.weekday() >= 5 or not settings["start_hour"] <= local.hour < settings["end_hour"]:
+    if not settings["around_the_clock"] and (local.weekday() >= 5
+                                             or not settings["start_hour"] <= local.hour < settings["end_hour"]):
         waits.append((_next_working_start(local, settings).astimezone(dt.timezone.utc), "OUTSIDE_WORKING_HOURS"))
     day = [moment for moment in times if now - moment < dt.timedelta(hours=24)]
     if len(day) >= daily_cap(settings, times, now):

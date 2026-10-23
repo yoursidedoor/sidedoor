@@ -19,6 +19,7 @@ import time
 from urllib.parse import urlsplit
 
 import portable
+import openai_auth
 import provider_limits
 import workflow_tasks
 import paths
@@ -108,8 +109,9 @@ def _command(config, directory):
                     "features.skills=false", "features.apply_patch_freeform=false", "features.unified_exec=false",
                     "features.multi_agent=false", "mcp_servers={}"):
         command.extend(["-c", setting])
-    return command + ["--output-schema", str(directory / "schema.json"), "--output-last-message",
-                      str(directory / "output.json"), "--color", "never", "-"]
+    # E0.T8: ChatGPT sign-in returns this command untouched; an API key drops the forced login.
+    return openai_auth.command(command + ["--output-schema", str(directory / "schema.json"), "--output-last-message",
+                                          str(directory / "output.json"), "--color", "never", "-"])
 
 
 # No core file for a worker (POSIX; None on Windows, where portable.no_crash_dialogs covers it).
@@ -123,16 +125,18 @@ def _execute(config, prompt, directory, timeout):
     worker = None
     with tempfile.TemporaryDirectory(prefix="agent-web-") as working, (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
-            worker = subprocess.Popen(_command(config, directory), stdin=subprocess.PIPE, stdout=trace,
+            arguments = _command(config, directory)
+            worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
                                       stderr=errors, text=True, encoding="utf-8", cwd=working,
-                                      env=environment, **portable.worker_spawn_options())
+                                      env=openai_auth.environment(arguments, environment), **portable.worker_spawn_options())
             portable.contain(worker)
             worker.communicate(prompt, timeout=timeout)
             if worker.returncode:
                 trace.flush()
                 errors.flush()
                 raise RuntimeError("EXECUTOR_FAILED") from provider_limits.check(
-                    worker.returncode, directory / "trace.jsonl", directory / "stderr.log")
+                    worker.returncode, directory / "trace.jsonl", directory / "stderr.log", command=arguments)
+            openai_auth.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
         finally:
             if worker is not None:
                 portable.kill_tree(worker.pid)

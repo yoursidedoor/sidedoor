@@ -3692,6 +3692,10 @@ def _attach_same_posting(database, job, adapter, root, config, now, before_submi
         # Validation passes only jobs that were shown, so this one is gone since: before a submit,
         # a judgment that could not be used.
         return _hold_same_posting_pending(database, job, now, "named a job no longer on file") if before_submit else False
+    if existing[0] == "DUPLICATE" and existing[1] == posting_judge.SAME_JOB_BLOCKER and not before_submit:
+        # It became a copy of another listing since it was shown (perhaps of this very job): this job
+        # proceeds, so a posting is never left with every listing a copy (Cognition, 2026-10-23).
+        return False
     if existing[0] in {"ABANDONED", "EXHAUSTED"}:
         # A copy of a given-up job proceeds (owner, 2026-09-27).
         return _hold_same_posting_pending(database, job, now, "named a job given up since it was shown") if before_submit else False

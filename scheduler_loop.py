@@ -69,6 +69,21 @@ def frozen():
     return bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
 
 
+def program():
+    """The frozen binary's own path, which every child Sidedoor starts of itself runs (E9.T1).
+
+    Not `sys.executable` under Nuitka: in a standalone build that names a `python` next to the
+    binary that does not exist (observed with Nuitka 4.3.1: Contents/MacOS/python), kept for
+    multiprocessing. Nuitka records the real one, symlinks resolved, as `__compiled__.process_exe`.
+    A PyInstaller-style build (`sys.frozen`) and a source run use `sys.executable`."""
+    compiled = globals().get("__compiled__")
+    chosen = getattr(compiled, "process_exe", None) or sys.executable
+    if frozen() and not (chosen and os.path.isfile(chosen)):
+        raise RuntimeError("FROZEN_BINARY_NOT_FOUND: Sidedoor cannot find its own program (%r) to start "
+                           "a part of itself" % (chosen,))
+    return chosen
+
+
 def job_command(name):
     """The command that runs one job as a child of this program: `[<binary>, "job", name]` when
     frozen, `[<python>, <orchestrator.py>, "job", name]` from source. Both enter the existing
@@ -76,7 +91,7 @@ def job_command(name):
     if name not in JOBS:
         raise ValueError("Unknown job: %r" % (name,))
     if frozen():
-        return [sys.executable, "job", name]
+        return [program(), "job", name]
     return [sys.executable, str(ENTRY), "job", name]
 
 
@@ -262,11 +277,15 @@ class Loop:
     defaults are the wall clock, `spawn`, the database flags and config.json read each tick."""
 
     def __init__(self, root=None, clock=None, spawner=None, is_paused=None, config=None, tick_seconds=TICK_SECONDS,
-                 license_sync=None, license_reason=None, before_start=None):
+                 license_sync=None, license_reason=None, before_start=None, credentials_hold=None):
         self.root = paths.data(root)
         # HM3: the dashboard's own data-move check (paths.migrate as the port holder), run before due
         # jobs start, so a conflict settled by hand clears without a restart. None: no check.
         self.before_start = before_start
+        # E2.T4 (R3): why the saved keys cannot be read now (`credentials.hold_reason`: the OS store
+        # is locked or not answering), asked before a due job starts; a reason starts nothing and
+        # spends nothing, and the reason is the Overview line. None: no check here.
+        self.credentials_hold = credentials_hold
         # E8.T3: syncs the license pause before a due job starts (`sync_license_pause`; the
         # dashboard passes it, tests may inject one). None: no sync here.
         self.license_sync = license_sync
@@ -280,6 +299,10 @@ class Loop:
         self.tick_seconds = tick_seconds
         self.last_fired = {}
         self.children = {}
+        # When each job's current child was started (aware UTC). last_fired also moves when a due
+        # instant is passed over (the previous child still alive), so it cannot say which start a
+        # failure belongs to; Overview compares a failure with the job's own records by this.
+        self.started = {}
         self.last_tick = None
         # last_error is built from: this tick's config notes (recomputed every tick, so a fixed
         # value clears at once), problems that hold until their cause goes (a failed start until
@@ -319,7 +342,11 @@ class Loop:
                 except Exception:
                     self.data_hold = "Waiting to move your data."
             elif code != 0:
-                self.job_failures[name] = {"exit_code": code, "at": now.isoformat(timespec="seconds")}
+                failure = {"exit_code": code, "at": now.isoformat(timespec="seconds")}
+                started = self.started.get(name)
+                if started is not None:
+                    failure["started"] = started.isoformat(timespec="seconds")
+                self.job_failures[name] = failure
             else:
                 self.job_failures.pop(name, None)
                 self.data_hold = None
@@ -348,6 +375,19 @@ class Loop:
             result = {"started": [], "skipped_alive": [], "paused": False}
             if not due:
                 return result
+            if self.credentials_hold is not None:
+                try:
+                    hold = self.credentials_hold()
+                except Exception as error:  # the children read the store themselves; a failed check holds nothing
+                    hold = None
+                    self._problems["credentials_check"] = "credentials check failed: %s" % type(error).__name__
+                else:
+                    self._problems.pop("credentials_check", None)
+                if hold:
+                    self._problems["credentials"] = hold
+                    result["paused"] = True
+                    return result
+                self._problems.pop("credentials", None)
             if self.license_sync is not None:
                 try:
                     self.license_sync()
@@ -369,6 +409,18 @@ class Loop:
                 if reason:
                     result["paused"] = True
                     return result
+            try:
+                # E0.T8 (owner OA2): OpenAI refused the user's API key, or its billing waits ran past a
+                # day: every job uses Codex, so nothing starts and nothing is spent until a key passes
+                # its test (openai_auth.release). ChatGPT sign-in never holds here.
+                import openai_auth
+                held = openai_auth.hold()
+            except Exception:
+                held = None
+            if held:
+                result["paused"] = True
+                result["held"] = "openai_api_key:" + held["kind"]
+                return result
             try:
                 if self.is_paused():
                     result["paused"] = True
@@ -394,6 +446,7 @@ class Loop:
                     continue
                 try:
                     self.children[name] = self.spawner(name)
+                    self.started[name] = now
                 except Exception as error:
                     # Not spent: the next tick tries again. The traceback is printed at most once
                     # an hour per job; the error itself is always kept in last_error.

@@ -29,6 +29,7 @@ import browser_runtime
 import desktop_adapter
 import outreach_history_browser
 import portable
+import openai_auth
 import provider_limits
 import reply_worker
 import reply_resume
@@ -1306,9 +1307,10 @@ def execute(config, prompt, directory, timeout):
             (directory / "trace.jsonl").open() as monitor, \
             (directory / "stderr.log").open("w") as errors:
         try:
-            worker = subprocess.Popen(command(config, directory), stdin=subprocess.PIPE,
+            arguments = command(config, directory)
+            worker = subprocess.Popen(arguments, stdin=subprocess.PIPE,
                 stdout=trace, stderr=errors, text=True, encoding="utf-8", cwd=working,
-                env=reply_worker._environment(), **portable.worker_spawn_options())  # POSIX: start_new_session=True
+                env=openai_auth.environment(arguments, reply_worker._environment()), **portable.worker_spawn_options())  # POSIX: start_new_session=True
             _LIVE_WORKER_GROUPS.add(worker.pid)
             portable.contain(worker)
             pending = prompt
@@ -1350,7 +1352,8 @@ def execute(config, prompt, directory, timeout):
                 if finished:
                     if worker.returncode:
                         raise RuntimeError("APPLICATION_BROWSER_EXECUTOR_FAILED") from provider_limits.check(
-                            worker.returncode, directory / "trace.jsonl", directory / "stderr.log")
+                            worker.returncode, directory / "trace.jsonl", directory / "stderr.log", command=arguments)
+                    openai_auth.succeeded(arguments)   # E0.T8 AK5
                     break
         finally:
             if worker is not None:
@@ -2842,6 +2845,7 @@ class HumanCheckWait:
                     f"Job search: the {what} application is waiting on a CAPTCHA in Chrome. Tick \"I am human\" "
                     f"yourself in the last 2 minutes before the {HUMAN_CHECK_SECONDS // 60}-minute mark (a tick expires "
                     f"after about 2 minutes); it checks once at {HUMAN_CHECK_SECONDS // 60} minutes and carries on. "
+                    f"If you don't see the window, click Chrome in the Dock. "
                     f"{self.context.get('url') or ''}".strip(), now.isoformat())
             import notifications
             notifications.dispatch(database, resources.read_json("config.json"),

@@ -12,8 +12,10 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 import text_model
+import openai_auth
 import paths
 
 
@@ -72,11 +74,13 @@ def research_recovery_decision(root, config, inability, timeout, *, runtime=None
 
 
 def bounded_decision(root, config, prompt, artifacts, timeout, *, runtime=None,
-                     scope="research-recovery", executor=None, schema=None):
+                     scope="research-recovery", executor=None, schema=None, calls=None):
     """Shared tools-disabled subscription judgment; caller owns budget and policy.
 
     An injected executor has run_research_worker's five-argument signature and
     writes the command's output-last-message file. It never replaces validation.
+    With `config["text_model"]` set and no injected executor it is one direct OpenRouter call
+    (cost cut C3, 2026-10-22; `_direct_decision`); `calls` (optional) collects its record.
     """
     if timeout <= 0:
         raise TimeoutError("Recovery decision deadline exhausted")
@@ -101,6 +105,9 @@ def bounded_decision(root, config, prompt, artifacts, timeout, *, runtime=None,
         json.dump(schema if schema is not None else DECISION_SCHEMA, stream)
     with prompt_path.open("x", encoding="utf-8") as stream:
         stream.write(prompt)
+    if executor is None and text_model.settings(config):
+        return _direct_decision(config, prompt, schema if schema is not None else DECISION_SCHEMA,
+                                output, log, timeout, calls)
     command = list(runtime.research_command(Path(root), config, output, str(schema_path)))
     for index, setting in enumerate(command):
         if setting == 'web_search="live"':
@@ -110,7 +117,7 @@ def bounded_decision(root, config, prompt, artifacts, timeout, *, runtime=None,
                 "features.apply_patch_freeform=false", "features.unified_exec=false",
                 "features.multi_agent=false", "mcp_servers={}")
     command[-1:-1] = [argument for setting in settings for argument in ("-c", setting)]
-    command = text_model.command(config, command)
+    command = openai_auth.command(text_model.command(config, command))  # E0.T8
     if text_model.settings(config) and executor is None:
         # run_research_worker passes this process's environment through to codex.
         os.environ[text_model.KEY_VARIABLE] = text_model.key(config)
@@ -124,6 +131,51 @@ def bounded_decision(root, config, prompt, artifacts, timeout, *, runtime=None,
     if len(raw) > 32768:
         raise ValueError("Research recovery decision output exceeds limit")
     return json.loads(raw)
+
+
+# The recovery coordinators' direct call (cost cut C3, 2026-10-22), in the outreach send judge's
+# shape: reasoning "low", the schema in a system message and as a strict json_schema response
+# format, provider routing outreach_agent.DIRECT_PROVIDER. Same prompt, artifacts and validation;
+# a refused call raises the RuntimeError a non-zero codex exit raised, a timeout a TimeoutError.
+DIRECT_ROUTE = "openrouter_chat_completions"
+DIRECT_EFFORT = "low"
+DIRECT_MAX_TOKENS = 4000
+DIRECT_PROVIDER = {"sort": "price", "require_parameters": True}  # outreach_agent.DIRECT_PROVIDER
+
+
+def _direct_decision(config, prompt, schema, output, log, timeout, calls):
+    started = time.monotonic()
+
+    def record(**fields):
+        entry = dict(route=DIRECT_ROUTE, reasoning_effort=DIRECT_EFFORT, max_tokens=DIRECT_MAX_TOKENS,
+                     duration_seconds=round(time.monotonic() - started, 1), **fields)
+        with log.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, sort_keys=True) + "\n")
+        if calls is not None:
+            calls.append(entry)
+        return entry
+
+    system = "Return only one JSON object, with no other text, that matches this JSON Schema:\n" + json.dumps(schema, sort_keys=True)
+    try:
+        answer = text_model.complete(config, prompt, system=system, effort=DIRECT_EFFORT, max_tokens=DIRECT_MAX_TOKENS,
+                                     timeout=timeout, provider=DIRECT_PROVIDER, content_limit=32768,
+                                     response_format={"type": "json_schema", "json_schema": {
+                                         "name": "recovery_decision", "strict": True, "schema": schema}})
+    except TimeoutError as error:
+        error.executor = record(error="TimeoutError: " + str(error)[:300])
+        raise
+    except text_model.TextModelError as error:
+        failure = RuntimeError("RECOVERY_DECISION_EXECUTOR_FAILED")
+        failure.executor = record(http_status=getattr(error, "status", None), error=error.record())
+        raise failure from error
+    except OSError as error:  # the key file could not be read
+        failure = RuntimeError("RECOVERY_DECISION_EXECUTOR_UNAVAILABLE")
+        failure.executor = record(error=type(error).__name__)
+        raise failure from None
+    with output.open("x", encoding="utf-8") as stream:
+        stream.write(answer["content"])
+    record(model=answer["model"], usage=answer["usage"], finish_reason=answer["finish_reason"])
+    return text_model.json_object(answer["content"])
 
 
 def decision_prompt(inability):

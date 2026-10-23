@@ -9,8 +9,8 @@ work and research (which need OpenAI's browser tool and live web search) stay on
 
 config.json:
     "text_model": {"model": "z-ai/glm-5.3"}
-The key is read from `openrouter.key` in the user's Sidedoor home (`user_profile.home()`), or
-from `key_file` when set.
+The key is the saved OpenRouter key (`credentials.get`: the OS store, E2.T4, or `openrouter.key`
+in the user's Sidedoor home while one is left), or `key_file` when set.
 
 `complete` (owner, 2026-10-13) is the direct alternative: one OpenRouter chat-completions call
 with a chosen reasoning effort and a bounded max_tokens. Through codex the reasoning effort did
@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
+import model_calls
 import user_profile
 
 
@@ -71,10 +72,18 @@ def command(config, arguments):
 
 
 def key(config):
+    """The OpenRouter key: `key_file` when set (owner/dev), else the saved key (credentials.get:
+    the OS store, or openrouter.key while one is left). Raises OSError when there is none, or
+    credentials.Locked while the store is locked."""
     chosen = settings(config)
     configured = chosen.get("key_file")
-    path = Path(os.path.expanduser(configured)) if configured else user_profile.home() / "openrouter.key"
-    return path.read_text(encoding="utf-8").strip()
+    if configured:
+        return Path(os.path.expanduser(configured)).read_text(encoding="utf-8").strip()
+    import credentials
+    value = credentials.get("openrouter", user_profile.home())
+    if not value:
+        raise FileNotFoundError("No OpenRouter key is saved")
+    return value
 
 
 def environment(config, variables):
@@ -131,6 +140,39 @@ def _post(url, data, headers, timeout):
 
 def complete(config, prompt, *, system=None, effort="low", max_tokens=4000, timeout=60, transport=None,
              response_format=None, provider=None, api_key=None, content_limit=CONTENT_LIMIT):
+    """`_complete`, with one model_calls row per call that reached the network (C4)."""
+    meta = {}
+    worker = model_calls.caller()
+    started = time.monotonic()
+
+    def recorded(outcome, usage=None):
+        usage = usage or {}
+        model_calls.record("openrouter_direct", outcome, worker=worker,
+                           model=meta.get("model") or (settings(config) or {}).get("model"),
+                           provider=meta.get("provider"), generation_id=meta.get("id"),
+                           prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
+                           reasoning_tokens=usage.get("reasoning_tokens"), cost=usage.get("cost"),
+                           seconds=round(time.monotonic() - started, 3))
+
+    try:
+        answer = _complete(config, prompt, system=system, effort=effort, max_tokens=max_tokens, timeout=timeout,
+                           transport=transport, response_format=response_format, provider=provider,
+                           api_key=api_key, content_limit=content_limit, meta=meta)
+    except TimeoutError:
+        recorded("timeout")
+        raise
+    except TextModelHTTPError:
+        recorded("refused", meta.get("usage"))
+        raise
+    except TextModelResponseError:
+        recorded("invalid", meta.get("usage"))
+        raise
+    recorded("ok", answer["usage"])
+    return answer
+
+
+def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, timeout=60, transport=None,
+              response_format=None, provider=None, api_key=None, content_limit=CONTENT_LIMIT, meta=None):
     """One chat-completions call to the configured OpenRouter model.
 
     Returns {"content", "usage": {prompt_tokens, completion_tokens, reasoning_tokens, cost},
@@ -181,6 +223,12 @@ def complete(config, prompt, *, system=None, effort="low", max_tokens=4000, time
         answer = json.loads(text)
     except ValueError:
         raise TextModelResponseError("unparsed response: " + _short(text, secret)) from None
+    if isinstance(answer, dict) and meta is not None:
+        meta.update({key: answer.get(key) for key in ("id", "model", "provider") if isinstance(answer.get(key), str)})
+        if isinstance(answer.get("usage"), dict):
+            meta["usage"] = {"prompt_tokens": answer["usage"].get("prompt_tokens"),
+                             "completion_tokens": answer["usage"].get("completion_tokens"),
+                             "cost": answer["usage"].get("cost")}
     error = answer.get("error") if isinstance(answer, dict) else None
     choice = (answer.get("choices") or [None])[0] if isinstance(answer, dict) else None
     error = error or (choice.get("error") if isinstance(choice, dict) else None)

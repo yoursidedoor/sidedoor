@@ -24,6 +24,7 @@ import tempfile
 from urllib.parse import unquote
 
 import portable
+import openai_auth
 import provider_limits
 import reply_worker
 import outreach_history
@@ -183,8 +184,9 @@ def command(config, directory):
             result.extend(["-c", setting])
     else:
         result.extend(["-c", "mcp_servers={}"])
-    return result + ["--output-schema", str(directory / "schema.json"), "--output-last-message",
-                     str(directory / "output.json"), "-"]
+    # E0.T8: ChatGPT sign-in returns this command untouched; an API key drops the forced login.
+    return openai_auth.command(result + ["--output-schema", str(directory / "schema.json"), "--output-last-message",
+                                         str(directory / "output.json"), "-"])
 
 
 def execute(config, prompt, directory, timeout):
@@ -193,8 +195,10 @@ def execute(config, prompt, directory, timeout):
     with tempfile.TemporaryDirectory(prefix="history-work-", dir=directory) as working, \
             (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
-            worker = subprocess.Popen(command(config, directory), stdin=subprocess.PIPE, stdout=trace,
-                stderr=errors, text=True, encoding="utf-8", cwd=working, env=environment,
+            arguments = command(config, directory)
+            worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
+                stderr=errors, text=True, encoding="utf-8", cwd=working,
+                env=openai_auth.environment(arguments, environment),
                 **portable.worker_spawn_options())
             portable.contain(worker)
             worker.communicate(prompt, timeout=timeout)
@@ -202,7 +206,8 @@ def execute(config, prompt, directory, timeout):
                 trace.flush()
                 errors.flush()
                 raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED") from provider_limits.check(
-                    worker.returncode, directory / "trace.jsonl", directory / "stderr.log")
+                    worker.returncode, directory / "trace.jsonl", directory / "stderr.log", command=arguments)
+            openai_auth.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
         finally:
             if worker is not None:
                 portable.kill_tree(worker.pid)

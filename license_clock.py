@@ -81,6 +81,7 @@ import sys
 import threading
 import time
 
+import credentials
 import setup_steps
 
 
@@ -436,7 +437,7 @@ def _error(parsed):
     return parsed.get("error") if isinstance(parsed, dict) and isinstance(parsed.get("error"), str) else None
 
 
-def activate(key, home=None, relay_url=None, post=None, now=None):
+def activate(key, home=None, relay_url=None, post=None, now=None, to_file=False):
     """`POST /license/activate {key, machine}` under the check lock, so an older key's heartbeat in
     flight can never store over the new key. Returns (outcome, entitlement fields or None): "ok"
     (key and entitlement stored), "invalid" (401), "activation_limit" (409) or "offline"."""
@@ -445,7 +446,8 @@ def activate(key, home=None, relay_url=None, post=None, now=None):
         claimed = (_claims(stored) or {}).get("machine") if isinstance(stored, dict) else None
         # The user's [Activate] after the automatic move was refused (LA1): it too hands the old
         # file id's slot to this computer, under the same rule as the automatic move (`_replaces`).
-        return _activate(key, home, relay_url, post, now, replaces=_replaces(claimed, machine_id(home)))
+        return _activate(key, home, relay_url, post, now, replaces=_replaces(claimed, machine_id(home)),
+                         to_file=to_file)
 
 
 def _replaces(claimed, machine):
@@ -458,7 +460,7 @@ def _replaces(claimed, machine):
     return None
 
 
-def _activate(key, home, relay_url, post, now, replaces=None, **extra):
+def _activate(key, home, relay_url, post, now, replaces=None, to_file=False, **extra):
     """`replaces`: the id the stored entitlement names (the automatic move to the hardware id):
     the relay hands that id's slot to this computer, so no new slot is used."""
     relay_url = (relay_url or setup_steps.RELAY_URL).rstrip("/")
@@ -471,14 +473,20 @@ def _activate(key, home, relay_url, post, now, replaces=None, **extra):
     _last_check["mono"] = time.monotonic()
     if value is not None:
         with _write_lock:
-            setup_steps._write_private(setup_steps._home(home) / setup_steps.LICENSE_KEY_FILE, key + "\n")
+            try:   # E2.T4: the OS store; the folder only when the user chose it (KC1)
+                if to_file:
+                    credentials.put_file("license", key, setup_steps._home(home))
+                else:
+                    credentials.put("license", key, setup_steps._home(home))
+            except credentials.Unavailable:
+                return "keychain", None   # KC2: nothing stored; the caller says why
             store_signed(home, {"entitlement": parsed["entitlement"], "signature": parsed["signature"]}, now, **extra)
         return "ok", value
     if status == 401 and _error(parsed) == "LICENSE_INVALID":
         return "invalid", None
     if status == 409 and _error(parsed) == "REPLACES_NOT_ACTIVATED" and replaces:
         # The old id's slot is gone already (support freed it): a plain activation, same attempt.
-        return _activate(key, home, relay_url, post, now, **extra)
+        return _activate(key, home, relay_url, post, now, to_file=to_file, **extra)
     if status == 409 and _error(parsed) == "ACTIVATION_LIMIT":
         return "activation_limit", None
     return "offline", None
@@ -783,6 +791,13 @@ def view(home=None, now=None):
               "offline": False, "hours_left": None, "valid_until": None, "last_check": None, "last_attempt": None,
               "status": None}
     if not key:
+        waiting = setup_steps.keys_waiting(home)
+        if waiting:
+            # E2.T4 (KR1): the key is there but the keychain can't be read now: never "No license
+            # yet". Step 5 stays as it was (its saved record), nothing pauses on it (the scheduler
+            # already holds every job while the keys wait).
+            done = setup_steps.load_state(home)["steps"].get("license", {}).get("status") == "done"
+            return _dress(dict(result, state="keychain", usable=done, waiting=waiting))
         return _dress(result)
     if not isinstance(stored, dict):  # a key with a missing, truncated or unreadable entitlement
         return _dress(dict(result, state="license_problem", problem="signature"))
@@ -870,7 +885,11 @@ def _dress(result):
     offline_note = (" Couldn't check the license server; %s left." % _plural(hours, "hour")
                     if result["offline"] and hours is not None else "")
     actions, support = None, None
-    if state == "no_license":
+    if state == "keychain":
+        text = result.pop("waiting")
+        label = "Keychain locked" if text.startswith("Keychain locked") else "Waiting for keychain"
+        tone, href, action = "warning", SETTINGS_LICENSE, None
+    elif state == "no_license":
         label, tone, href = "No license yet", "warning", "/setup#step-5"
         text, action = "No license yet.", {"label": "Enter license key", "href": SETTINGS_LICENSE}
     elif state == "checking":

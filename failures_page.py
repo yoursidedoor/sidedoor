@@ -644,7 +644,15 @@ def browser_failures(reader, now, fmt):
     failure, not a self-clearing wait. One item per code, from browser_runtime's record."""
     import browser_runtime
     found = []
-    for row in reader.rows("SELECT code,source,first_seen,last_seen FROM browser_unavailable", (), "browser_unavailable"):
+    rows = reader.rows("SELECT code,source,first_seen,last_seen FROM browser_unavailable", (), "browser_unavailable")
+    if rows and any(row["code"].endswith("_BROWSER_PROFILE_IN_USE") for row in rows):
+        try:   # a record of "close the window" whose window is gone (Sidedoor's own leftover, now closed) is stale
+            open_now = browser_runtime.display_state() == "PROFILE_IN_USE"
+        except Exception:
+            open_now = True
+        if not open_now:
+            rows = [row for row in rows if not row["code"].endswith("_BROWSER_PROFILE_IN_USE")]
+    for row in rows:
         since = overview._utc(row["first_seen"])
         if since is None or now - since < BROWSER_UNAVAILABLE_AFTER:
             continue
@@ -767,7 +775,7 @@ def _read(path):
 
 
 def secrets_of(home, config, token=None):
-    """The values never shown: the dashboard token, the license key, the OpenRouter key, the Unipile
+    """The values never shown: the dashboard token, the license key, the OpenRouter key, the OpenAI API key (E0.T8), the Unipile
     token and DSN (`<home>/unipile.json`, `unipile_port.settings`, read only under the owner's
     `"linkedin_transport": "local-dev"`, RL1: a user's install goes through the relay and has no
     such file) and the HeyReach endpoint (`config["credential_config"]`, as `orchestrator.HeyReach`
@@ -775,6 +783,9 @@ def secrets_of(home, config, token=None):
     keys, hosts = [token], []
     home = Path(home) if home is not None else None
     paths = [home / "license.key", home / "openrouter.key", home / "dashboard-token"] if home is not None else []
+    if home is not None:
+        import credentials
+        keys += credentials.values(home)   # E2.T4: the keys in the OS store too
     try:
         import text_model
         chosen = text_model.settings(config)
@@ -931,6 +942,19 @@ def download_text(logs, secrets, now=None):
 
 # --- Routes ---------------------------------------------------------------------------------------------------------
 
+DETAILS_HIDDEN = ("Failure details are hidden while your keychain is locked, so no saved key can show by "
+                  "accident. They come back once it unlocks.")
+
+
+def _redaction_complete(home):
+    """A4: False while the keychain is waiting and a saved key's value is not known to this process."""
+    try:
+        import credentials
+        return credentials.redaction_complete(home)
+    except Exception:
+        return False
+
+
 def register(app, templates, layout, home, root, config, token, database, connect_read_only):
     """GET /failures and GET /failures/logs.txt. Both read only: the database through
     `overview_page.snapshot`, the logs through `read_tail`."""
@@ -943,6 +967,9 @@ def register(app, templates, layout, home, root, config, token, database, connec
     @app.get("/failures", name="failures")
     def failures(request: Request, component: str = "all", level: str = "all", q: str = ""):
         context = layout("failures", "Failures and logs")
+        if not _redaction_complete(home):
+            context["hidden"] = DETAILS_HIDDEN
+            return templates.TemplateResponse(request, "failures.html", context)
         secrets = secrets_of(home, config, token)
         loop = overview.loop_state(setup_steps.scheduler_running(home))
         context["view"] = overview.snapshot(
@@ -954,5 +981,5 @@ def register(app, templates, layout, home, root, config, token, database, connec
 
     @app.get("/failures/logs.txt")
     def failures_download(request: Request):
-        text = download_text(logs, secrets_of(home, config, token))
+        text = DETAILS_HIDDEN + "\n" if not _redaction_complete(home) else download_text(logs, secrets_of(home, config, token))
         return PlainTextResponse(text, headers={"Content-Disposition": 'attachment; filename="sidedoor-logs.txt"'})

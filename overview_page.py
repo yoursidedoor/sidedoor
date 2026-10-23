@@ -446,7 +446,12 @@ def last_cycle(reader):
 #   reports/applications-service.json, which `orchestrator.applications_service` writes on every
 #   run, a yield included (a yield records no step).
 # - both: the scheduler's `job_failures` (a child that exited non-zero) when that child left no
-#   record of its own (it started at the job's `last_fired` instant and no record is that new).
+#   record of its own (no record is as new as that child's start, `job_failures[job]["started"]`,
+#   else the job's `last_fired` instant).
+# A run that found nothing to do leaves no record and is never a Last run: a duplicate hourly slot
+# ("This hourly slot is already recorded") and a skipped applications run ("Another applications
+# run is active") write no runs row, step or report file, and exit 0, so the scheduler's
+# `last_fired` for them changes nothing shown here.
 # Next run: `scheduler_loop.schedule` (the scheduler's own due logic: latest instant + period), and
 # `orchestrator.research_holds_turn(read_only=True)` (the test both jobs yield on).
 
@@ -479,11 +484,17 @@ def _crashed(found, scheduler, job):
     at = _utc(failure.get("at")) if isinstance(failure, dict) else None
     if at is None:
         return found
-    fired = (scheduler.get("last_fired") or {}).get(job)
-    try:
-        fired = dt.datetime.fromtimestamp(fired, dt.timezone.utc) if fired is not None else None
-    except (TypeError, ValueError, OverflowError, OSError):
-        fired = None
+    # When the failing child started: the scheduler's own record of that start. `last_fired` is
+    # only the fallback (a loop state without it): it also moves when an instant is passed over
+    # while the previous child still runs, so a round that ran past the hour and then exited
+    # non-zero would otherwise hide its own runs row.
+    fired = _utc(failure.get("started"))
+    if fired is None:
+        fired = (scheduler.get("last_fired") or {}).get(job)
+        try:
+            fired = dt.datetime.fromtimestamp(fired, dt.timezone.utc) if fired is not None else None
+        except (TypeError, ValueError, OverflowError, OSError):
+            fired = None
     if found is not None and (fired is None or found[0] >= fired):
         return found
     return (at, at, FAILED_WORDS)
@@ -663,13 +674,23 @@ def scheduler_item(scheduler, cycle, pause, fmt):
 
 
 def browser_unavailable():
-    """Why Sidedoor's browser cannot start now ("RUNTIME_MISSING", "PROFILE_IN_USE") or None
-    (browser_runtime.unavailable, the check every browser session makes first). Never raises."""
+    """Why Sidedoor's browser cannot start now ("RUNTIME_MISSING", "PROFILE_IN_USE"), "SESSION_BUSY" when a
+    Sidedoor session owns the Chrome on the profile (FG1 problem 2: never "close the window" then), or
+    None (browser_runtime.display_state). Never raises."""
     try:
         import browser_runtime
-        return browser_runtime.unavailable(None)
+        return browser_runtime.display_state(None)
     except Exception:
         return None
+
+
+def browser_offscreen():
+    """True when Sidedoor's session Chrome runs off-screen (browser_runtime.offscreen). Never raises."""
+    try:
+        import browser_runtime
+        return browser_runtime.offscreen(None)
+    except Exception:
+        return False
 
 
 def health(home, progress, scheduler, cycle, pause=None, fmt=None):
@@ -721,13 +742,14 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None):
                            fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}, checked=_utc(codex.get("at"))))
 
     email = steps.get("email", {})
+    browser = browser_unavailable() if setup_steps.chrome_path() else None
     if not setup_steps.chrome_path():  # the same fix as the "Google Chrome stopped working." banner
         items.append(_item("Browser profile", "error", "Google Chrome stopped working", fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}))
-    elif browser_unavailable() == "RUNTIME_MISSING":   # E7.T1: the bundled Node / @playwright/mcp is gone
+    elif browser == "RUNTIME_MISSING":   # E7.T1: the bundled Node / @playwright/mcp is gone
         import browser_runtime
         items.append(_item("Browser profile", "error", browser_runtime.UNAVAILABLE_WORDS["RUNTIME_MISSING"] + " "
                            + browser_runtime.UNAVAILABLE_TODO["RUNTIME_MISSING"]))
-    elif browser_unavailable() == "PROFILE_IN_USE":    # a Chrome window holds Sidedoor's profile
+    elif browser == "PROFILE_IN_USE":    # a Chrome window holds Sidedoor's profile and no session owns it
         import browser_runtime
         items.append(_item("Browser profile", "warning", browser_runtime.UNAVAILABLE_WORDS["PROFILE_IN_USE"] + " "
                            + browser_runtime.UNAVAILABLE_TODO["PROFILE_IN_USE"],
@@ -741,6 +763,9 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None):
     else:
         items.append(_item("Browser profile", "warning", email.get("message") or "Email check not done yet",
                            fix={"label": "Open Settings", "href": SETTINGS_CONNECTIONS}))
+    if setup_steps.chrome_path() and browser_offscreen():   # FG1 = b: where the window is, and when it shows
+        import browser_runtime
+        items.append(_item("Browser window", "success", browser_runtime.OFFSCREEN_WORDS, timed=False))
 
     if not isinstance(scheduler, dict):
         scheduler = {"running": bool(scheduler)}

@@ -16,6 +16,15 @@ lives only here. Executors keep raising the exception they always raised and cha
 ProviderUsageLimit as its cause (`raise X from check(...)`), so every caller that has not
 been taught about waits behaves exactly as before; the callers that must distinguish a
 wait use `wait_of(error)`.
+
+E0.T8: for a Codex call that went to OpenAI with the user's API key (`command=` given and
+`openai_auth.openai_bound(command)`: never ChatGPT, never a command pointed at OpenRouter), the
+call's TERMINAL error (its last error line or error/turn.failed event; retried errors before it do
+not count) naming insufficient_quota, a 429 or a 401 is the same capacity wait, with `kind` naming
+which (no stated reset: BACKOFF_SECONDS; a refused key KEY_REFUSED_SECONDS, while the scheduler is
+held, `openai_auth.note_wait`). The classification is made here, when the failure is recorded,
+and stored with it (the CODE on the saved result); saved artifacts are never re-read under it
+(`artifact_limited` stays the plan's line only). In ChatGPT mode nothing here changes.
 """
 
 import datetime as dt
@@ -29,6 +38,7 @@ CODE = "PROVIDER_USAGE_LIMIT_WAIT"
 EVENT = CODE
 TIMEZONE = "America/Los_Angeles"
 BACKOFF_SECONDS = 3600
+KEY_REFUSED_SECONDS = 300   # E0.T8: a refused key holds the scheduler; the work is due again once it resumes
 MAX_WAIT = dt.timedelta(days=14)
 MAX_ARTIFACT_BYTES = 64 * 1024
 NEXT_ACTION = ("Provider usage limit reached: wait for the stated reset, then resume the same bounded work; "
@@ -43,24 +53,33 @@ class ProviderUsageLimit(RuntimeError):
     """The provider refused the turn for usage. `next_at` is an ISO UTC instant."""
 
     code = CODE
+    kind = None   # E0.T8: None for the ChatGPT plan limit; openai_auth.OUT_OF_CREDIT/RATE_LIMIT/KEY_REFUSED
 
-    def __init__(self, message, now=None):
+    def __init__(self, message, now=None, kind=None):
         now = _utc(now)
+        if kind is not None:
+            import openai_auth
+            self.kind, message = kind, openai_auth.redact(message)
         self.message = message[:500]
         self.observed_at = now.isoformat()
         stated = reset_time(message)
         self.stated_reset = stated.isoformat() if stated else None
         if stated is not None and now < stated <= now + MAX_WAIT:
             self.resume_at = stated
+        elif kind == "api_key_refused":
+            self.resume_at = now + dt.timedelta(seconds=KEY_REFUSED_SECONDS)
         else:
             self.resume_at = now + dt.timedelta(seconds=BACKOFF_SECONDS)
         self.next_at = self.resume_at.isoformat()
         super().__init__(CODE)
 
     def detail(self):
-        return {"code": CODE, "resume_at": self.next_at, "stated_reset": self.stated_reset,
-                "observed_at": self.observed_at, "provider_message": self.message,
-                "counts_as_attempt": False, "counts_as_failure": False}
+        value = {"code": CODE, "resume_at": self.next_at, "stated_reset": self.stated_reset,
+                 "observed_at": self.observed_at, "provider_message": self.message,
+                 "counts_as_attempt": False, "counts_as_failure": False}
+        if self.kind is not None:
+            value["kind"] = self.kind
+        return value
 
 
 def _utc(now):
@@ -86,14 +105,25 @@ def reset_time(message):
 
 def message_in(text):
     """The provider's usage-limit message when `text` contains the CLI's error line or event."""
+    found = match_in(text)
+    return found[0] if found else None
+
+
+def match_in(text, api=False):
+    """(message, kind): the plan's usage-limit line (kind None, anywhere, as before E0.T8) or, with
+    `api`, an API billing refusal in the call's terminal error, its last error line or event (kind
+    from openai_auth.billing_kind); else None."""
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
     if not isinstance(text, str):
         return None
+    terminal = None
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("ERROR: " + _PREFIX):
-            return line[len("ERROR: "):]
+            return line[len("ERROR: "):], None
+        if line.startswith("ERROR: "):
+            terminal = line[len("ERROR: "):]
         if not line.startswith("{"):
             continue
         try:
@@ -106,8 +136,29 @@ def message_in(text):
                    else (event.get("error") or {}).get("message") if event.get("type") == "turn.failed"
                    and isinstance(event.get("error"), dict) else None)
         if isinstance(message, str) and message.startswith(_PREFIX):
-            return message
-    return None
+            return message, None
+        if isinstance(message, str):
+            terminal = message
+    if not api or terminal is None:
+        return None
+    import openai_auth
+    kind = openai_auth.billing_kind(terminal)
+    return (terminal, kind) if kind else None
+
+
+def _api(command):
+    if command is None:
+        return False
+    import openai_auth
+    return openai_auth.openai_bound(command)
+
+
+def _limit(found, now):
+    limit = ProviderUsageLimit(found[0], now, kind=found[1])
+    if limit.kind is not None:
+        import openai_auth
+        openai_auth.note_wait(limit.kind, limit.next_at, now=dt.datetime.fromisoformat(limit.observed_at))
+    return limit
 
 
 def _read(path):
@@ -127,25 +178,39 @@ def _read(path):
         return None
 
 
-def check(returncode, *paths, now=None):
-    """A ProviderUsageLimit when a non-zero exit left the usage-limit line in one of `paths`."""
+def check(returncode, *paths, now=None, command=None):
+    """A ProviderUsageLimit when a non-zero exit left the usage-limit line in one of `paths`.
+    `command` (E0.T8): the Codex command that ran, so an OpenAI API billing refusal is told apart."""
     if not returncode:
         return None
+    api = _api(command)
     for path in paths:
-        message = message_in(_read(path))
-        if message:
-            return ProviderUsageLimit(message, now)
+        if not api:  # ChatGPT sign-in: exactly as before E0.T8
+            message = message_in(_read(path))
+            if message:
+                return ProviderUsageLimit(message, now)
+            continue
+        found = match_in(_read(path), True)
+        if found:
+            return _limit(found, now)
     return None
 
 
-def check_output(returncode, *texts, now=None):
+def check_output(returncode, *texts, now=None, command=None):
     """`check` for output held only in memory (never written anywhere)."""
     if not returncode:
         return None
+    api = _api(command)
     for text in texts:
-        message = message_in(text[-MAX_ARTIFACT_BYTES:] if isinstance(text, (str, bytes)) else None)
-        if message:
-            return ProviderUsageLimit(message, now)
+        tail = text[-MAX_ARTIFACT_BYTES:] if isinstance(text, (str, bytes)) else None
+        if not api:  # ChatGPT sign-in: exactly as before E0.T8
+            message = message_in(tail)
+            if message:
+                return ProviderUsageLimit(message, now)
+            continue
+        found = match_in(tail, True)
+        if found:
+            return _limit(found, now)
     return None
 
 
@@ -168,6 +233,7 @@ def artifact_limited(*paths):
     error line or error event.
     """
     import paths as locations  # E9.T1: a path saved before the data moved into the home
+    # E0.T8 AK4: the plan's line only, in every mode; an API wait is stored with its record (CODE).
     return any(message_in(_read(locations.relocated(path))) for path in paths if path)
 
 

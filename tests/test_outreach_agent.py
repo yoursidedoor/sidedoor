@@ -294,6 +294,8 @@ class OutreachAgentTests(unittest.TestCase):
         self.adapter = self.make_adapter(self.database)
 
     def test_source_hash_binds_action_observations_and_direct_history(self):
+        # The binding of a fresh judgment, so the reuse of an identical one (C1) is off here.
+        self.config["outreach_agent"]["judgment_reuse_seconds"] = 0
         self.adapter.inspect(self.action, self.config)
         previous_hash = outreach_agent.digest(self.packets[-1])
         self.proof["evidence"] = "different-authenticated-history"

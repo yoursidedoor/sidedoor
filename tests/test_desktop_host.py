@@ -108,7 +108,7 @@ class DesktopHostHealthTests(unittest.TestCase):
                     [sys.executable, "-B", str(script), "host-health", "--root", str(self.root), *options],
                     stdin=subprocess.DEVNULL, capture_output=True, text=True,
                     timeout=10, check=False, cwd=self.root,
-                    env={"PYTHONDONTWRITEBYTECODE": "1"})
+                    env={"PYTHONDONTWRITEBYTECODE": "1", "SIDEDOOR_CREDENTIAL_STORE": "file"})
                 self.assertEqual(result.returncode, 2, result.stderr)
                 health = json.loads(result.stdout)
                 self.assertEqual(health["code"], desktop_adapter.HOST_BLOCKER)

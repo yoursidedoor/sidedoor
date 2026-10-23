@@ -30,13 +30,19 @@ class Pacing(unittest.TestCase):
     def test_first_invite_goes_inside_working_hours(self):
         self.assertEqual(pacing.check(self.db, CONFIG, WED_10AM), {"go": True})
 
+    def test_around_the_clock_by_default(self):
+        # Owner, 2026-10-23: "All around the clock, if there is available capacity".
+        saturday_night = dt.datetime(2026, 10, 18, 10, 0, tzinfo=dt.timezone.utc)  # Sat 03:00 Pacific
+        self.assertEqual(pacing.check(self.db, CONFIG, saturday_night), {"go": True})
+
     def test_outside_working_hours_waits_for_next_weekday_morning(self):
+        CONFIG_HOURS = dict(CONFIG, pacing=dict(CONFIG.get("pacing") or {}, around_the_clock=False))
         saturday = dt.datetime(2026, 10, 17, 19, 0, tzinfo=dt.timezone.utc)
-        out = pacing.check(self.db, CONFIG, saturday)
+        out = pacing.check(self.db, CONFIG_HOURS, saturday)
         self.assertEqual(out["reason"], "OUTSIDE_WORKING_HOURS")
         self.assertEqual(out["wait_until"], "2026-10-19T16:00:00+00:00")  # Monday 09:00 Pacific
         evening = dt.datetime(2026, 10, 15, 2, 0, tzinfo=dt.timezone.utc)  # Wed 19:00 Pacific
-        self.assertEqual(pacing.check(self.db, CONFIG, evening)["wait_until"], "2026-10-15T16:00:00+00:00")
+        self.assertEqual(pacing.check(self.db, CONFIG_HOURS, evening)["wait_until"], "2026-10-15T16:00:00+00:00")
 
     def test_jitter_spaces_requests_4_to_12_minutes(self):
         self.invite(WED_10AM)

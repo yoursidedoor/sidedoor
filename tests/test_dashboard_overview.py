@@ -14,6 +14,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import zoneinfo
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -710,6 +711,55 @@ class JobRunsTest(unittest.TestCase):
         self.hourly("2026-10-22T17", "DEGRADED", pacific(2026, 10, 22, 10, 0), pacific(2026, 10, 22, 10, 3))
         self.assertEqual(self.runs(scheduler)[0]["outreach"]["last"]["words"], "finished")
 
+    def test_ov_a_duplicate_slot_is_never_a_last_run(self):
+        # After a restart the scheduler fires the hourly job again (last_fired = this :00); the
+        # slot is recorded, so that start writes nothing and Last run stays the real round.
+        self.hourly("2026-10-22T17", "COMPLETE", pacific(2026, 10, 22, 10, 0, 3), pacific(2026, 10, 22, 10, 12))
+        refired = {"running": True, "job_failures": {}, "last_fired": {"run": pacific(2026, 10, 22, 10, 0).timestamp()}}
+        self.assertEqual(self.runs(refired)[0]["outreach"]["last"], {"at": pacific(2026, 10, 22, 10, 12), "words": "finished"})
+
+    def test_ov_a_round_past_the_hour_is_judged_by_its_own_start(self):
+        # The 9:00 round ran past 10:00 (the scheduler passed over 10:00, last_fired = 10:00) and
+        # exited 1 as DEGRADED: its own runs row is shown, not "did not finish" at the exit time.
+        self.hourly("2026-10-22T16", "DEGRADED", pacific(2026, 10, 22, 9, 0, 2), pacific(2026, 10, 22, 10, 20))
+        scheduler = {"running": True, "last_fired": {"run": pacific(2026, 10, 22, 10, 0).timestamp()},
+                     "job_failures": {"run": {"exit_code": 1, "at": pacific(2026, 10, 22, 10, 20, 1).isoformat(),
+                                              "started": pacific(2026, 10, 22, 9, 0).isoformat()}}}
+        self.assertEqual(self.runs(scheduler)[0]["outreach"]["last"], {"at": pacific(2026, 10, 22, 10, 20), "words": "finished"})
+        # The same for an applications run that ran past :30.
+        self.applications_run("COMPLETE", pacific(2026, 10, 22, 9, 30, 2), pacific(2026, 10, 22, 10, 35), {})
+        scheduler["last_fired"]["applications"] = pacific(2026, 10, 22, 10, 30).timestamp()
+        scheduler["job_failures"]["applications"] = {"exit_code": 1, "at": pacific(2026, 10, 22, 10, 35, 1).isoformat(),
+                                                     "started": pacific(2026, 10, 22, 9, 30).isoformat()}
+        self.assertEqual(self.runs(scheduler)[0]["applications"]["last"]["words"], "finished")
+
+    def test_ov_a_skipped_applications_run_is_never_a_last_run(self):
+        # "Another applications run is active; skipped." writes no step and no report: after a
+        # restart refires :30, the run still going (or the latest real one) is what is shown.
+        self.applications_run("RUNNING", pacific(2026, 10, 22, 10, 30, 4), pacific(2026, 10, 22, 10, 31), {})
+        refired = {"running": True, "job_failures": {}, "last_fired": {"applications": pacific(2026, 10, 22, 10, 30).timestamp()}}
+        self.assertEqual(self.runs(refired)[0]["applications"]["last"]["words"], "running now")
+
+    def test_ov_the_hourly_run_records_nothing_for_a_recorded_slot(self):
+        root = self.root / "dup"
+        (root / "state").mkdir(parents=True)
+        database = orchestrator.connect(root)
+        try:
+            slot = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H")
+            database.execute("INSERT INTO runs(slot,started_at,state,completed_at) VALUES (?,?,?,?)",
+                             (slot, "2026-10-22T17:00:03+00:00", "COMPLETE", "2026-10-22T17:12:00+00:00"))
+            database.commit()
+            # Research pending too: a duplicate start must not write a yield record either.
+            with mock.patch.object(orchestrator, "research_turn_pending", return_value=True), \
+                    mock.patch.object(orchestrator, "settle_idle_browser_reservations",
+                                      side_effect=AssertionError("a duplicate does no work")):
+                self.assertEqual(orchestrator.run(root, self.config, database, {}), 0)
+            self.assertEqual([tuple(row) for row in database.execute("SELECT slot,state,completed_at FROM runs")],
+                             [(slot, "COMPLETE", "2026-10-22T17:12:00+00:00")])
+        finally:
+            database.close()
+        self.assertFalse((root / "reports" / "hourly-yield.json").exists())
+
     def test_yielded_to_research(self):
         self.hourly("2026-10-22T15", "COMPLETE", pacific(2026, 10, 22, 8, 0), pacific(2026, 10, 22, 8, 10))
         (self.reports / "hourly-yield.json").write_text(json.dumps(
@@ -812,8 +862,11 @@ class JobRunsTest(unittest.TestCase):
     def test_no_row_is_empty_with_an_applications_record_and_no_loop(self):
         # create_app without serve (a preview): Next run reads "Not running" on both cards, and Last
         # run shows the applications run with its result; no Last/Next row renders empty.
-        self.hourly("2026-10-22T17", "COMPLETE", pacific(2026, 10, 22, 10, 0), pacific(2026, 10, 22, 10, 12))
-        self.applications_run("COMPLETE", pacific(2026, 10, 22, 9, 30), pacific(2026, 10, 22, 9, 50), {})
+        # Today's date (Pacific), so the rows render as bare times whatever day the suite runs on.
+        today = dt.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles")).date()
+        y, m, d = today.year, today.month, today.day
+        self.hourly(f"{today.isoformat()}T17", "COMPLETE", pacific(y, m, d, 10, 0), pacific(y, m, d, 10, 12))
+        self.applications_run("COMPLETE", pacific(y, m, d, 9, 30), pacific(y, m, d, 9, 50), {})
         self.database.close()
         app = dashboard.create_app(SECRET, PORT, home=self.home, root=self.root, config=self.config)
         client = TestClient(app, base_url=f"http://127.0.0.1:{PORT}", follow_redirects=False)

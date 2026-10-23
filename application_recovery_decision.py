@@ -123,10 +123,11 @@ def decide(root, config, packet, timeout=30, executor=None):
         used.append({"decision": {"method": alternative.get("method", entry.get("method")),
                                   "instructions": alternative.get("instructions", entry.get("instructions", ""))}})
     artifacts = research_recovery.create_artifacts(root, scope="application-recovery")
+    calls = []  # the direct call's record (route, usage, cost), C3 2026-10-22; empty under codex
     try:
         value = research_recovery.bounded_decision(
             root, config, decision_prompt(packet), artifacts, timeout,
-            scope="application-recovery", executor=executor, schema=DECISION_SCHEMA)
+            scope="application-recovery", executor=executor, schema=DECISION_SCHEMA, calls=calls)
         research_recovery.validate_decision(value, supported, [], actions=ACTIONS)
         if value["action"] == "RELEASE" and (value["method"] or value["instructions"]):
             raise ValueError("Application recovery release cannot dispatch instructions")
@@ -139,6 +140,6 @@ def decide(root, config, packet, timeout=30, executor=None):
         if value["action"] == "ABANDON" and (value["method"] or value["instructions"]):
             raise ValueError("Application recovery abandonment cannot dispatch instructions")
     except Exception as error:
-        error.artifacts = artifacts
+        error.artifacts = dict(artifacts, calls=calls) if calls else artifacts
         raise
-    return dict(value, artifacts=artifacts)
+    return dict(value, artifacts=dict(artifacts, calls=calls) if calls else artifacts)

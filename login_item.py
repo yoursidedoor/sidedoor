@@ -6,8 +6,8 @@ crash, never after a deliberate Quit. So the entry restarts only on a failed exi
 deliberate stops (Ctrl-C, the OS stopping it with SIGTERM at log out or `bootout`, the tray's Quit
 later) exit 0 (`clean_stop`).
 
-- macOS: a LaunchAgent `~/Library/LaunchAgents/com.yoursidedoor.sidedoor.plist` (never the harness's
-  labels) with RunAtLoad and KeepAlive {SuccessfulExit: false}, loaded with
+- macOS: a LaunchAgent `~/Library/LaunchAgents/com.yoursidedoor.sidedoor.plist` (never another
+  program's labels) with RunAtLoad and KeepAlive {SuccessfulExit: false}, loaded with
   `launchctl bootstrap gui/<uid> <plist>` and unloaded with `launchctl bootout gui/<uid>/<label>`.
   A file in ~/Library/LaunchAgents is also loaded by macOS at every login. The plist runs a short
   /bin/sh launcher (`LAUNCHER`) that checks the program is still there, appends the output to the
@@ -194,12 +194,33 @@ def _sidedoor_home(home):
 def _program():
     """[program] or [python, orchestrator.py], as `scheduler_loop.job_command` runs the jobs."""
     if scheduler_loop.frozen():
-        return [sys.executable]
+        return [scheduler_loop.program()]
     return [sys.executable, str(scheduler_loop.ENTRY)]
 
 
+MOVE_TO_APPLICATIONS = "Move Sidedoor to your Applications folder, then open it again."
+TEMPORARY_PARTS = ("/AppTranslocation/", "/private/var/folders/", "/var/folders/")
+
+
+def app_location_problem(program=None, platform=None, user_home=None, frozen=None):
+    """macOS, the built app only (E9.T1 review AP4): MOVE_TO_APPLICATIONS when this copy runs from
+    somewhere a start-at-login entry must never point: a translocated copy (macOS runs a downloaded
+    app from a random read-only folder until it is moved), a temporary folder, or anywhere outside
+    /Applications and ~/Applications (Downloads, a disk image). None when the location is fine, from
+    source, and on other systems."""
+    if _platform(platform) != "mac" or not (scheduler_loop.frozen() if frozen is None else frozen):
+        return None
+    where = str(program or scheduler_loop.program())
+    if any(part in where for part in TEMPORARY_PARTS):
+        return MOVE_TO_APPLICATIONS
+    folders = (Path("/Applications"), _user_home(user_home) / "Applications")
+    if not any(folder in Path(where).parents for folder in folders):
+        return MOVE_TO_APPLICATIONS
+    return None
+
+
 def command(home=None):
-    """What the login entry runs: the frozen binary itself (`[sys.executable, "serve", ...]`), or this
+    """What the login entry runs: the frozen binary itself (`[<binary>, "serve", ...]`, scheduler_loop.program), or this
     Python with orchestrator.py from source, with `--at-login` and the Sidedoor home it was
     registered for (a login launch must use the same home, item 4)."""
     return _program() + list(ARGUMENTS) + ["--home", str(_sidedoor_home(home))]
@@ -339,7 +360,7 @@ def windowed_program():
     """The program Task Scheduler starts: the frozen build itself (built windowed, E9.T1), or
     pythonw.exe next to this Python, so no console window opens at logon."""
     if scheduler_loop.frozen():
-        return sys.executable
+        return scheduler_loop.program()
     windowed = Path(sys.executable).with_name("pythonw.exe")
     return str(windowed) if windowed.exists() else sys.executable
 
@@ -462,6 +483,8 @@ def status(runner=None, platform=None, user_home=None, uid=None, home=None, code
 def enable(runner=None, platform=None, user_home=None, root=None, uid=None, codex_path=None, home=None):
     """Register (idempotent). {"enabled", "ok", "message", "code"}; never raises for an OS refusal."""
     run, system = _runner(runner), _platform(platform)
+    if app_location_problem(platform=platform, user_home=user_home):
+        return _result(False, False, MOVE_TO_APPLICATIONS, "APP_NOT_IN_APPLICATIONS")
     try:
         if system == "mac":
             return _mac_enable(run, user_home, root, _uid(uid), codex_path, home)
@@ -497,8 +520,11 @@ def refresh(runner=None, platform=None, user_home=None, root=None, codex_path=No
     """Rewrite a registered entry whose content would differ now (item 5): macOS rewrites the plist
     only (no bootout or bootstrap: launchd reads it at the next login, and a running Sidedoor is never
     stopped); Windows re-creates the task (`/F`; a running task is not stopped). Returns True when it
-    rewrote. Never raises."""
+    rewrote. Never raises. A copy running from a temporary or Downloads location never repoints an
+    entry (AP4): the entry keeps naming the copy in Applications."""
     system = _platform(platform)
+    if app_location_problem(platform=platform, user_home=user_home):
+        return False
     try:
         if system == "mac":
             path = plist_path(user_home)

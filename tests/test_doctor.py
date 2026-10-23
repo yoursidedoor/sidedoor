@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import credential_fixtures
+import credentials
 import doctor
 import license_fixtures
 import setup_steps
@@ -85,13 +87,18 @@ class DoctorBase(unittest.TestCase):
 
 class HealthyHomeTest(DoctorBase):
     def test_every_check_passes(self):
+        store = credential_fixtures.use_fake(self)   # E2.T4: the keys are read from the store
         self.healthy()
+        result = credentials.migrate(self.home)
+        self.assertEqual((result["openrouter"], result["license"]), ("moved", "moved"))
+        self.assertEqual(store.values(), sorted([LICENSE, OPENROUTER]))
         with mock.patch.object(setup_steps, "validate_profile", lambda form, state: ({}, {})):
             lines = self.run_doctor()
         names = [line["name"] for line in lines]
-        self.assertEqual(names, ["Python and Sidedoor", "Home folder", "Setup file", "Profile", "Résumé", "OpenRouter",
+        self.assertEqual(names, ["Python and Sidedoor", "Home folder", "Setup file", "Profile", "Résumé", "Credentials", "OpenRouter",
                                  "Codex", "Google Chrome", "Browser runtime", "License", "LinkedIn", "Database",
-                                 "Recent failures", "Scheduler", "Tray icon", "Disk space", "Computer"])
+                                 "Recent failures", "Model cost", "Scheduler", "Tray icon", "PDF writer", "App location",
+                                 "Disk space", "Computer"])
         self.assertEqual({line["name"]: line["status"] for line in lines if line["status"] != "OK"}, {})
         found = self.by_name(lines)
         self.assertIn("SD-...TLUS", found["License"]["line"])

@@ -30,6 +30,7 @@ import reconciliation
 import decision_transport
 import reporting
 import log_retention
+import model_calls
 from research_recovery import research_recovery_decision, research_recovery_methods
 import workflow_tasks
 import research_workflow
@@ -111,6 +112,7 @@ def connect(root):
     # 2026-10-02), so each waits out the other's short write transactions.
     database = sqlite3.connect(paths.database(root), timeout=run_locks.BUSY_TIMEOUT_SECONDS,
                                factory=run_locks.WriteFirstConnection)
+    model_calls.use(paths.database(root))  # one row per model call (C4)
     database.row_factory = sqlite3.Row
     database.execute("PRAGMA journal_mode=WAL")
     database.execute("PRAGMA synchronous=FULL")
@@ -1208,6 +1210,10 @@ def run_research_worker(root, command, prompt, log_path, timeout):
     environment = {key: value for key, value in os.environ.items() if key not in {
         "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID",
         "OPENAI_ORGANIZATION", "OPENAI_PROJECT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"}}
+    # E0.T8: the shell's OpenAI variables are still stripped; with an API key chosen, the saved key
+    # goes in as CODEX_API_KEY (ChatGPT sign-in: this environment, untouched).
+    import openai_auth
+    environment = openai_auth.environment(command, environment)
     with log_path.open("w") as log:
         # Its own session (POSIX) or Job Object (Windows), so the kill below reaches its whole tree.
         worker = subprocess.Popen(command, stdin=subprocess.PIPE, text=True, cwd=root,
@@ -1234,7 +1240,8 @@ def run_research_worker(root, command, prompt, log_path, timeout):
     if worker.returncode:
         import provider_limits
         raise RuntimeError(f"Research worker exited {worker.returncode}; see {log_path.name}") from provider_limits.check(
-            worker.returncode, log_path)
+            worker.returncode, log_path, command=command)
+    openai_auth.succeeded(command)   # E0.T8 AK5
 
 
 def research(root, config, database, pipeline, observation):
@@ -1417,6 +1424,18 @@ def settle_idle_browser_reservations(root, database):
 
 def run(root, config, database, pipeline, local_only=False):
     slot = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H") + (":local-check" if local_only else "")
+    with database:
+        recorded = database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").fetchone() and \
+            database.execute("SELECT 1 FROM runs WHERE slot=?", (slot,)).fetchone()
+        if recorded:
+            # A duplicate start of a slot already run (e.g. the scheduler firing again after a
+            # restart): nothing runs and nothing is recorded, not even a yield, so Overview's
+            # "Last run" keeps the slot's real round. A row left RUNNING by a killed round is
+            # still closed (this process holds the runner lock, so no round is running).
+            database.execute("UPDATE runs SET state='INTERRUPTED' WHERE state='RUNNING'")
+    if recorded:
+        LOG.info("This hourly slot is already recorded; no duplicate execution.")
+        return 0
     if not local_only:
         settle_idle_browser_reservations(root, database)
     if not local_only and research_turn_pending(config, database):
@@ -1488,12 +1507,25 @@ JOB_COMMANDS = ("run", "research", "applications")
 
 
 def main(argv=None):
+    from_command_line = argv is None
     argv = list(sys.argv[1:] if argv is None else argv)
+    import scheduler_loop
+    if from_command_line and scheduler_loop.frozen():
+        # The frozen app (E9.T1): Finder starts Sidedoor.app's binary with no arguments (old macOS
+        # adds a -psn_ process serial number), and a double-click is `sidedoor serve`.
+        argv = [value for value in argv if not value.startswith("-psn_")] or ["serve"]
+    # `sidedoor reply-tools serve --directory D` (E9.T1): the reply AI's MCP server in a frozen build,
+    # which has no reply_tools.py to start (reply_tools.server_argv). Its stdout is the JSON-RPC channel.
+    if argv[:1] == ["reply-tools"]:
+        import reply_tools
+        log.configure(job="reply-tools")  # the install's secrets redacted from its stderr; INFO never on stdout
+        return reply_tools.main(argv[1:])
     # `sidedoor browser-guard ...` (E7.T1, option A): the guarded browser MCP server Codex starts for
     # every browser job (browser_runtime.guard_command). Its stdout is the JSON-RPC channel, so it is
     # dispatched before anything else here can print.
     if argv[:1] == ["browser-guard"]:
         import browser_guard
+        log.configure(job="browser-guard")  # as reply-tools: stderr only, the install's secrets redacted
         return browser_guard.main(argv[1:])
     # `sidedoor doctor [--online] [--json]` (E4.T4): the dependency report (doctor.main).
     if argv[:1] == ["doctor"]:

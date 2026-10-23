@@ -323,6 +323,7 @@ class CommandTests(unittest.TestCase):
                              | ({browser_guard.ARM_TOOL} if claim else set()))
             mcp = args[args.index("--") + 1:]
             self.assertEqual(mcp[mcp.index("--output-dir") + 1], str(directory / "browser"))
+            # Off in tests (profile_home); the macOS background form is tests/test_browser_focus.py's.
             self.assertEqual(mcp[mcp.index("--user-data-dir") + 1], str(setup_steps.BROWSER_PROFILE))
             self.assertNotIn("--headless", mcp)
             self.assertEqual(json.loads((directory / "browser-config.json").read_text()), browser_runtime.LAUNCH_CONFIG)

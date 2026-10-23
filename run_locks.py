@@ -162,6 +162,14 @@ def held(root, *names, wait_seconds=0, poll_seconds=2):
 _local = threading.local()
 
 
+def browser_held_here(root=None):
+    """True when this thread holds state/browser.lock through `browser_session` (for `root`; None: any)."""
+    current = getattr(_local, "browser", None) or {}
+    if root is None:
+        return any(current.values())
+    return bool(current.get(str(Path(root).resolve())))
+
+
 @contextlib.contextmanager
 def browser_session(root, wait_seconds=0):
     """Hold state/browser.lock for one Chrome session. Yields True when held.

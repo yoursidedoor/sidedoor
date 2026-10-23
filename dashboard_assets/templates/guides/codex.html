@@ -1,4 +1,5 @@
 <h3>Codex and a ChatGPT plan</h3>
+<p>Codex works with either: <strong>Sign in with ChatGPT</strong> (the default) or an <strong>OpenAI API key</strong> (optional). If one stops working, Sidedoor uses the other.</p>
 <ol>
   <li>You need a ChatGPT account on a paid plan: Plus, Pro, Business, Edu or Enterprise. (Free and Go include Codex only in the desktop app, not the Terminal version Sidedoor uses.) Buy or upgrade at <a href="https://chatgpt.com/pricing" target="_blank" rel="noopener noreferrer">chatgpt.com/pricing</a>.</li>
   <li>Install Codex. On a Mac or Linux, open Terminal and paste:
@@ -7,11 +8,19 @@
     <pre class="copy">powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"</pre>
     Press Return (Enter on Windows). The same command updates Codex later.</li>
   <li>At the end the installer asks "Start Codex now?". Type <code>y</code> and press Return (pressing Return alone means No). That starts Codex and its sign-in. Choose <strong>Sign in with ChatGPT</strong>; a browser window opens; sign in with your ChatGPT account. If you answered No, or whenever you later type a <code>codex</code> command, open a <strong>new</strong> Terminal (or PowerShell) window first: on a Mac or Linux the installer puts Codex in <code>~/.local/bin</code> and only adds it for new windows, so in the same window <code>codex</code> gives "command not found". In the new window type <code>codex</code> and press Return.</li>
-  <li>Choose Sign in with ChatGPT. Sidedoor needs this sign-in, and it means you never handle an API key. If Codex is already signed in with an API key, switch it (in a new Terminal window):
+  <li>Choose Sign in with ChatGPT. This is the sign-in Sidedoor uses unless you choose an OpenAI API key (below). If Codex is already signed in with an API key, switch it (in a new Terminal window):
     <ol type="a">
       <li>Type <code>codex logout</code> and press Return.</li>
       <li>Type <code>codex login</code> and press Return. A browser window opens; sign in with your ChatGPT account.</li>
     </ol></li>
   <li>Back in Sidedoor, click Check in step 6.</li>
+</ol>
+<h3>Or: Codex with an OpenAI API key</h3>
+<p>Optional. Codex can use an OpenAI API key; OpenAI then bills that key for everything Sidedoor does, so watch your usage. You can keep Codex signed in with ChatGPT as well: if the key stops working, Sidedoor uses your ChatGPT sign-in.</p>
+<ol>
+  <li>Install Codex as in step 2 above. Signing Codex in with ChatGPT is optional, as a fallback.</li>
+  <li>Sign in at <a href="https://platform.openai.com" target="_blank" rel="noopener noreferrer">platform.openai.com</a>, add credit under Billing, then open API keys and click Create new secret key. Copy the key (it starts with <code>sk-</code>); OpenAI shows it only once.</li>
+  <li>In Sidedoor's step 6, click <strong>Use an OpenAI API key</strong>, paste the key and click Save and test. The test reads which models your key can use and makes one tiny call (a tiny amount of credit). Sidedoor keeps the key on this computer and never shows it in full again.</li>
+  <li>If your key runs out of credit or OpenAI refuses it, Sidedoor uses your ChatGPT sign-in and shows a banner; once a key passes its test again, Sidedoor goes back to the key. With no ChatGPT sign-in, Sidedoor waits (no work is lost) until you add credit or replace the key. You can switch to Sign in with ChatGPT at any time; the key stays saved until you remove it.</li>
 </ol>
 <p class="muted">What is Terminal? On a Mac: Applications &gt; Utilities &gt; Terminal. What is PowerShell? On Windows: open the Start menu, type PowerShell and press Enter.</p>

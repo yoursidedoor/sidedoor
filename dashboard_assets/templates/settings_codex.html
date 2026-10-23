@@ -3,6 +3,31 @@
   <h3>Codex and ChatGPT</h3>
   {% if x.codex.message %}<p class="note note-{{ 'success' if x.codex_done else 'error' }}" role="status">{% if x.codex.status == "done" and not x.codex_done %}Codex is not installed.{% else %}{{ x.say(x.codex.message) }}{% endif %}</p>{% endif %}
   {% if x.codex_done and x.codex_path %}<p class="muted">Found at {{ x.codex_path }}</p>{% endif %}
+  {# E0.T8: Sign in with ChatGPT (default) or Use an OpenAI API key; the key box follows the OpenRouter rule (hidden, eye to show). #}
+  <form method="post" action="/settings/codex/auth" hx-post="/settings/codex/auth" hx-target="#connection-codex" hx-swap="outerHTML" hx-disabled-elt="find button" class="choice">
+    <button class="button {{ 'button-highlight' if x.codex_auth_view != 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="chatgpt" aria-pressed="{{ 'true' if x.codex_auth_view != 'api_key' else 'false' }}">Sign in with ChatGPT</button>
+    <button class="button {{ 'button-highlight' if x.codex_auth_view == 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="api_key" aria-pressed="{{ 'true' if x.codex_auth_view == 'api_key' else 'false' }}">Use an OpenAI API key</button>
+  </form>
+  {% if x.codex_auth_view == "api_key" %}
+  {# E2.T4: kept like the OpenRouter key; while the keychain waits, the waiting line replaces the key forms. #}
+  {% if x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_notice }}</p>{% endif %}
+  {% if x.keychain_wait and x.keychain_wait != x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_wait }}</p>{% endif %}
+  {% if not x.keychain_wait or x.offer_file %}
+  {% if x.keychain_wait %}{% elif x.openai_key %}<p>Key saved, ending in <code>{{ x.openai_key }}</code>.{% if x.openai_test_state == "failed" %} Its last test did not pass.{% elif x.openai_untested %} It is not tested yet.{% endif %}</p>
+  <form method="post" action="/settings/codex/key/test" hx-post="/settings/codex/key/test" hx-target="#connection-codex" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button {{ 'button-highlight' if x.openai_untested else 'button-quiet' }}" type="submit">{{ "Test saved key" if x.openai_untested else "Test" }} (uses a tiny amount of credit)</button> <span class="htmx-indicator muted">Checking...</span></form>
+  <form method="post" action="/settings/codex/key/remove" hx-post="/settings/codex/key/remove" hx-target="#connection-codex" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button button-quiet" type="submit">Remove key</button></form>
+  {% else %}<p class="muted">No key saved yet.</p>{% endif %}
+  <form method="post" action="/settings/codex/key" hx-post="/settings/codex/key" hx-target="#connection-codex" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="s-openai-key">{% if x.openai_key %}Your key (change it to replace it){% else %}OpenAI API key{% endif %}</label>
+    <span class="secret"><input id="s-openai-key" type="password" name="key" value="{{ x.openai_box }}" autocomplete="off" spellcheck="false" required><button class="reveal" type="button" data-reveal="s-openai-key" aria-controls="s-openai-key" aria-label="Show key" aria-pressed="false"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></span>
+    {% if not x.keychain_wait %}<button class="button" type="submit">{% if x.openai_key %}Replace{% else %}Save and test{% endif %} (uses a tiny amount of credit)</button>{% endif %}
+    {% if x.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  {% endif %}
+  {% endif %}
   <form method="post" action="/settings/codex" hx-post="/settings/codex" hx-target="#connection-codex" hx-swap="outerHTML" hx-disabled-elt="find button">
     <button class="button" type="submit">Check</button> <span class="htmx-indicator muted">Checking...</span></form>
   <a class="guide-link" href="/setup/guide/codex" hx-get="/setup/guide/codex" hx-target="#guide-panel">Show me how</a>

@@ -52,6 +52,8 @@ class ApplicationsJobLockTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Another applications run is active; skipped.", output)
         job.assert_not_called()
+        # No record: Overview's Applications "Last run" never shows a skip (overview_page.applications_last).
+        self.assertFalse((self.root / "reports" / "applications-service.json").exists())
 
     def test_the_runner_lock_does_not_stop_the_applications_job(self):
         """The hourly cycle holding state/runner.lock no longer stops applications, and the

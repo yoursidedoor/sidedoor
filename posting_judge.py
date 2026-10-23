@@ -336,9 +336,13 @@ def same_job_packet(database, job, before_submit=False):
     # Before a submit: its jobs already applied to or being submitted (owner, 2026-10-06: "Keep it
     # minimal").
     if not before_submit:
+        # A job already attached as a copy of another listing is not shown: the job it copies is, and
+        # naming the copy made two listings copies of each other with neither applied to (Cognition,
+        # 2026-10-23).
         others = database.execute("""SELECT job_key,requisition,state,payload FROM application_jobs
-            WHERE employer=? AND job_key!=? ORDER BY updated_at DESC LIMIT ?""",
-            (job["employer"], job["job_key"], SAME_JOB_CANDIDATES)).fetchall()
+            WHERE employer=? AND job_key!=? AND NOT (state='DUPLICATE' AND blocker=?)
+            ORDER BY updated_at DESC LIMIT ?""",
+            (job["employer"], job["job_key"], SAME_JOB_BLOCKER, SAME_JOB_CANDIDATES)).fetchall()
         return _packet(job, others)
     others = database.execute("""SELECT job_key,requisition,state,payload FROM application_jobs
         WHERE employer=? AND job_key!=?

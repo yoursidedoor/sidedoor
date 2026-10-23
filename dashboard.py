@@ -344,10 +344,19 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             left = progress["left"]
             banners.append({"tone": "warning", "text": "Setup is not finished: %d step%s left." % (left, "" if left == 1 else "s"),
                             "action_label": "Continue setup", "action_href": "/setup"})
+        misplaced = login_item.app_location_problem()
+        if misplaced:  # E9.T1 AP4: start at login is never registered or refreshed from this copy
+            banners.append({"tone": "warning", "text": misplaced})
         notice = login_item.take_notice(Path(home) if home is not None else user_profile.home())
         if notice:  # why a login launch gave up; shown once, by whichever page renders first
             banners.append({"tone": "warning", "text": notice,
                             "action_label": "Start at login", "action_href": "/settings#login"})
+        import openai_auth  # E0.T8: "Your OpenAI API key is out of credit" (and rate limit, refused key)
+        api_banner = openai_auth.banner(home)
+        if api_banner:
+            if not progress["finished"]:
+                api_banner = dict(api_banner, action_href="/setup#step-6")
+            banners.append(api_banner)
         moving = data_move_banner(home, app.state.data_move_error)
         if moving:
             banners.insert(0, moving)  # E9.T1: before anything else, so no one acts on an empty home
@@ -356,6 +365,12 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         license_banner = license_clock.banner(license_view)
         if license_banner:
             banners.insert(0, license_banner)  # most urgent first (E6.T0 section 2)
+        import credentials  # E2.T4 (R3): a locked keychain holds every job; first of all (a locked
+        # keychain also reads as "no license" below it)
+        hold = credentials.hold_reason(home)
+        if hold:
+            banners.insert(0, {"tone": "error", "text": hold, "action_label": "Check again",
+                                "action_href": {key: href for key, _, href in TABS + (SETUP_TAB,)}.get(active, "/")})
         import update_check  # E9.T3: a newer Sidedoor, last of all (license problems come first)
         update_banner = update_check.banner(home)
         if update_banner:
@@ -551,12 +566,24 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                 "website": setup_steps.WEBSITE_URL, "busy_line": setup_steps.BUSY_LINE}
         if number == 1 and locked is None and progress["locked"].get(2) == 1:
             view["unlocks"] = 2
+        if number in (1, 5, 6):   # 6: the OpenAI API key (E0.T8) is kept the same way
+            view["keychain_wait"] = setup_steps.keys_waiting(home)   # E2.T4 (KR1): in place of the key form
+            import credentials
+            view["offer_file"] = credentials.offer_file(Path(home) if home is not None else user_profile.home())
         if number == 1 and status != "done":
             # GR1: a key saved but never tested (or saved before the tested mark existed) is shown
             # masked with [Test saved key], so the user never types it again.
             stored = setup_steps.saved_openrouter_key(home)
             if stored and not setup_steps.openrouter_tested(home):
                 view["saved_key"] = settings_page.masked(stored)
+        if number == 6:  # E0.T8: the sign-in choice; a saved key only ever masked here
+            import openai_auth
+            stored = openai_auth.shown_key(home)   # None while the keychain waits (the waiting line shows)
+            test_state = settings_page._openai_test_state(home)
+            view.update(codex_auth=setup_steps.codex_auth(state), codex_auth_view=setup_steps.codex_auth_view(state),
+                        openai_key=settings_page.masked(stored),
+                        openai_untested=bool(stored) and test_state != "passed",
+                        openai_test_state=test_state)
         if number == 3:
             form = setup_steps.profile_form(home)
             view.update(form=form, errors=saved.get("errors") or {}, pick=pick_view,
@@ -627,7 +654,11 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     @app.post("/setup/openrouter")
     async def openrouter(request: Request):
         form = await form_of(request)
-        await run_in_threadpool(setup_steps.save_and_test_openrouter, form.get("key"), config, home)
+        typed = form.get("key") if isinstance(form.get("key"), str) else ""
+        state = await run_in_threadpool(setup_steps.save_and_test_openrouter, typed, config, home, None,
+                                        form.get("to_file") == "1")
+        if state.get("keychain_refused"):   # KC2: nothing saved or recorded; the typed key stays in its box
+            return setup_response(request, 1, {"keychain_notice": state["keychain_refused"], "key_box": typed})
         return setup_response(request, 1)
 
     @app.post("/setup/resume")
@@ -720,7 +751,11 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     @app.post("/setup/license")
     async def license_(request: Request):
         form = await form_of(request)
-        await run_in_threadpool(setup_steps.activate_license, form.get("key"), home, relay_url)
+        typed = form.get("key") if isinstance(form.get("key"), str) else ""
+        state = await run_in_threadpool(setup_steps.activate_license, typed, home, relay_url, None,
+                                        form.get("to_file") == "1")
+        if state.get("keychain_refused"):   # KC2
+            return setup_response(request, 5, {"keychain_notice": state["keychain_refused"], "key_box": typed})
         await run_in_threadpool(sync_license_pause, root, home)  # E8.T3
         if setup_steps.license_done(home):  # a newly active key: read LinkedIn again at once
             await run_in_threadpool(setup_steps.linkedin_status, home, relay_url)
@@ -729,6 +764,38 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     @app.post("/setup/codex")
     def codex(request: Request):
         setup_steps.check_codex(home)
+        return setup_response(request, 6)
+
+    # E0.T8: step 6 offers Sign in with ChatGPT (default) or an OpenAI API key.
+    @app.post("/setup/codex/auth")
+    async def codex_auth(request: Request):
+        form = await form_of(request)
+        await run_in_threadpool(setup_steps.choose_codex_auth, form.get("choice"), config, home)
+        return setup_response(request, 6)
+
+    @app.post("/setup/codex/key")
+    async def codex_key(request: Request):
+        form = await form_of(request)
+        typed = form.get("key") if isinstance(form.get("key"), str) else ""
+        state = await run_in_threadpool(setup_steps.save_and_test_openai, typed, config, home, None, None,
+                                        form.get("to_file") == "1")
+        if state.get("keychain_refused"):   # KC2: nothing saved or recorded; the typed key stays in its box
+            return setup_response(request, 6, {"keychain_notice": state["keychain_refused"], "openai_box": typed})
+        # AK1: a refused key is never written; it stays in its hidden box so it is never typed again.
+        import openai_auth
+        kept = state["steps"]["codex"]["status"] == "failed" and typed.strip() != (openai_auth.shown_key(home) or "")
+        return setup_response(request, 6, {"openai_box": typed} if kept else None)
+
+    @app.post("/setup/codex/key/test")
+    async def codex_key_test(request: Request):
+        await run_in_threadpool(setup_steps.test_saved_openai, config, home)
+        return setup_response(request, 6)
+
+    @app.post("/setup/codex/key/remove")
+    async def codex_key_remove(request: Request):
+        state = await run_in_threadpool(setup_steps.remove_openai_key, home)
+        if state.get("keychain_refused"):   # A5: nothing removed
+            return setup_response(request, 6, {"keychain_notice": state["keychain_refused"]})
         return setup_response(request, 6)
 
     @app.get("/setup/linkedin/status")
@@ -1138,13 +1205,21 @@ def _serve(open_browser, home, path, start, scheduler, tray=False):
     if root is None:
         listener.close()
         return 1
+    import credentials  # E2.T4: move the key files into the OS store before any job starts (K2)
+    try:
+        credentials.migrate(home_path, log=lambda line: print(line, file=sys.stderr, flush=True))
+    except Exception as error:  # never stops the dashboard: the files stay and are read first
+        print("Sidedoor could not move its keys this start (%s); it tries again next start." % type(error).__name__,
+              file=sys.stderr, flush=True)
     setup_steps.refresh_login_entry(home)  # a moved program, folder or Codex: rewrite the entry (E5.T2)
     login_item.sweep_own_logs(root)
+    close_orphaned_browser(root)   # a session Chrome the last run left behind (it was stopped mid-session)
     rotation = login_item.start_hourly_rotation(root)
     loop = scheduler_loop.install(scheduler if scheduler is not None else scheduler_loop.Loop(
         root, license_sync=lambda: scheduler_loop.sync_license_pause(root, home),
         before_start=lambda: paths.migrate(root, serving=True),
-        license_reason=lambda: scheduler_loop.license_pause_reason(home)))
+        license_reason=lambda: scheduler_loop.license_pause_reason(home),
+        credentials_hold=lambda: credentials.hold_reason(home_path)))
     try:
         # The loop starts only once the app exists and inside this try, so whatever stops the
         # dashboard also stops and uninstalls the loop.
@@ -1179,7 +1254,19 @@ def _serve(open_browser, home, path, start, scheduler, tray=False):
         if scheduler_loop.current() is loop:
             scheduler_loop.install(None)  # nothing in this process can start it again
         listener.close()
+        # Quit: a session still running keeps its Chrome (it holds the browser lock and its guard
+        # closes that Chrome when it ends); a Chrome no session owns any more is closed now.
+        close_orphaned_browser(root)
     return 0
+
+
+def close_orphaned_browser(root):
+    """browser_runtime.close_orphan for Sidedoor's profile at start and at Quit. Never raises."""
+    try:
+        import browser_runtime
+        return browser_runtime.close_orphan(None, root)
+    except Exception:
+        return False
 
 
 # --- the tray icon (E5.T3) ------------------------------------------------------------------------

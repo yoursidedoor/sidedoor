@@ -14,7 +14,10 @@
 
   {% if step.number == 1 %}
   <p class="why">Sidedoor's AI writes and checks your messages and reads your résumé through OpenRouter. The key is kept on this computer.</p>
-  {% if step.saved_key %}
+  {% if step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_notice }}</p>{% endif %}
+  {% if step.keychain_wait and step.keychain_wait != step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_wait }}</p>{% endif %}
+  {% if not step.keychain_wait or step.offer_file %}
+  {% if step.saved_key and not step.keychain_wait %}
   <p>A key is saved, ending in <code>{{ step.saved_key }}</code>, but it hasn't been tested yet.</p>
   <form method="post" action="/setup/openrouter/test" hx-post="/setup/openrouter/test" hx-target="#step-1" hx-swap="outerHTML" hx-disabled-elt="find button">
     <button class="button button-highlight" type="submit">Test saved key</button>
@@ -23,10 +26,12 @@
   {% endif %}
   <form method="post" action="/setup/openrouter" hx-post="/setup/openrouter" hx-target="#step-1" hx-swap="outerHTML" hx-disabled-elt="find button">
     <label for="openrouter-key">OpenRouter key</label>
-    <input id="openrouter-key" type="password" name="key" autocomplete="off" spellcheck="false" required>
-    <button class="button" type="submit">Save and test</button>
+    <input id="openrouter-key" type="password" name="key" value="{{ step.key_box or '' }}" autocomplete="off" spellcheck="false" required>
+    {% if not step.keychain_wait %}<button class="button" type="submit">Save and test</button>{% endif %}
+    {% if step.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
     <span class="htmx-indicator muted">Checking...</span>
   </form>
+  {% endif %}
   <a class="guide-link" href="/setup/guide/openrouter" hx-get="/setup/guide/openrouter" hx-target="#guide-panel">Show me how</a>
 
   {% elif step.number == 2 %}
@@ -127,19 +132,57 @@
 
   {% elif step.number == 5 %}
   <p class="why">Your license turns on Sidedoor's LinkedIn service. The 14-day trial starts when you buy.</p>
+  {% if step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_notice }}</p>{% endif %}
+  {% if step.keychain_wait and step.keychain_wait != step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_wait }}</p>{% endif %}
+  {% if not step.keychain_wait or step.offer_file %}
   <form method="post" action="/setup/license" hx-post="/setup/license" hx-target="#step-5" hx-swap="outerHTML" hx-disabled-elt="find button">
     <label for="license-key">License key</label>
-    <input id="license-key" name="key" placeholder="SD-..." autocomplete="off" spellcheck="false" required>
-    <button class="button" type="submit">Activate</button>
+    <input id="license-key" name="key" value="{{ step.key_box or '' }}" placeholder="SD-..." autocomplete="off" spellcheck="false" required>
+    {% if not step.keychain_wait %}<button class="button" type="submit">Activate</button>{% endif %}
+    {% if step.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
     <span class="htmx-indicator muted">Checking...</span>
   </form>
   <p>No key yet? <a class="button button-highlight" id="buy-license" href="{{ step.website }}" target="_blank" rel="noopener noreferrer">Buy a license</a></p>
   <span hx-get="/setup/guide/license" hx-trigger="click from:#buy-license" hx-target="#guide-panel"></span>
+  {% endif %}
   <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
 
   {% elif step.number == 6 %}
+  {% if step.codex_auth_view == "api_key" %}
+  <p class="why">Sidedoor's research and browser work run through Codex, using your OpenAI API key. OpenAI bills that key for what Sidedoor uses. The key is kept on this computer.</p>
+  {% else %}
   <p class="why">Sidedoor's research and browser work run through Codex, signed in with your ChatGPT plan.</p>
+  {% endif %}
   {% if step.state.codex_path and step.status == "done" %}<p class="muted">Found at {{ step.state.codex_path }}</p>{% endif %}
+  {# E0.T8: Sign in with ChatGPT (default) or Use an OpenAI API key. #}
+  <form method="post" action="/setup/codex/auth" hx-post="/setup/codex/auth" hx-target="#step-6" hx-swap="outerHTML" hx-disabled-elt="find button" class="choice">
+    <button class="button {{ 'button-highlight' if step.codex_auth_view != 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="chatgpt" aria-pressed="{{ 'true' if step.codex_auth_view != 'api_key' else 'false' }}">Sign in with ChatGPT</button>
+    <button class="button {{ 'button-highlight' if step.codex_auth_view == 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="api_key" aria-pressed="{{ 'true' if step.codex_auth_view == 'api_key' else 'false' }}">Use an OpenAI API key</button>
+  </form>
+  {% if step.codex_auth_view == "api_key" %}
+  {# E2.T4: the key is kept like the OpenRouter key; while the keychain waits, the waiting line replaces the key forms. #}
+  {% if step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_notice }}</p>{% endif %}
+  {% if step.keychain_wait and step.keychain_wait != step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_wait }}</p>{% endif %}
+  {% if not step.keychain_wait or step.offer_file %}
+  {% if step.openai_key and not step.keychain_wait %}
+  <p>A key is saved, ending in <code>{{ step.openai_key }}</code>.{% if step.openai_test_state == "failed" %} Its last test did not pass.{% elif step.openai_untested %} It is not tested yet.{% endif %}</p>
+  <form method="post" action="/setup/codex/key/test" hx-post="/setup/codex/key/test" hx-target="#step-6" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button {{ 'button-highlight' if step.openai_untested else 'button-quiet' }}" type="submit">Test saved key (uses a tiny amount of credit)</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  <form method="post" action="/setup/codex/key/remove" hx-post="/setup/codex/key/remove" hx-target="#step-6" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button button-quiet" type="submit">Remove key</button>
+  </form>
+  {% endif %}
+  <form method="post" action="/setup/codex/key" hx-post="/setup/codex/key" hx-target="#step-6" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="openai-key">{% if step.openai_key %}A different OpenAI API key{% else %}OpenAI API key{% endif %}</label>
+    <input id="openai-key" type="password" name="key" value="{{ step.openai_box or '' }}" autocomplete="off" spellcheck="false" required>
+    {% if not step.keychain_wait %}<button class="button" type="submit">Save and test (uses a tiny amount of credit)</button>{% endif %}
+    {% if step.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  {% endif %}
+  {% endif %}
   <form method="post" action="/setup/codex" hx-post="/setup/codex" hx-target="#step-6" hx-swap="outerHTML" hx-disabled-elt="find button">
     <button class="button" type="submit">Check</button>
     <span class="htmx-indicator muted">Checking...</span>

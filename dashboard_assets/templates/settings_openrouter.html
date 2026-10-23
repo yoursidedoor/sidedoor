@@ -2,17 +2,22 @@
 <div class="connection" id="connection-openrouter"{% if oob %} hx-swap-oob="true"{% endif %}>
   <h3>OpenRouter</h3>
   {% set o = x.openrouter %}
-  {% if x.openrouter_key %}<p>Key saved, ending in <code>{{ x.openrouter_key }}</code>.{% if x.openrouter_untested %} It hasn't been tested yet.{% endif %}</p>{% else %}<p class="muted">No key saved yet.</p>{% endif %}
+  {% if x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_notice }}</p>{% endif %}
+  {% if x.keychain_wait and x.keychain_wait != x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_wait }}</p>{% endif %}
+  {% if not x.keychain_wait or x.offer_file %}
+  {% if x.keychain_wait %}{% elif x.openrouter_key %}<p>Key saved, ending in <code>{{ x.openrouter_key }}</code>.{% if x.openrouter_untested %} It hasn't been tested yet.{% endif %}</p>{% else %}<p class="muted">No key saved yet.</p>{% endif %}
   {% if o.message %}<p class="note note-{{ 'success' if o.status == 'done' else 'error' }}" role="status">{{ x.say(o.message) }}</p>{% endif %}
-  {% if x.openrouter_key %}
+  {% if x.openrouter_key and not x.keychain_wait %}
   <form method="post" action="/settings/openrouter/test" hx-post="/settings/openrouter/test" hx-target="#connection-openrouter" hx-swap="outerHTML" hx-disabled-elt="find button">
     <button class="button {{ 'button-highlight' if x.openrouter_untested else 'button-quiet' }}" type="submit">{{ "Test saved key" if x.openrouter_untested else "Test" }}</button> <span class="htmx-indicator muted">Checking...</span></form>
   {% endif %}
   <form method="post" action="/settings/openrouter" hx-post="/settings/openrouter" hx-target="#connection-openrouter" hx-swap="outerHTML" hx-disabled-elt="find button">
     <label for="s-openrouter-key">{% if x.openrouter_key %}Your key (change it to replace it){% else %}OpenRouter key{% endif %}</label>
     <span class="secret"><input id="s-openrouter-key" type="password" name="key" value="{{ x.openrouter_box }}" autocomplete="off" spellcheck="false" required><button class="reveal" type="button" data-reveal="s-openrouter-key" aria-controls="s-openrouter-key" aria-label="Show key" aria-pressed="false"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></span>
-    <button class="button" type="submit">{% if x.openrouter_key %}Replace{% else %}Save and test{% endif %}</button>
+    {% if not x.keychain_wait %}<button class="button" type="submit">{% if x.openrouter_key %}Replace{% else %}Save and test{% endif %}</button>{% endif %}
+    {% if x.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
     <span class="htmx-indicator muted">Checking...</span>
   </form>
+  {% endif %}
   <a class="guide-link" href="/setup/guide/openrouter" hx-get="/setup/guide/openrouter" hx-target="#guide-panel">Show me how</a>
 </div>

@@ -7,11 +7,12 @@ every network call takes an injectable transport so tests stay offline.
 What is stored, all in the Sidedoor home (`user_profile.home()`), each file mode 0600:
 - `setup-state.json`: progress of every step, the review/automatic mode, the saved Codex path, the
   "Your webmail" choice, the uploaded résumé's record, the email-check lock, the LinkedIn wait.
-- `openrouter.key` (step 1; `text_model.key` reads it), `license.key` and
+- the OpenRouter key (step 1) and the license key (step 5) through `credentials` (E2.T4): the OS
+  store (Keychain / Credential Manager), else the 0600 files `openrouter.key` / `license.key`;
   `license-entitlement.json` (step 5), `machine-id` (step 5's machine), `resume/` (step 2).
 - `profile.json` (step 3), through the same answer shape `profile.example.json` shows.
 
-Secrets (OpenRouter key, license key) are written to their files and never put in the state, a
+Secrets (OpenRouter key, license key) are saved through `credentials.put` and never put in the state, a
 message, a log line or an exception text.
 
 Steps whose backend is not installed say so (`NOT_BUILT`): the email check's mailbox read when
@@ -37,10 +38,12 @@ import urllib.parse
 import urllib.request
 import uuid
 
+import credentials
 import portable
 import log
 import resume_intake
 import run_locks
+import openai_auth
 import text_model
 import unipile_port
 import user_profile
@@ -270,14 +273,59 @@ def email_locked(state):
 
 # --- Step 1: OpenRouter key ------------------------------------------------------------------------
 
-def save_and_test_openrouter(api_key, config, home=None, transport=None):
-    """Store the key in `openrouter.key` and make one tiny test call with it (text_model.complete)."""
+def keys_waiting(home=None):
+    """E2.T4 (KR1, KR4): the line shown in place of the key UI while the saved keys can't be read
+    (the OS store is locked or unavailable: `credentials.hold_reason`), else None. While it is set
+    no step reopens, no paste is offered, no failure is recorded and a save is refused."""
+    try:
+        return credentials.hold_reason(_home(home))
+    except Exception:
+        return None
+
+
+def keychain_refusal(home=None, to_file=False):
+    """Why a key save can't go ahead now (E2.T4 KC1, KC2), or None: "Unlock your keychain, then
+    click Save." while locked, the folder offer while the store is broken, the waiting line while
+    the saved keys wait. `to_file` (the user's "Save in Sidedoor's folder instead", only while
+    offered) always goes ahead. Writes nothing."""
+    if to_file and credentials.offer_file(_home(home)):
+        return None
+    try:
+        refusal = credentials.save_refusal(_home(home))
+    except Exception:
+        refusal = None
+    if refusal in (credentials.SAVE_LOCKED, credentials.SAVE_BROKEN):
+        return refusal
+    return keys_waiting(home)
+
+
+def _refused(home, text):
+    """The state as saved, plus the refusal for this response only: nothing is recorded (KR2)."""
+    return dict(load_state(home), keychain_refused=text)
+
+
+def _save_key(name, value, home, to_file):
+    if to_file and credentials.offer_file(_home(home)):
+        return credentials.put_file(name, value, _home(home))   # KC1: the user's own choice (K4)
+    return credentials.put(name, value, _home(home))
+
+
+def save_and_test_openrouter(api_key, config, home=None, transport=None, to_file=False):
+    """Store the key (credentials.put, or the folder when the user chose it: `to_file`) and make
+    one tiny test call with it (text_model.complete). While the keychain can't take it
+    (`keychain_refusal`) nothing is saved or recorded; the refusal comes back as
+    state["keychain_refused"] for this response only."""
+    refusal = keychain_refusal(home, to_file)
+    if refusal:
+        return _refused(home, refusal)
     api_key = (api_key or "").strip()
     if not api_key or any(ord(character) < 33 for character in api_key):
         return record(home, "openrouter", "failed", "Paste your OpenRouter key into the box first.")
     try:
-        _write_private(_home(home) / OPENROUTER_KEY_FILE, api_key + "\n")
+        _save_key("openrouter", api_key, home, to_file)   # E2.T4: the OS store, else the 0600 file (K4)
         (_home(home) / OPENROUTER_TESTED_FILE).unlink(missing_ok=True)   # a new key is untested until its test passes
+    except credentials.Unavailable:  # KR3/KC2: the store refused; nothing saved, nothing recorded
+        return _refused(home, keychain_refusal(home) or credentials.SAVE_BROKEN)
     except OSError:  # GR2: said plainly, never a 500
         return record(home, "openrouter", "failed", KEY_FOLDER_UNWRITABLE % _home(home))
     try:
@@ -306,12 +354,15 @@ def save_and_test_openrouter(api_key, config, home=None, transport=None):
 KEY_FOLDER_UNWRITABLE = ("Sidedoor couldn't save your key: it can't write to its folder (%s). Check the folder's "
                          "permissions, then try again.")
 TESTED_NOT_SAVED = "Key works, but Sidedoor couldn't save that it was tested."
+KEY_NOT_REMOVED = ("Sidedoor couldn't remove your key because the keychain isn't answering. Nothing was changed; "
+                   "try again once it's unlocked.")
 
 
 def saved_openrouter_key(home=None):
-    """The key in openrouter.key, else None."""
+    """The saved OpenRouter key (credentials.get: the OS store, or openrouter.key while one is
+    left), else None; None too while the store is locked (credentials.hold_reason says so)."""
     try:
-        return (_home(home) / OPENROUTER_KEY_FILE).read_text(encoding="utf-8").strip() or None
+        return credentials.get("openrouter", _home(home))
     except OSError:
         return None
 
@@ -319,6 +370,8 @@ def saved_openrouter_key(home=None):
 def test_saved_openrouter(config, home=None, transport=None):
     """[Test saved key] (GR1): the Save-and-test call on the key already saved, so the user never
     types it again; the tested mark is written when it passes."""
+    if keys_waiting(home):
+        return load_state(home)   # KR2: never a failure while the keychain is locked
     key = saved_openrouter_key(home)
     if not key:
         return record(home, "openrouter", "failed", "No OpenRouter key is saved yet. Paste yours and click Save and test.")
@@ -329,7 +382,7 @@ def openrouter_tested(home=None):
     """True when the saved key is the one whose last test passed (GM2: kept beside the key, so a
     reset setup file can tell). A key saved and refused, or changed since, is not."""
     try:
-        key = (_home(home) / OPENROUTER_KEY_FILE).read_text(encoding="utf-8").strip()
+        key = credentials.get("openrouter", _home(home)) or ""
         marker = json.loads((_home(home) / OPENROUTER_TESTED_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
@@ -1040,14 +1093,21 @@ def entitlement(home=None):
 
 
 def license_key(home=None):
+    """The saved license key (credentials.get: the OS store, or license.key while one is left),
+    else None; None too while the store is locked (credentials.hold_reason says so)."""
     try:
-        return (_home(home) / LICENSE_KEY_FILE).read_text(encoding="utf-8").strip() or None
+        return credentials.get("license", _home(home))
     except OSError:
         return None
 
 
-def activate_license(key, home=None, relay_url=RELAY_URL, post=None):
-    """`POST /license/activate {key, machine}`; stores the key and the signed entitlement on 200."""
+def activate_license(key, home=None, relay_url=RELAY_URL, post=None, to_file=False):
+    """`POST /license/activate {key, machine}`; stores the key (the OS store, or the folder when
+    the user chose it: `to_file`) and the signed entitlement on 200. While the keychain can't take
+    it (`keychain_refusal`) nothing is sent or recorded (state["keychain_refused"])."""
+    refusal = keychain_refusal(home, to_file)
+    if refusal:
+        return _refused(home, refusal)
     key = (key or "").strip()
     if (not key.startswith("SD-") or not key.isascii()
             or any(ord(character) < 33 or ord(character) == 127 for character in key)):
@@ -1056,7 +1116,10 @@ def activate_license(key, home=None, relay_url=RELAY_URL, post=None):
     import license_clock
     # Under the heartbeat's lock, and only a relay-signed answer for this key and computer is
     # stored (E8.T2, `license_clock.activate`).
-    outcome, value = license_clock.activate(key, home, relay_url, post or _post_json)
+    outcome, value = license_clock.activate(key, home, relay_url, post or _post_json,
+                                            to_file=to_file and credentials.offer_file(_home(home)))
+    if outcome == "keychain":   # the relay accepted it but the keychain refused it: nothing stored
+        return _refused(home, keychain_refusal(home) or credentials.SAVE_BROKEN)
     if outcome == "ok":
         label = "Trial" if value.get("status") == "trialing" else "Active"
         # No raw UTC time here: Settings > License shows "Good until" in the user's time zone.
@@ -1113,6 +1176,19 @@ def check_codex(home=None, run=subprocess.run, search_path=None):
         return record(home, "codex", "failed", "Codex is not installed.")
     update_state(lambda value: value.update(codex_path=path), home)
     refresh_login_entry(home)  # the entry's PATH follows the Codex found now (E5.T2)
+    if openai_auth.api_key_mode(home):
+        # E0.T8: signed in with the user's OpenAI API key; Codex's own login is not used.
+        try:
+            key, state_of_key = openai_auth.saved_key(home), openai_auth.test_state(home)
+        except OSError:   # E2.T4 (KR2): the keychain waits; never "no key", nothing recorded
+            return load_state(home)
+        if not key:
+            return record(home, "codex", "failed", "Codex is installed. Save your OpenAI API key to finish.")
+        if state_of_key != "passed":
+            return record(home, "codex", "failed", "Codex is installed, but your OpenAI API key's last test did not pass."
+                          if state_of_key == "failed" else
+                          "Codex is installed. Your OpenAI API key is not tested yet: click Test saved key.")
+        return record(home, "codex", "done", "Codex is installed and uses your OpenAI API key.")
     status = codex_login_status(path, run)
     if status == "UNAVAILABLE":
         return record(home, "codex", "failed", "Codex is not installed.")
@@ -1139,6 +1215,110 @@ def codex_login_status(path, run=subprocess.run):
     return "NOT_SIGNED_IN"
 
 
+# --- Step 6, E0.T8: Sign in with ChatGPT (default) or an OpenAI API key -------------------------------
+
+def codex_auth(state):
+    """The sign-in the workers use: "api_key" only once a key was saved and chosen, else "chatgpt"."""
+    return openai_auth.API_KEY if state.get("codex_auth") == openai_auth.API_KEY else openai_auth.CHATGPT
+
+
+def codex_auth_view(state):
+    """The choice the step shows: the one picked last (it may still wait for a key), else the one in use."""
+    return state.get("codex_auth_view") if state.get("codex_auth_view") in (openai_auth.CHATGPT, openai_auth.API_KEY) \
+        else codex_auth(state)
+
+
+def choose_codex_auth(choice, config, home=None, run=subprocess.run, transport=None):
+    """[Sign in with ChatGPT] / [Use an OpenAI API key]. ChatGPT is in use at once and keeps the saved
+    key (removing it is its own button). The API key is in use only with a saved key: one already
+    saved is used without typing it again (tested first when its last test did not pass); with none,
+    the step shows the key box and ChatGPT stays in use until a key is saved."""
+    if choice not in (openai_auth.CHATGPT, openai_auth.API_KEY):
+        choice = openai_auth.CHATGPT
+    if choice == openai_auth.CHATGPT:
+        update_state(lambda value: value.update(codex_auth=openai_auth.CHATGPT, codex_auth_view=openai_auth.CHATGPT), home)
+        return check_codex(home, run)
+    update_state(lambda value: value.update(codex_auth_view=openai_auth.API_KEY), home)
+    try:
+        key = openai_auth.saved_key(home)
+        passed = bool(key) and openai_auth.tested(home)
+    except OSError:   # E2.T4 (KR2): the keychain waits; the step shows the waiting line
+        return load_state(home)
+    if not key:
+        return record(home, "codex", "failed", "Paste your OpenAI API key and click Save and test.")
+    if passed:
+        update_state(lambda value: value.update(codex_auth=openai_auth.API_KEY), home)
+        return check_codex(home, run)
+    return save_and_test_openai(key, config, home, run, transport)
+
+
+def save_and_test_openai(api_key, config, home=None, run=subprocess.run, transport=None, to_file=False):
+    """Test the key in memory (openai_auth.test_key: models read plus one minimal call) and only then
+    write it to `openai.key` (0600) and use it (AK1): a refused key never replaces a working one, and
+    leaves the saved key and `codex_auth` as they were. A key that passes ends any OpenAI hold.
+    E2.T4: kept like the OpenRouter key (credentials.put, or the folder: `to_file`); while the
+    keychain can't take it (`keychain_refusal`) nothing is tested, saved or recorded, and the
+    refusal comes back as state["keychain_refused"] for this response only."""
+    refusal = keychain_refusal(home, to_file)
+    if refusal:
+        return _refused(home, refusal)
+    api_key = (api_key or "").strip()
+    if not api_key or any(ord(character) < 33 for character in api_key):
+        return record(home, "codex", "failed", "Paste your OpenAI API key into the box first.")
+    try:
+        update_state(lambda value: value.update(codex_auth_view=openai_auth.API_KEY), home)
+    except OSError:
+        return record(home, "codex", "failed", KEY_FOLDER_UNWRITABLE % _home(home))
+    try:
+        previous = openai_auth.saved_key(home)
+    except credentials.Unavailable:   # the store stopped answering since the refusal check
+        return _refused(home, keychain_refusal(home) or credentials.SAVE_BROKEN)
+    ok, _kind, words = openai_auth.test_key(api_key, config, transport)
+    if not ok:
+        if api_key == previous:
+            try:
+                openai_auth.mark_tested(api_key, home, passed=False)
+            except OSError:
+                pass
+        return record(home, "codex", "failed", words)
+    try:
+        if api_key != previous:
+            openai_auth.save_key(api_key, home, to_file)
+        openai_auth.mark_tested(api_key, home)
+    except credentials.Unavailable:   # KR3/KC2: the store refused; nothing saved, nothing recorded
+        return _refused(home, keychain_refusal(home) or credentials.SAVE_BROKEN)
+    except OSError:
+        return record(home, "codex", "failed", KEY_FOLDER_UNWRITABLE % _home(home))
+    openai_auth.release(home)   # a key that works ends the hold and the out-of-credit banner
+    update_state(lambda value: value.update(codex_auth=openai_auth.API_KEY), home)
+    return check_codex(home, run)
+
+
+def test_saved_openai(config, home=None, run=subprocess.run, transport=None):
+    if keys_waiting(home):
+        return load_state(home)   # KR2: never a failure while the keychain is locked
+    try:
+        key = openai_auth.saved_key(home)
+    except OSError:
+        return load_state(home)
+    if not key:
+        return record(home, "codex", "failed", "No OpenAI API key is saved yet. Paste yours and click Save and test.")
+    return save_and_test_openai(key, config, home, run, transport)
+
+
+def remove_openai_key(home=None, run=subprocess.run):
+    """[Remove key]: the key is deleted and ChatGPT sign-in is used again."""
+    try:
+        openai_auth.remove_key(home)
+    except credentials.Unavailable:   # A5: the keychain did not answer; the key is left as it was
+        return _refused(home, KEY_NOT_REMOVED)
+    except OSError:
+        return record(home, "codex", "failed", KEY_FOLDER_UNWRITABLE % _home(home))
+    openai_auth.release(home)
+    update_state(lambda value: value.update(codex_auth=openai_auth.CHATGPT, codex_auth_view=openai_auth.CHATGPT), home)
+    return check_codex(home, run)
+
+
 def codex_done(state):
     return state["steps"].get("codex", {}).get("status") == "done" and _usable(state.get("codex_path"))
 
@@ -1152,6 +1332,8 @@ def _relay_error(parsed):
 def linkedin_status(home=None, relay_url=RELAY_URL, transport=None):
     """Read the relay's `/accounts` for this license and save what it shows (E6.T0 step 7)."""
     key = license_key(home)
+    if not key and keys_waiting(home):
+        return load_state(home)   # KR7: the saved LinkedIn state stays as it is
     if not key:
         return record(home, "linkedin", "needs_you", "Needs your license first.", offer="none")
     try:
@@ -1283,6 +1465,8 @@ def linkedin_link(kind, home=None, relay_url=RELAY_URL, make_link=None):
     """A hosted-auth link (`unipile_port.hosted_link`, "create" or "reconnect"). Returns (state, url).
     The URL is shown to the user once and never stored (it carries Unipile's dsn)."""
     key = license_key(home)
+    if not key and keys_waiting(home):
+        return load_state(home), None   # KR7
     if kind not in ("create", "reconnect") or not key:
         return record(home, "linkedin", "needs_you", "Needs your license first.", offer="none"), None
     try:
@@ -1391,12 +1575,13 @@ def lock_holder_alive(profile):
     writes no SingletonLock: there a Chrome holding the profile's lockfile answers it
     (portable.profile_busy), and a pid is probed with OpenProcess, never `os.kill(pid, 0)`, which
     is TerminateProcess on Windows (B2)."""
-    try:
-        target = os.readlink(os.path.join(profile, "SingletonLock"))
-        pid = int(target.rsplit("-", 1)[1])
-    except (OSError, ValueError, IndexError):
+    import browser_runtime
+    owner = browser_runtime.lock_owner(profile)
+    if owner is None:
         return portable.profile_busy(profile)
-    return portable.pid_alive(pid)
+    if browser_runtime.clear_stale_lock(profile):   # this machine, process gone: stale, links removed
+        return False
+    return portable.pid_alive(owner[1])
 
 
 class _Hold:

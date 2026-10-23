@@ -10,11 +10,13 @@ disagree:
     Setup file                 setup_steps.state_unreadable (the dashboard's "couldn't read" banner)
     Profile                    user_profile.load + setup_steps.validate_profile(profile_form)
     Résumé                     reply_resume.context (the raw résumé's text) and the application résumé path
+    Credentials                credentials.status / where (E2.T4: the OS store, or the 0600 file)
     OpenRouter                 setup_steps.saved_openrouter_key + openrouter_tested (online: text_model.complete,
                                the Save-and-test call, as a pure read)
     Codex                      setup_steps.codex_candidates / _usable + codex_login_status
     Google Chrome              setup_steps.chrome_path
-    Browser runtime            browser_runtime.missing + profile_in_use (browser_runtime.unavailable's two parts)
+    Browser runtime            browser_runtime.display_state (missing, profile_in_use, and whether a Sidedoor
+                               session owns that Chrome: the browser lock or a running guard)
     License                    license_clock.view (online: license_clock.check first)
     LinkedIn                   setup-state's saved linkedin step (online: the relay's /accounts read that
                                setup_steps.linkedin_status makes, without recording anything)
@@ -198,8 +200,19 @@ def check_resume(home, root=ROOT):
     return _line(OK, "Résumé", "Saved and readable%s." % (" (%s pages)" % pages if pages else ""))
 
 
+WAITING_TODO = "Nothing to re-enter: Sidedoor carries on by itself once the keychain answers."
+
+
+def _waiting(home, name):
+    """KR6: while the keys wait for the keychain, the key's own line says so, never "no key"."""
+    waiting = setup_steps.keys_waiting(home)
+    return _line(WARN, name, "Waiting for the keychain. " + waiting, WAITING_TODO) if waiting else None
+
+
 def check_openrouter(home, config, online=False, transport=None):
     key = setup_steps.saved_openrouter_key(home)
+    if not key and _waiting(home, "OpenRouter"):
+        return _waiting(home, "OpenRouter")
     if not key:
         return _line(FAIL, "OpenRouter", "No OpenRouter key is saved.", "Paste your key in Settings > Connections.")
     shown = masked(key)
@@ -230,13 +243,60 @@ def check_openrouter(home, config, online=False, transport=None):
                  "Click Test saved key in Settings > Connections, or run doctor --online.")
 
 
-def check_codex(home, run=None):
+CREDENTIAL_LABELS = {"openrouter": "OpenRouter key", "license": "license key", "openai": "OpenAI API key"}
+
+
+def check_credentials(home):
+    """E2.T4: where the two keys are kept (credentials.status / where). WARN when one is still a
+    file (not moved yet, or no OS store: K4 keeps the 0600 file) or the store is locked."""
+    import credentials
+    store = credentials.where()
+    states = {name: credentials.status(name, home) for name in credentials.NAMES}
+    waiting = credentials.hold_reason(home)
+    if waiting:   # KR4: locked or unavailable alike; never "paste again"
+        if credentials.offer_file(home):   # KC1: broken, not locked: the folder is offered
+            return _line(WARN, "Credentials", waiting, "Or save your key in Sidedoor's folder instead (Settings), "
+                         "a private file only you can read.")
+        return _line(WARN, "Credentials", waiting, WAITING_TODO)
+    chosen = [CREDENTIAL_LABELS[name] for name, value in states.items() if value == "file_chosen"]
+    if chosen:   # KC1: say plainly where the key is kept
+        return _line(WARN, "Credentials", "Your %s %s kept in a private file (readable only by you) in %s, as you chose "
+                     "while %s couldn't be used." % (" and ".join(chosen), "is" if len(chosen) == 1 else "are",
+                                                     shown_path(home), store),
+                     "Nothing to do; Sidedoor moves it into %s at a start once it works." % store)
+    broken = [CREDENTIAL_LABELS[name] for name, value in states.items() if value == "file_unread"]
+    files = [CREDENTIAL_LABELS[name] for name, value in states.items() if value in ("file", "file_unread")]
+    verb = "is" if len(files) == 1 else "are"
+    conflict = [CREDENTIAL_LABELS[name] for name, value in states.items() if value == "conflict"]
+    if conflict:
+        return _line(WARN, "Credentials", "An older file with your %s is left in %s; Sidedoor uses the key kept in %s." % (
+            " and ".join(conflict), shown_path(home), store), "Nothing to do.")
+    if files and (store == "file" or broken):
+        why = "This computer has no keychain Sidedoor can use" if store == "file" else "Sidedoor could not use %s" % store
+        return _line(WARN, "Credentials", "%s, so your %s %s kept in a private file (readable only by you) in %s." % (
+            why, " and ".join(files), verb, shown_path(home)),
+            "Nothing to do; Sidedoor tries %s again at every start." % store if store != "file" else "Nothing to do.")
+    if files:
+        return _line(WARN, "Credentials", "Your %s %s still in a file in %s, not yet in %s." % (
+            " and ".join(files), verb, shown_path(home), store),
+            "Restart Sidedoor; it moves the key at start. If this stays, " + SUPPORT)
+    saved = [CREDENTIAL_LABELS[name] for name, value in states.items() if value == "store"]
+    if not saved:
+        return _line(OK, "Credentials", "No keys saved yet; they will be kept in %s." % store)
+    return _line(OK, "Credentials", "Your %s %s kept in %s." % (" and ".join(saved), "is" if len(saved) == 1 else "are",
+                                                               store))
+
+
+def check_codex(home, run=None, config=None, online=False, transport=None):
     import subprocess
     state = setup_steps.load_state(home)
     path = next((candidate for candidate in setup_steps.codex_candidates(state.get("codex_path"))
                  if setup_steps._usable(candidate)), None)
     if not path:
         return _line(FAIL, "Codex", "Codex is not installed.", "Install Codex (see Settings > Connections).")
+    import openai_auth
+    if openai_auth.api_key_mode(home):
+        return check_openai_key(home, config, online, transport)
     status = setup_steps.codex_login_status(path, run or subprocess.run)
     if status == "SIGNED_IN":
         return _line(OK, "Codex", "Installed and signed in with ChatGPT.")
@@ -247,26 +307,93 @@ def check_codex(home, run=None):
     return _line(FAIL, "Codex", "Codex is installed but not signed in.", "Run codex login and sign in with ChatGPT.")
 
 
+def check_openai_key(home, config, online=False, transport=None):
+    """E0.T8: Codex with the user's OpenAI API key: the key, its test, the hold and the last billing
+    wait (times in this computer's local time)."""
+    import credentials
+    import openai_auth
+    try:
+        key = openai_auth.saved_key(home)
+        openai_auth.test_state(home)
+    except OSError:   # E2.T4 (KR4): the keychain waits; never "none is saved"
+        return _line(WARN, "Codex", credentials.hold_reason(home) or "Sidedoor is waiting for your keychain to read "
+                     "your OpenAI API key.", WAITING_TODO)
+    if not key:
+        return _line(FAIL, "Codex", "Codex is set to use an OpenAI API key, but none is saved.",
+                     "Save your key in Settings > Connections, or Sign in with ChatGPT.")
+    shown = masked(key)
+    if online:
+        ok, kind, words = openai_auth.test_key(key, config or {}, transport)  # a pure read: nothing is saved
+        if not ok:
+            status = WARN if kind in ("network", "http", openai_auth.RATE_LIMIT) else FAIL
+            return _line(status, "Codex", "Installed; OpenAI API key %s: %s" % (shown, words),
+                         openai_auth.TODO.get(kind, "Check the key in Settings > Connections."))
+        lines = [_line(OK, "Codex", "Installed; OpenAI API key %s works (tested just now, using a tiny amount of "
+                       "credit)." % shown)]
+    else:
+        state = openai_auth.test_state(home)
+        if state == "passed":
+            lines = [_line(OK, "Codex", "Installed; uses OpenAI API key %s; its last test passed." % shown)]
+        elif state == "failed":
+            lines = [_line(WARN, "Codex", "Installed; OpenAI API key %s is saved but its last test did not pass." % shown,
+                           ONLINE_TEST)]
+        else:
+            lines = [_line(WARN, "Codex", "Installed; OpenAI API key %s is saved but not tested yet." % shown, ONLINE_TEST)]
+    used = openai_auth.fallback(home)
+    if used:   # OA2 a: the key failed; Codex runs on the ChatGPT sign-in, nothing is held
+        lines.append(_line(WARN, "OpenAI API", "%s (since %s; no attempts spent.)" % (
+            openai_auth.fallback_words(used["kind"]), openai_auth.local_time(used.get("since"))),
+            "Replace the key in Settings > Connections; Sidedoor uses it again once it passes its test."))
+        return lines
+    held = openai_auth.hold(home)
+    if held:
+        lines.append(_line(FAIL, "OpenAI API", "%s (since %s; no attempts spent.)" % (
+            openai_auth.HELD_WORDS[held["kind"]], openai_auth.local_time(held.get("since"))),
+            openai_auth.TODO["held_" + held["kind"]] if "held_" + held["kind"] in openai_auth.TODO
+            else openai_auth.TODO[held["kind"]]))
+        return lines
+    wait = openai_auth.last_wait(home)
+    if wait:
+        lines.append(_line(WARN if wait["kind"] == openai_auth.RATE_LIMIT else FAIL, "OpenAI API",
+                           "%s Work is waiting (no attempts spent); next try after %s." % (
+                               openai_auth.WORDS[wait["kind"]], openai_auth.local_time(wait.get("resume_at"))
+                               if wait.get("resume_at") else "a short wait"),
+                           openai_auth.TODO[wait["kind"]]))
+    return lines
+
+
+ONLINE_TEST = ("Click Test saved key in Settings > Connections, or run doctor --online (uses a tiny amount of "
+               "credit).")
+
+
 def check_chrome():
     if not setup_steps.chrome_path():
         return _line(FAIL, "Google Chrome", "Google Chrome is not installed.", "Install Google Chrome.")
     return _line(OK, "Google Chrome", "Installed.")
 
 
-def check_browser_runtime(config, run=None):
+def check_browser_runtime(config, run=None, root=None):
+    """FG1 problem 2: "close the window" only when no Sidedoor session holds the browser lock and no running
+    guard started the Chrome on the profile (browser_runtime.display_state); FG1 = b: the off-screen note."""
     import browser_runtime
-    if browser_runtime.missing(config):
+    state = browser_runtime.display_state(config, root, run)
+    if state == "RUNTIME_MISSING":
         return _line(FAIL, "Browser runtime", browser_runtime.UNAVAILABLE_WORDS["RUNTIME_MISSING"],
                      browser_runtime.UNAVAILABLE_TODO["RUNTIME_MISSING"])
-    if browser_runtime.profile_in_use(config, run):
+    if state == "PROFILE_IN_USE":
         return _line(WARN, "Browser runtime", browser_runtime.UNAVAILABLE_WORDS["PROFILE_IN_USE"],
                      browser_runtime.UNAVAILABLE_TODO["PROFILE_IN_USE"])
-    return _line(OK, "Browser runtime", "Present, and no other Chrome is using Sidedoor's profile.")
+    note = (" " + browser_runtime.OFFSCREEN_WORDS) if browser_runtime.offscreen(config) else ""
+    if state == "SESSION_BUSY":
+        return _line(OK, "Browser runtime", "Present. " + browser_runtime.BUSY_WORDS + note)
+    return _line(OK, "Browser runtime", "Present, and no other Chrome is using Sidedoor's profile." + note)
 
 
 def check_license(home, online=False, relay_url=None, post=None):
     import license_clock
     key = setup_steps.license_key(home)
+    if not key and _waiting(home, "License"):
+        return _waiting(home, "License")
     shown = masked(key[3:], "SD-") if key and key.startswith("SD-") else masked(key)
     prefix = ""
     if online and key:
@@ -284,6 +411,8 @@ def check_license(home, online=False, relay_url=None, post=None):
 
 
 def check_linkedin(home, online=False, relay_url=None, transport=None):
+    if not setup_steps.license_key(home) and _waiting(home, "LinkedIn"):
+        return _waiting(home, "LinkedIn")
     if online:
         live = _linkedin_read(home, relay_url, transport)
         if live is not None:
@@ -391,6 +520,21 @@ def _records(root, config, loop, now=None):
                            "See Failures and logs in the dashboard."), pause
 
 
+def check_model_cost(root, config, now=None):
+    """Today's model calls (C4): "Model cost today: $X across N calls (M without cost data)"."""
+    import model_calls
+    import overview_page as overview
+    path = paths.database(root)
+    if not path.is_file():
+        return _line(OK, "Model cost", "No model calls recorded yet.")
+    database = overview._connect(path.resolve().as_uri() + "?mode=ro")
+    try:
+        totals = model_calls.today(database, now, config.get("timezone") or "America/Los_Angeles")
+    finally:
+        database.close()
+    return _line(OK, "Model cost", model_calls.summary_line(totals) + ".")
+
+
 def check_disk(home, usage=shutil.disk_usage):
     try:
         free = usage(home).free
@@ -422,6 +566,30 @@ def check_tray(home, platform=None, load=None):
     if state and state.get("state") == "shown":
         return _line(OK, "Tray icon", "Shown at the last start.")
     return _line(OK, "Tray icon", "Not shown yet (Sidedoor has not started with it).")
+
+
+def check_pdf_writer():
+    """The PDF writer (fpdf2) the ATS résumé and cover letters need: a one-line PDF written to a
+    temporary folder and removed. In the built app fpdf2 is loaded from its own folder beside the
+    binary (E9.T1 AP1), so this is also the build's check that it loads from there."""
+    import cover_letter
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory(prefix="sidedoor-pdf-") as folder:
+            cover_letter.render("Sidedoor check.", Path(folder) / "check.pdf")
+    except Exception as error:
+        return _line(FAIL, "PDF writer", "Sidedoor can't write PDFs (%s)." % type(error).__name__, "Reinstall Sidedoor.")
+    return _line(OK, "PDF writer", "Can write PDFs.")
+
+
+def check_app_location():
+    """E9.T1 AP4: the built Mac app must run from Applications for start at login."""
+    import login_item
+    problem = login_item.app_location_problem()
+    if problem:
+        return _line(WARN, "App location", "Sidedoor runs from %s, so it can't start at login."
+                     % login_item.scheduler_loop.program(), problem)
+    return _line(OK, "App location", "Fine for start at login.")
 
 
 def check_platform():
@@ -467,7 +635,7 @@ _ASK = object()
 
 
 def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None, relay_url=None,
-        codex_run=None, browser_run=None, openrouter_transport=None, license_post=None,
+        codex_run=None, browser_run=None, openrouter_transport=None, openai_transport=None, license_post=None,
         linkedin_transport=None, relay=None, disk_usage=shutil.disk_usage, now=None):
     """The checks, in order, as [{"status", "name", "line", "todo"}]. `running` is whether the
     scheduler runs (default: ask `cli_running`; None: unknown); the rest are injectable for tests."""
@@ -495,10 +663,11 @@ def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None
     guarded("Setup file", check_state, home)
     guarded("Profile", check_profile, home)
     guarded("Résumé", check_resume, home, root)
+    guarded("Credentials", check_credentials, home)
     guarded("OpenRouter", check_openrouter, home, config, online, openrouter_transport)
-    guarded("Codex", check_codex, home, codex_run)
+    guarded("Codex", check_codex, home, codex_run, config=config, online=online, transport=openai_transport)
     guarded("Google Chrome", check_chrome)
-    guarded("Browser runtime", check_browser_runtime, config, browser_run)
+    guarded("Browser runtime", check_browser_runtime, config, browser_run, root)
     if online:
         guarded("Relay", check_relay, relay_url, relay)
     guarded("License", check_license, home, online, relay_url, license_post)
@@ -506,8 +675,11 @@ def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None
     records = []
     guarded("Database", lambda: records.extend(_records(root, config, loop, now)) or list(records[:2]))
     pause = records[2] if len(records) == 3 else None
+    guarded("Model cost", check_model_cost, root, config, now)
     guarded("Scheduler", check_scheduler, running, pause)
     guarded("Tray icon", check_tray, home)
+    guarded("PDF writer", check_pdf_writer)
+    guarded("App location", check_app_location)
     guarded("Disk space", check_disk, home, disk_usage)
     guarded("Computer", check_platform)
     return redacted(lines, home, config)
@@ -544,7 +716,8 @@ def report_json(lines, now=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="sidedoor doctor", description="Check every part Sidedoor needs.")
     parser.add_argument("--online", action="store_true",
-                        help="also run the network checks once: the relay, the license, the OpenRouter key, LinkedIn")
+                        help="also run the network checks once: the relay, the license, the OpenRouter key, LinkedIn, "
+                             "and an OpenAI API key when one is used (uses a tiny amount of credit)")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
     lines = run(online=args.online)

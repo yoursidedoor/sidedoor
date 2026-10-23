@@ -9,6 +9,7 @@ from pathlib import Path
 import approvals
 import engagement
 import linkedin_port
+import model_calls
 import outreach
 import outreach_history
 import outreach_provider
@@ -110,6 +111,7 @@ def initialize(database):
     database.execute("""CREATE TABLE IF NOT EXISTS outreach_agent_audit (
         id TEXT PRIMARY KEY, action_id TEXT NOT NULL, phase TEXT NOT NULL,
         kind TEXT NOT NULL, observed_at TEXT NOT NULL, record TEXT NOT NULL)""")
+    initialize_reuse(database)
     # E6.T4: the Approvals page reads one action's DECISION rows (the judge's verdict on a card).
     database.execute("CREATE INDEX IF NOT EXISTS outreach_agent_audit_action ON outreach_agent_audit(action_id, kind)")
     for operation in ("UPDATE", "DELETE"):
@@ -189,8 +191,62 @@ DIRECT_MAX_TOKENS = 4000
 DIRECT_PROVIDER = {"sort": "price", "require_parameters": True}
 
 
-def _direct_execute(config, prompt, schema, timeout, calls):
-    """reply_worker._execute's contract (text of the model's JSON answer, or a Held) over text_model.complete."""
+# Judgment reuse (C1, owner-approved cost cut, 2026-10-22). The pre-send judge of a first note ran
+# about 5 times per invitation sent: the draft-inspection worker's result is good for an hour
+# (outreach_history_max_age_seconds), so a draft waiting on pacing, a campaign hand-off or a hold
+# was judged again every hour; a held outcome (RETRY_WAIT) was judged again on the next cycle; then
+# the dispatcher's send-time inspection and the campaign hand-off judged it once more each. Every
+# provider read still runs each time and every gate reads the proof built from that fresh read;
+# only the model's verdict is reused, and only when its inputs are identical: the packet with its
+# clock fields removed (the draft text, recipient and action, the provider observation, the local
+# history proof) plus the prompt, schema and output version. A changed draft, a changed provider
+# snapshot or a new prompt is a new key and a fresh judgment; a verdict older than
+# JUDGMENT_REUSE_SECONDS (config outreach_agent.judgment_reuse_seconds) is judged again.
+JUDGMENT_REUSE_SECONDS = 86400
+# Clock fields of a read or proof: they change on every read without changing what it shows.
+VOLATILE_KEYS = {"elapsed_seconds", "duration_seconds", "original_raw_sha256", "action_sha256"}
+
+
+def _stable(value):
+    if isinstance(value, dict):
+        return {key: _stable(item) for key, item in value.items()
+                if not (isinstance(key, str) and (key.endswith("_at") or key in VOLATILE_KEYS))}
+    if isinstance(value, list):
+        return [_stable(item) for item in value]
+    return value
+
+
+def judgment_key(packet, template, schema):
+    return digest({"version": VERSION, "prompt_sha256": reply_worker.sha(template),
+                   "schema_sha256": reply_worker.sha(schema), "packet": _stable(packet)})
+
+
+def initialize_reuse(database):
+    database.execute("""CREATE TABLE IF NOT EXISTS outreach_judgment_reuse (
+        reuse_key TEXT PRIMARY KEY, judged_at TEXT NOT NULL, decision_id TEXT NOT NULL,
+        decision TEXT NOT NULL)""")
+
+
+def reusable_judgment(database, key, now, config):
+    """The saved verdict for exactly these inputs, while younger than the reuse bound, else None."""
+    limit = config.get("outreach_agent", {}).get("judgment_reuse_seconds", JUDGMENT_REUSE_SECONDS)
+    if type(limit) is not int or limit <= 0:
+        return None
+    row = database.execute("SELECT judged_at,decision_id,decision FROM outreach_judgment_reuse WHERE reuse_key=?",
+                           (key,)).fetchone()
+    if row is None:
+        return None
+    age = (now - engagement.timestamp(row[0])).total_seconds()
+    if not 0 <= age <= limit:
+        return None
+    return {"judged_at": row[0], "decision_id": row[1], "decision": json.loads(row[2])}
+
+
+def _direct_execute(config, prompt, schema, timeout, calls, *, name="outreach_decision", effort=DIRECT_EFFORT,
+                    max_tokens=DIRECT_MAX_TOKENS):
+    """reply_worker._execute's contract (text of the model's JSON answer, or a Held) over text_model.complete.
+
+    `name`, `effort` and `max_tokens` let note composition (C2, 2026-10-22) use the same call."""
     system = "Return only one JSON object, with no other text, that matches this JSON Schema:\n" + schema
     started = dt.datetime.now(dt.timezone.utc)
 
@@ -207,10 +263,10 @@ def _direct_execute(config, prompt, schema, timeout, calls):
         # The strict schema codex sent with --output-schema: without it GLM's reason and
         # next_action run past their 700 characters (a third of the codex answers were cut at
         # exactly 700) and _validate refuses the answer.
-        answer = text_model.complete(config, prompt, system=system, effort=DIRECT_EFFORT,
-                                     max_tokens=DIRECT_MAX_TOKENS, timeout=timeout,
+        answer = text_model.complete(config, prompt, system=system, effort=effort,
+                                     max_tokens=max_tokens, timeout=timeout,
                                      response_format={"type": "json_schema", "json_schema": {
-                                         "name": "outreach_decision", "strict": True, "schema": json.loads(schema)}},
+                                         "name": name, "strict": True, "schema": json.loads(schema)}},
                                      provider=DIRECT_PROVIDER)
     except TimeoutError as error:
         raise failed("CLASSIFICATION_TIMEOUT", error) from error
@@ -369,6 +425,8 @@ class Adapter(outreach.HeyReachActionAdapter):
         calls = []
         execute = (lambda config, prompt, schema, timeout: _direct_execute(config, prompt, schema, timeout, calls)
                    ) if direct else self.execute
+        execute = model_calls.bound(execute, "outreach-send-judge" if initial and phase == "INSPECTION"
+                                    else "outreach-judge", profile_key(action["profile"]))
         if direct:
             provenance = dict(provenance, executable=None, route=DIRECT_ROUTE, reasoning_effort=DIRECT_EFFORT,
                               max_tokens=DIRECT_MAX_TOKENS)
@@ -385,6 +443,14 @@ class Adapter(outreach.HeyReachActionAdapter):
             audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
                   {"observation_id": reference, "decision": decision, "decision_source": decision["decision_source"]})
             return observation, packet["direct_history"], decision, reference
+        reuse_key = judgment_key(packet, template, schema) if initial and phase == "INSPECTION" else None
+        cached = reusable_judgment(self.database, reuse_key, now, config) if reuse_key else None
+        if cached is not None:
+            # The same inputs were judged already: no compute booked, no model called (C1).
+            audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
+                  {"observation_id": reference, "decision": cached["decision"], "route": "REUSED",
+                   "reuse_key": reuse_key, "reused_from": cached["decision_id"], "judged_at": cached["judged_at"]})
+            return observation, packet["direct_history"], cached["decision"], reference
         settings = config.get("outreach_agent", {})
         timeout = settings.get("timeout_seconds", 60)
         if type(timeout) is not int or not 1 <= timeout <= 600 or len(prompt.encode()) > prompt_limit(config):
@@ -416,10 +482,15 @@ class Adapter(outreach.HeyReachActionAdapter):
             current = self.database.execute("SELECT payload FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
             if current and json.loads(current[0]) != action:
                 raise ValueError("OUTREACH_ACTION_CHANGED_DURING_INVESTIGATION")
-            audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
+            decision_id = audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
                   {"observation_id": reference, "output": raw, "output_sha256": reply_worker.sha(raw), "decision": decision,
+                   **({"reuse_key": reuse_key} if reuse_key else {}),
                    **({"route": DIRECT_ROUTE, "reasoning_effort": DIRECT_EFFORT, "max_tokens": DIRECT_MAX_TOKENS,
                        "calls": calls} if direct else {})})
+            if reuse_key:
+                with self.database:
+                    self.database.execute("INSERT OR REPLACE INTO outreach_judgment_reuse VALUES (?,?,?,?)",
+                                          (reuse_key, now.isoformat(), decision_id, encoded(decision)))
             with self.database:
                 workflow_tasks.settle_compute(self.database, "outreach-ai:" + reference, now.isoformat(),
                                               outreach_provider._now(),
@@ -797,6 +868,11 @@ class Adapter(outreach.HeyReachActionAdapter):
 
 
 COMPOSE_VERSION = "outreach-compose-v1"
+# Composition's direct call (C2, 2026-10-22). Low, as the judges and the answering AI (which also
+# writes prose) use: the note is short, every fact is checked against its source by
+# _validate_composition with repair turns, and reasoning tokens are the cost. One constant to raise.
+COMPOSE_EFFORT = "low"
+COMPOSE_MAX_TOKENS = 4000
 COMPOSE_WORKER = "outreach-draft-composition"
 
 
@@ -1066,6 +1142,14 @@ def compose_draft(root, database, config, row, execute=None, now=None, *, repair
     the guarded dispatcher. Returns {"state": "COMPOSED"|"REJECTED", ...}.
     """
     now = engagement.timestamp(now or dt.datetime.now(dt.timezone.utc))
+    # Note composition is a direct low-reasoning call too (cost cut C2, 2026-10-22), in the send
+    # judge's shape, when a text model is configured and no executor is injected; otherwise codex.
+    direct = execute is None and text_model.settings(config) is not None
+    calls = []
+    if direct:
+        execute = (lambda config, prompt, schema, timeout: _direct_execute(
+            config, prompt, schema, timeout, calls, name="outreach_composition", effort=COMPOSE_EFFORT,
+            max_tokens=COMPOSE_MAX_TOKENS))
     execute = execute or reply_worker._execute
     initialize(database)
     database.commit()
@@ -1090,6 +1174,8 @@ def compose_draft(root, database, config, row, execute=None, now=None, *, repair
     _require(type(timeout) is int and 1 <= timeout <= 600 and len(prompt.encode()) <= prompt_limit(config), "OUTREACH_AGENT_INPUT_OR_TIME_BOUND")
     key = "outreach-compose:" + scaffold["draft_id"]
     provenance = {"model": text_model.model(config), "prompt_sha256": reply_worker.sha(template), "schema_sha256": reply_worker.sha(schema)}
+    if direct:
+        provenance = dict(provenance, route=DIRECT_ROUTE, reasoning_effort=COMPOSE_EFFORT, max_tokens=COMPOSE_MAX_TOKENS)
     reference = audit(database, key, "COMPOSITION", "OBSERVATION", now.isoformat(),
                       {"packet": packet, "source_sha256": source_hash, "provenance": provenance})
     # The booking carries the budget day: the observation (and so `reference`) is identical when
@@ -1151,7 +1237,9 @@ def compose_draft(root, database, config, row, execute=None, now=None, *, repair
     gates = composition_gates(database, output, packet, sources)
     decision = audit(database, key, "COMPOSITION", "DECISION", now.isoformat(),
                      {"observation_id": reference, "output": raw, "output_sha256": reply_worker.sha(raw),
-                      "gates": gates, "trace_observations": observations})
+                      "gates": gates, "trace_observations": observations,
+                      **({"route": DIRECT_ROUTE, "reasoning_effort": COMPOSE_EFFORT, "max_tokens": COMPOSE_MAX_TOKENS,
+                          "calls": calls} if direct else {})})
     if gates:
         return {"state": "REJECTED", "gates": gates, "evidence": "outreach_agent_audit:" + decision}
     composition = {"version": COMPOSE_VERSION, "facts": output["facts"], "proof_point": output["proof_point"],

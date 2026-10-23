@@ -26,6 +26,14 @@ import setup_steps
 import user_profile
 
 
+# E2.T4 (C1): no test ever touches a real keychain or Credential Manager. The OS store is off in
+# this process through credentials.use_backend (no environment change can undo it; the keys stay in
+# 0600 files, as with no store, K4), and through the environment for every child it starts. The
+# real backends also refuse while unittest is loaded. Tests of the store install a fake.
+os.environ["SIDEDOOR_CREDENTIAL_STORE"] = "file"
+import credentials  # noqa: E402
+credentials.use_backend(credentials.NO_STORE)
+
 HOME = Path(tempfile.mkdtemp(prefix="sidedoor-test-home-"))
 atexit.register(shutil.rmtree, HOME, True)
 shutil.copyfile(user_profile.EXAMPLE_PROFILE, HOME / "profile.json")
@@ -47,6 +55,9 @@ for stand_in in (RUNTIME / "node" / ("node.exe" if os.name == "nt" else "bin/nod
     stand_in.write_text("")
 os.environ[browser_runtime.RUNTIME_VARIABLE] = str(RUNTIME)
 setup_steps.BROWSER_PROFILE = HOME / "browser-profile"
+# No test starts a real Chrome in the background (browser_runtime.background_launch); the tests of
+# that launch patch this back on and fake the `open` call.
+browser_runtime.BACKGROUND_ALLOWED = False
 
 _run = unittest.TestCase.run
 

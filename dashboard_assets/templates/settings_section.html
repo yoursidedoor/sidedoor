@@ -177,6 +177,18 @@
   <h2>License</h2>
   {% set l = x.license %}
   <p>Status: <span class="chip chip-{{ x.chip.tone }}">{{ x.chip.label }}</span></p>
+  {% if x.keys_removed %}<p class="note note-warning" role="status">{{ x.keys_removed }}</p>{% endif %}
+  {% if x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_notice }}</p>{% endif %}
+  {% if x.keychain_wait %}
+  <p class="note note-warning" role="status">{{ x.keychain_wait }}</p>
+  {% if x.offer_file %}
+  <form method="post" action="/settings/license/change" hx-post="/settings/license/change" hx-target="#license" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="s-license-key-file">License key</label>
+    <input id="s-license-key-file" type="password" name="key" value="{{ x.key_box }}" placeholder="SD-..." autocomplete="off" spellcheck="false" required>
+    {% if x.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
+  </form>
+  {% endif %}
+  {% else %}
   {% if x.has_key %}
   <p class="note note-{{ x.view.tone }}" role="status">{{ x.view.text }}</p>
   {% for action in x.view.actions %}
@@ -207,11 +219,17 @@
     <label for="s-license-key">{% if x.chip.label == "Expired" %}Bought a new key? Paste it here{% elif x.has_key %}Your key (change it to use a new one){% else %}License key{% endif %}</label>
     <span class="secret"><input id="s-license-key" type="password" name="key" value="{{ x.key_box }}" placeholder="SD-..." autocomplete="off" spellcheck="false" required><button class="reveal" type="button" data-reveal="s-license-key" aria-controls="s-license-key" aria-label="Show key" aria-pressed="false"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></span>
     <button class="button" type="submit">{% if x.has_key %}Change key{% else %}Activate{% endif %}</button>
+    {% if x.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
     <span class="htmx-indicator muted">Checking...</span>
   </form>
   {% if not x.has_key %}
   <p>No key yet? <a class="button button-highlight" id="s-buy-license" href="{{ x.website }}" target="_blank" rel="noopener noreferrer">Buy a license</a></p>
   <span hx-get="/setup/guide/license" hx-trigger="click from:#s-buy-license" hx-target="#guide-panel"></span>
+  {% endif %}
+  <form method="post" action="/settings/keys/remove" hx-post="/settings/keys/remove" hx-target="#license" hx-swap="outerHTML"
+        hx-confirm="Remove your OpenRouter key and license key from this computer? Sidedoor stops until you paste them again." hx-disabled-elt="find button">
+    <button class="button button-quiet" type="submit">Remove Sidedoor's saved keys from this computer</button>
+  </form>
   {% endif %}
   {% if x.portal %}
   <p><a class="button" id="s-manage-subscription" href="{{ x.portal }}" target="_blank" rel="noopener noreferrer">Manage subscription</a></p>

@@ -8,7 +8,7 @@ email check) runs `codex exec` with ONE stdio MCP server named `browser`:
         -- <node> <runtime>/node_modules/@playwright/mcp/cli.js --browser chrome
            --user-data-dir <Sidedoor's profile> --no-webmcp --output-dir <dir>/browser --config <file>
 
-`<sidedoor>` is `[sys.executable, "browser-guard"]` in a frozen build (the binary re-invoked with a
+`<sidedoor>` is `[<binary>, "browser-guard"]` (scheduler_loop.program) in a frozen build (the binary re-invoked with a
 subcommand, as scheduler_loop.job_command does) and `[sys.executable, <orchestrator.py>, "browser-guard"]`
 from source.
 
@@ -26,10 +26,12 @@ from pathlib import Path
 import shutil
 import sys
 
+import log
 import portable
 
 
 ROOT = Path(__file__).resolve().parent
+LOG = log.get(__name__)
 ENTRY = ROOT / "orchestrator.py"
 SERVER = "browser"
 RUNTIME_VARIABLE = "SIDEDOOR_BROWSER_RUNTIME"
@@ -70,7 +72,8 @@ def runtime_dir(config=None):
     configured = settings(config).get("runtime_dir") or os.environ.get(RUNTIME_VARIABLE)
     if configured:
         return Path(configured).expanduser()
-    base = Path(sys.executable).resolve().parent if frozen() else ROOT
+    import scheduler_loop
+    base = Path(scheduler_loop.program()).resolve().parent if frozen() else ROOT
     return base / RUNTIME_FOLDER
 
 
@@ -134,7 +137,8 @@ def profile(config=None):
 def sidedoor_command():
     """How this program starts itself with a subcommand: never a .py path when frozen."""
     if frozen():
-        return [sys.executable]
+        import scheduler_loop
+        return [scheduler_loop.program()]
     return [sys.executable, str(ENTRY)]
 
 
@@ -199,6 +203,34 @@ def lock_holder(path):
         return None
 
 
+def lock_owner(path):
+    """The (host, pid) Chrome wrote into a profile's SingletonLock (`<host>-<pid>`), or None."""
+    try:
+        host, pid = os.readlink(os.path.join(str(path), "SingletonLock")).rsplit("-", 1)
+        return host, int(pid)
+    except (OSError, ValueError):
+        return None
+
+
+def stale_lock(path):
+    """True when the profile's SingletonLock was written on this machine by a process that is gone
+    (a Chrome that died): Chrome itself then removes the Singleton* links and starts. Windows writes
+    none (portable.profile_busy). A lock naming another host (macOS renames the host with the network)
+    is still judged by `holds_profile`: in use only while a live Chrome on this profile holds that pid."""
+    import socket
+    owner = lock_owner(path)
+    return (owner is not None and not portable.WINDOWS and owner[0] == socket.gethostname()
+            and not portable.pid_alive(owner[1]))
+
+
+def clear_stale_lock(path):
+    """Remove the Singleton* links when stale_lock(path). True when it did."""
+    if stale_lock(path):
+        _unlink_singletons(path)
+        return True
+    return False
+
+
 def holds_profile(pid, path, run=None):
     """True only when process `pid` is a Chrome started on THIS profile: its command line carries
     `--user-data-dir=<path>` (Playwright and Sidedoor's own window both pass it so). A stale lock
@@ -231,6 +263,7 @@ def prepare_profile(path, run=None):
     import setup_steps
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    clear_stale_lock(path)   # a dead Chrome's lock on this machine: cleared, as Chrome does
     busy = [name for name in setup_steps.SINGLETONS if os.path.lexists(path / name)]
     if portable.profile_busy(path) or busy and holds_profile(lock_holder(path), path, run):
         raise BrowserProfileBusy("BROWSER_PROFILE_IN_USE")
@@ -243,14 +276,134 @@ def profile_in_use(config=None, run=None):
     if settings(config).get("isolated"):
         return False
     path = profile(config)
+    clear_stale_lock(path)   # a dead Chrome's lock on this machine never reads as "window open"
     return portable.profile_busy(path) or holds_profile(lock_holder(path), path, run)
 
 
-def unavailable(config=None, run=None):
+def session_holds_lock(root=None):
+    """True when a Sidedoor browser session holds state/browser.lock now (run_locks.browser_session).
+    Probed with one non-blocking take, released at once: a session that tries in that instant waits
+    (applications, 20 min) or defers to its next cycle (the contact finder). False when unreadable."""
+    import run_locks
+    try:
+        with run_locks.held(root, run_locks.BROWSER, wait_seconds=0) as acquired:
+            return not acquired
+    except (OSError, RuntimeError):
+        return False
+
+
+def _devtools_chrome(line, path):
+    wanted = {str(Path(path)), str(Path(path).resolve())}
+    return (any(("--user-data-dir=" + value) in line for value in wanted)
+            and ("--remote-debugging-port" in line or "--remote-debugging-pipe" in line))
+
+
+def _guard_running(listing):
+    return any("browser-guard" in line and "--operation" in line for line in listing.splitlines())
+
+
+def close_orphaned_session_chrome(path, root=None, run=None, kill=None, wait_seconds=5.0, poll_seconds=0.1):
+    """Close a Chrome that a Sidedoor session started on profile `path` and that outlived it (the
+    dashboard stopped while a session ran: the guard's `open -g -n` Chrome's parent is launchd, so it
+    kept running and held the profile, and the owner was told to close a window he never opened).
+    True when it closed one. Only when ALL hold: the profile's SingletonLock pid is a Chrome on this
+    profile (`holds_profile`) whose command line carries a DevTools switch (--remote-debugging-port or
+    --remote-debugging-pipe: Sidedoor's session launches only; setup step 8's sign-in window and a
+    Chrome the user opened carry none); no other Sidedoor session holds state/browser.lock (this
+    thread's own hold, a session checking before it starts Chrome, does not count); and no
+    `browser-guard --operation` process runs. SIGTERM, up to `wait_seconds` for it to exit, then
+    SIGKILL; then the stale lock is cleared. Logged as BROWSER_ORPHAN_CLOSED (pid only). Windows (no
+    command-line check there, as `holds_profile`) and any failure: False. Never raises."""
+    import signal
+    import subprocess
+    import time
+    if portable.WINDOWS:
+        return False
+    try:
+        pid = lock_holder(path)
+        if pid is None or not holds_profile(pid, path, run):
+            return False
+        line = (run or subprocess.run)(["ps", "-ww", "-p", str(pid), "-o", "args="], capture_output=True,
+                                       text=True, timeout=10).stdout
+        if not _devtools_chrome(line, path):
+            return False
+        import run_locks
+        if not run_locks.browser_held_here(root) and session_holds_lock(root):
+            return False
+        listing = (run or subprocess.run)(["ps", "-ww", "-axo", "args="], capture_output=True, text=True,
+                                          timeout=10).stdout
+        if _guard_running(listing):
+            return False
+        kill = kill or os.kill
+        try:
+            kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + wait_seconds
+        while holds_profile(pid, path, run):
+            if time.monotonic() >= deadline:
+                try:
+                    kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                break
+            time.sleep(poll_seconds)
+        clear_stale_lock(path)
+        LOG.info("BROWSER_ORPHAN_CLOSED pid=%d", pid)
+        return True
+    except Exception as error:   # never stops the caller: the ordinary PROFILE_IN_USE path decides
+        LOG.warning("BROWSER_ORPHAN_CLOSE_FAILED (%s)", type(error).__name__)
+        return False
+
+
+def close_orphan(config=None, root=None, run=None, kill=None):
+    """`close_orphaned_session_chrome` on the configured profile (none for an isolated session)."""
+    if settings(config).get("isolated"):
+        return False
+    return close_orphaned_session_chrome(profile(config), root, run, kill)
+
+
+def guard_owns_profile(path, run=None):
+    """True when the Chrome holding profile `path` was started for a Sidedoor session: its command line
+    carries a DevTools switch (the guard's `open -g` launch: --remote-debugging-port; Playwright's
+    fallback launch: --remote-debugging-pipe) and a `browser-guard` process for a session is running.
+    Setup step 8's sign-in window and a Chrome the user opened on the profile carry neither."""
+    import subprocess
+    if portable.WINDOWS:
+        return False
+    try:
+        listing = (run or subprocess.run)(["ps", "-ww", "-axo", "args="], capture_output=True, text=True,
+                                          timeout=10).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return any(_devtools_chrome(line, path) for line in listing.splitlines()) and _guard_running(listing)
+
+
+def display_state(config=None, root=None, run=None, kill=None):
+    """What the dashboard and doctor say about Sidedoor's browser (FG1, problem 2): None (fine),
+    "RUNTIME_MISSING", "SESSION_BUSY" (a Sidedoor session owns the Chrome on the profile: never "close
+    the window") or "PROFILE_IN_USE" (no Sidedoor session holds the browser lock and no running guard
+    started it, yet a live Chrome holds the profile). Sessions themselves keep `unavailable`: they check
+    inside the lock, before starting Chrome, where any Chrome on the profile is a real conflict."""
+    if missing(config):
+        return "RUNTIME_MISSING"
+    close_orphan(config, root, run, kill)   # Sidedoor's own leftover Chrome never reads as "close the window"
+    if not profile_in_use(config, run):
+        return None
+    if session_holds_lock(root) or guard_owns_profile(profile(config), run):
+        return "SESSION_BUSY"
+    return "PROFILE_IN_USE"
+
+
+BUSY_WORDS = "Sidedoor's browser is busy with an application."
+
+
+def unavailable(config=None, run=None, root=None, kill=None):
     """Why a browser session cannot start now, as a capacity-wait code suffix, or None (review fix 2):
     "RUNTIME_MISSING" or "PROFILE_IN_USE". Checked before any claim, request or reservation."""
     if missing(config):
         return "RUNTIME_MISSING"
+    close_orphan(config, root, run, kill)   # Sidedoor's own leftover Chrome: closed, the session proceeds
     if profile_in_use(config, run):
         return "PROFILE_IN_USE"
     return None
@@ -360,17 +513,143 @@ def end_session(config=None, wait_seconds=5.0, run=None):
     return True
 
 
+# --- Chrome in the background (owner, 2026-10-22: "is it possible to stop the sidedoor browser from
+# just snatching control of my screen?", option a) -------------------------------------------------
+# Playwright starts Chrome by exec'ing its binary (with --remote-debugging-pipe), and a macOS app
+# started that way activates itself: every browser job pulled Chrome in front of what the user was
+# doing. On macOS Sidedoor now starts Sidedoor's own Chrome itself through LaunchServices with
+# `open -g -n` (-g: never activate; -n: a new instance even while the user's everyday Chrome runs),
+# headed and at its normal size, behind the user's current app, with a local DevTools port, and
+# @playwright/mcp attaches to it (--cdp-endpoint). The pipe cannot be used: `open` passes no file
+# descriptors. The user watches by clicking Chrome's Dock icon. Setup step 8's sign-in window
+# (setup_steps.BrowserSession) is the user's own request and still comes to the front.
+# The switches are the ones Playwright passed (chromiumSwitches in @playwright/mcp 0.0.83's
+# playwright-core) minus LAUNCH_CONFIG's ignoreDefaultArgs, so the page behaves as before; the
+# backgrounding/throttling switches matter more now, since the window is behind others.
+BACKGROUND_DISABLED_FEATURES = (
+    "AvoidUnnecessaryBeforeUnloadCheckSync", "DestroyProfileOnBrowserClose", "DialMediaRouteProvider",
+    "GlobalMediaControls", "HttpsUpgrades", "LensOverlay", "MediaRouter", "PaintHolding",
+    "ThirdPartyStoragePartitioning", "BlockOriginHeaderModificationOnRedirect", "Translate", "AutoDeElevate",
+    "OptimizationHints", "NetworkTimeServiceQuerying", "AimEnabled", "msForceBrowserSignIn",
+    "msEdgeUpdateLaunchServicesPreferredVersion")
+BACKGROUND_SWITCHES = (
+    "--disable-field-trial-config", "--disable-background-networking", "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows", "--disable-back-forward-cache", "--disable-breakpad",
+    "--disable-client-side-phishing-detection", "--disable-component-extensions-with-background-pages",
+    "--disable-component-update", "--no-default-browser-check", "--disable-default-apps", "--disable-dev-shm-usage",
+    "--disable-edgeupdater", "--disable-extensions", "--disable-features=" + ",".join(BACKGROUND_DISABLED_FEATURES),
+    "--enable-features=CDPScreenshotNewSurface", "--allow-pre-commit-input", "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection", "--disable-popup-blocking", "--disable-prompt-on-repost",
+    "--disable-renderer-backgrounding", "--disable-updater-scheduler", "--force-color-profile=srgb",
+    "--metrics-recording-only", "--no-first-run", "--password-store=basic", "--no-service-autorun",
+    "--export-tagged-pdf", "--disable-search-engine-choice-screen", "--unsafely-disable-devtools-self-xss-warnings",
+    "--edge-skip-compat-layer-relaunch", "--disable-infobars", "--disable-sync")
+DEVTOOLS_PORT_FILE = "DevToolsActivePort"
+BACKGROUND_LAUNCH_SECONDS = 60
+# Hidden window. FG1 = b (owner, 2026-10-22) put the session's window far off-screen; macOS clamps a
+# window to keep a strip on a display (live, request-609_iyj7: -32000,-32000 became left=-1240, top=38,
+# WINDOW_NOT_OFFSCREEN on every placement), so FG2 = a (owner, 2026-10-23) minimizes it instead: the
+# guard sets every window to windowState "minimized" over CDP after launch and before each forwarded
+# call (browser_guard.hide_code), and a focus keeper hands the front back to the user's app whenever
+# this Chrome activates itself (browser_guard.FocusKeeper). OFFSCREEN_POSITION stays as the launch
+# position and as the "normal" bounds the guard parks a window at before minimizing it: whenever Chrome
+# un-minimizes a window on its own (a new tab or a tab select activates it) only the clamped strip
+# shows until the next call minimizes it again, never a full window over the user's work. Pages still
+# lay out at WINDOW_SIZE. The CAPTCHA wait un-minimizes it on-screen and in front, then minimizes it.
+OFFSCREEN_POSITION = (-32000, -32000)
+ONSCREEN_POSITION = (80, 60)
+WINDOW_SIZE = (1280, 900)
+WINDOW_SWITCHES = ("--window-position=%d,%d" % OFFSCREEN_POSITION, "--window-size=%d,%d" % WINDOW_SIZE)
+OFFSCREEN_WORDS = "Sidedoor's browser runs minimized in the Dock; it appears when it needs you."
+# False in the test suite (tests/profile_home.py): a test's guard never starts a real Chrome.
+BACKGROUND_ALLOWED = True
+
+
+def background_launch(config=None, platform=None):
+    """True when Sidedoor starts the session's Chrome itself, in the background: macOS, the real
+    profile, headed (tests' isolated or headless sessions keep Playwright's own launch)."""
+    driver = settings(config)
+    return (BACKGROUND_ALLOWED and (platform or sys.platform) == "darwin" and not driver.get("isolated")
+            and not driver.get("headless"))
+
+
+def offscreen(config=None, platform=None):
+    """True when session Chrome windows are kept hidden (minimized, FG2 = a): the same sessions as `background_launch`
+    (macOS, the real headed profile), whichever way Chrome is started (open -g, or Playwright's fallback)."""
+    return background_launch(config, platform)
+
+
+def launch_config(config=None):
+    """@playwright/mcp's --config: LAUNCH_CONFIG, plus the off-screen window for its fallback launch."""
+    value = json.loads(json.dumps(LAUNCH_CONFIG))
+    if offscreen(config):
+        value["browser"]["launchOptions"]["args"] = list(WINDOW_SWITCHES)
+    return value
+
+
+def chrome_app(binary):
+    """The .app bundle a Chrome binary path lives in (`.../Google Chrome.app/Contents/MacOS/...`), or None."""
+    path = Path(binary)
+    for parent in path.parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def background_command(app, path):
+    """`open -g -n -a <Chrome.app> --args ...`: Chrome on `path`, never activated, DevTools on a free port."""
+    return ["/usr/bin/open", "-g", "-n", "-a", str(app), "--args", "--user-data-dir=" + str(path),
+            # Live parity (CK3, accepted): Playwright's own launch also opens a local DevTools port.
+            "--remote-debugging-port=0", *BACKGROUND_SWITCHES, *WINDOW_SWITCHES, "about:blank"]
+
+
+def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, stop=None):
+    """Start Chrome on profile `path` without activating it; return its DevTools endpoint
+    (`http://127.0.0.1:<port>`, from the DevToolsActivePort file Chrome writes into the profile).
+    Raises OSError when `open` fails or no port appears within `timeout`; before that last raise the
+    Chrome `open` started on this profile is stopped (`end_session`: only a Chrome whose command line
+    carries --user-data-dir=<path>), so it cannot clash with Playwright's fallback launch (CK2)."""
+    import subprocess
+    import time
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    port_file = path / DEVTOOLS_PORT_FILE
+    try:
+        port_file.unlink()   # a stale file names a port that is gone
+    except OSError:
+        pass
+    done = (run or subprocess.run)(background_command(app, path), stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=timeout)
+    if done.returncode != 0:
+        raise OSError("open -g failed: " + (done.stderr or "").strip()[:200])
+    clock, sleep = clock or time.monotonic, sleep or time.sleep
+    deadline = clock() + timeout
+    while clock() < deadline:
+        try:
+            # Chrome writes "<port>\n<browser path>"; only a file with both lines is complete (CK4).
+            lines = port_file.read_text().split("\n")
+            port = int(lines[0].strip())
+            if len(lines) > 1 and lines[1].strip() and 0 < port < 65536:
+                return "http://127.0.0.1:%d" % port
+        except (OSError, ValueError):
+            pass
+        sleep(0.2)
+    (stop or end_session)({"browser_driver": {"profile": str(path)}})
+    raise OSError("Chrome wrote no DevTools port within %d s" % timeout)
+
+
 def mcp_command(config, directory):
-    """The @playwright/mcp command line (bundled Node, absolute paths: no npx shim)."""
+    """The @playwright/mcp command line (bundled Node, absolute paths: no npx shim). In background
+    mode it carries no profile: the guard starts Chrome and adds `--cdp-endpoint` (browser_guard)."""
     directory = Path(directory)
     output = directory / OUTPUT_FOLDER
     output.mkdir(parents=True, exist_ok=True)
     launch = directory / "browser-config.json"
-    launch.write_text(json.dumps(LAUNCH_CONFIG, indent=1) + "\n")
+    launch.write_text(json.dumps(launch_config(config), indent=1) + "\n")
     command = [str(node_path(config)), str(mcp_cli(config)), "--browser", settings(config).get("browser", "chrome")]
     if settings(config).get("isolated"):
         command.append("--isolated")  # tests only: an in-memory profile
-    else:
+    elif not background_launch(config):
         command.extend(["--user-data-dir", str(profile(config))])
     if settings(config).get("headless"):
         command.append("--headless")  # tests only: the product runs headed
@@ -387,11 +666,30 @@ def guard_command(config, directory, operation, claim=None, human_check=None):
         command.extend(["--claim", str(claim)])
     if human_check:
         command.extend(["--human-check", str(human_check)])
+    if background_launch(config):
+        command.extend(["--background-chrome", str(profile(config))])
+    if offscreen(config):
+        command.append("--offscreen")
     return command + ["--"] + mcp_command(config, directory)
 
 
 def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+# The user-session variables Chrome needs to find the user's own login keychain (macOS: the "Chrome Safe
+# Storage" key the profile's cookies are encrypted with) or profile folders (Windows). Codex runs with a
+# small allow-list and starts MCP servers with a filtered environment, so without these Chrome cannot find
+# the keychain and asks on every launch. Values come from this (the parent) process; never a secret.
+SESSION_VARIABLES = ("HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "__CF_USER_TEXT_ENCODING",
+                     "USERPROFILE", "USERNAME", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+                     "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT")
+
+
+def session_environment(environ=None):
+    """The parent's values of SESSION_VARIABLES that are set (an explicit allow-list: no keys pass)."""
+    environ = os.environ if environ is None else environ
+    return {name: environ[name] for name in SESSION_VARIABLES if environ.get(name)}
 
 
 def codex_options(config, directory, operation, claim=None, human_check=None):
@@ -415,7 +713,10 @@ def codex_options(config, directory, operation, claim=None, human_check=None):
                + str(HUMAN_CHECK_TOOL_TIMEOUT_SECONDS if human_check else TOOL_TIMEOUT_SECONDS),
                # The arm guard loads the user's policy (desktop_adapter.submission_gate); codex starts
                # MCP servers with a filtered environment, so the profile directory is passed explicitly.
-               "mcp_servers." + SERVER + ".env={" + user_profile.HOME_VARIABLE + "="
-               + encoded(str(user_profile.home())) + "}"]
+               # The user's session variables go with it, so Chrome finds the real login keychain.
+               "mcp_servers." + SERVER + ".env={" + ",".join(
+                   encoded(name) + "=" + encoded(value) for name, value in sorted(
+                       dict(session_environment(), **{user_profile.HOME_VARIABLE: str(user_profile.home())}).items()))
+               + "}"]
     options.extend("mcp_servers." + SERVER + ".tools." + tool + '.approval_mode="approve"' for tool in tools)
     return options

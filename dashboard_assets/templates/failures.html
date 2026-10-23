@@ -13,6 +13,7 @@
 {% endmacro %}
 {% block content %}
 <h1 class="title">Failures and logs</h1>
+{% if hidden %}<p class="note note-warning" role="status">{{ hidden }}</p>{% else %}
 {% set v = view %}
 {% if v.unreadable %}<p class="note note-warning fail-unreadable" role="status">Sidedoor couldn't read its records.</p>{% endif %}
 
@@ -87,4 +88,5 @@
   </details>
   {% endfor %}
 </section>
+{% endif %}
 {% endblock %}

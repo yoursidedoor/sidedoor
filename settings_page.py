@@ -36,6 +36,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 import resume_intake
+import credentials
 import setup_steps
 import paths
 
@@ -99,11 +100,31 @@ def masked(secret, prefix=""):
     return prefix + "..." + secret[-4:]
 
 
+KEYS_REMOVED = "Your OpenRouter key and license key were removed from this computer."
+KEYS_REMOVED_OPENROUTER = "Removed from this computer. Paste your key to use Sidedoor again."
+KEYS_NOT_REMOVED = ("Sidedoor couldn't remove your keys because the keychain isn't answering. Nothing was "
+                    "changed; try again once it's unlocked.")
+
+
 def _openrouter_key(home):
+    return setup_steps.saved_openrouter_key(home)   # E2.T4: through credentials.get
+
+
+def _openai_key(home):
+    import openai_auth
+    return openai_auth.shown_key(setup_steps._home(home))   # E2.T4: None while the keychain waits
+
+
+def _openai_test_state(home):
+    import openai_auth
     try:
-        return (setup_steps._home(home) / setup_steps.OPENROUTER_KEY_FILE).read_text(encoding="utf-8").strip() or None
-    except OSError:
-        return None
+        return openai_auth.test_state(setup_steps._home(home))
+    except OSError:   # the keychain waits: the waiting line is shown, not a test state
+        return "never"
+
+
+def _openai_tested(home):
+    return _openai_test_state(home) == "passed"
 
 
 def _read(root, read, empty):
@@ -209,10 +230,16 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           openrouter_untested=bool(_openrouter_key(home)) and not setup_steps.openrouter_tested(home),
                           codex=steps.get("codex", {}),
                           codex_done=setup_steps.codex_done(state), codex_path=state.get("codex_path"),
+                          codex_auth=setup_steps.codex_auth(state), codex_auth_view=setup_steps.codex_auth_view(state),
+                          openai_key=masked(_openai_key(home)), openai_box=_openai_key(home) or "",
+                          openai_untested=bool(_openai_key(home)) and not _openai_tested(home),
+                          openai_test_state=_openai_test_state(home),
                           browser=steps.get("browser", {}), email=steps.get("email", {}),
                           chrome=setup_steps.chrome_path(), browser_open=browser.is_open(),
                           webmail=state.get("webmail"), webmail_record=steps.get("webmail", {}),
                           has_license=bool(setup_steps.license_key(home)),
+                          keychain_wait=setup_steps.keys_waiting(home),
+                          offer_file=credentials.offer_file(setup_steps._home(home)),
                           application_email=state.get("locked_email") or setup_steps.saved_email(home))
         elif name == "license":
             import license_clock  # E8.T2: the stored state (no relay call on render)
@@ -224,7 +251,9 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           has_key=bool(key), key_box=key or "", view=view, times=license_times(view, config),
                           entitlement=value, active=bool(value) and view["problem"] != "machine",
                           portal=str(config.get("billing_portal_url") or "").strip(),
-                          portal_line=PORTAL_LINE, no_portal=NO_PORTAL)
+                          portal_line=PORTAL_LINE, no_portal=NO_PORTAL,
+                          keychain_wait=setup_steps.keys_waiting(home),
+                          offer_file=credentials.offer_file(setup_steps._home(home)))
         elif name == "mode":
             import approvals  # the mode as the send path reads it (E6.T2 review fix P13)
             result.update(not_recalled=NOT_RECALLED, state=dict(state, mode=approvals.install_mode(root, home)))
@@ -501,18 +530,26 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         # put back and stays in use; the refused key stays in its (hidden) box to be fixed.
         form = await request.form()
         typed = form.get("key") if isinstance(form.get("key"), str) else ""
+        to_file = form.get("to_file") == "1"
         previous = _openrouter_key(home)
         locked = setup_steps.progress(home)["locked"].get(2)
-        state = await run_in_threadpool(setup_steps.save_and_test_openrouter, typed, config, home)
+        state = await run_in_threadpool(setup_steps.save_and_test_openrouter, typed, config, home, None, to_file)
+        if state.get("keychain_refused"):   # KR3/KC2: nothing saved or recorded; the typed key stays in its box
+            return respond(request, "openrouter", {"openrouter_box": typed, "keychain_notice": state["keychain_refused"]})
         saved = state["steps"]["openrouter"]
         if saved["status"] == "failed" and previous and _openrouter_key(home) != previous:
-            setup_steps._write_private(setup_steps._home(home) / setup_steps.OPENROUTER_KEY_FILE, previous + "\n")
+            try:
+                setup_steps._save_key("openrouter", previous, home, to_file)
+            except OSError:
+                pass   # the store stopped answering: the refused key stays saved and says so below
             setup_steps.record(home, "openrouter", "failed", saved["message"] + " " + KEY_KEPT)
         return respond(request, "openrouter", {"openrouter_box": typed} if saved["status"] == "failed" else None,
                        also=resume_unlocked_changed(locked))
 
     @app.post("/settings/openrouter/test")
     async def openrouter_test(request: Request):
+        if setup_steps.keys_waiting(home):   # KC3: never "no key saved" while the keychain waits
+            return respond(request, "openrouter")
         stored = _openrouter_key(home)
         locked = setup_steps.progress(home)["locked"].get(2)
         if not stored:
@@ -525,6 +562,42 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
     @app.post("/settings/codex")
     def codex(request: Request):
         setup_steps.check_codex(home)
+        return respond(request, "codex")
+
+    # E0.T8: Sign in with ChatGPT or an OpenAI API key, as in Setup step 6.
+    @app.post("/settings/codex/auth")
+    async def codex_auth(request: Request):
+        form = await request.form()
+        await run_in_threadpool(setup_steps.choose_codex_auth, form.get("choice"), config, home)
+        return respond(request, "codex")
+
+    @app.post("/settings/codex/key")
+    async def codex_key(request: Request):
+        # AK1: the new key is tested before it is written, so a refused one never replaces the key in
+        # use; it stays in its (hidden) box to be fixed, never typed again.
+        form = await request.form()
+        typed = form.get("key") if isinstance(form.get("key"), str) else ""
+        previous = _openai_key(home)
+        state = await run_in_threadpool(setup_steps.save_and_test_openai, typed, config, home, None, None,
+                                        form.get("to_file") == "1")
+        if state.get("keychain_refused"):   # KR3/KC2: nothing saved or recorded; the typed key stays in its box
+            return respond(request, "codex", {"openai_box": typed, "keychain_notice": state["keychain_refused"]})
+        saved = state["steps"]["codex"]
+        failed = saved["status"] == "failed" and _openai_key(home) != typed.strip()
+        if failed and previous:
+            setup_steps.record(home, "codex", "failed", saved["message"] + " " + KEY_KEPT)
+        return respond(request, "codex", {"openai_box": typed} if failed else None)
+
+    @app.post("/settings/codex/key/test")
+    async def codex_key_test(request: Request):
+        await run_in_threadpool(setup_steps.test_saved_openai, config, home)
+        return respond(request, "codex")
+
+    @app.post("/settings/codex/key/remove")
+    async def codex_key_remove(request: Request):
+        state = await run_in_threadpool(setup_steps.remove_openai_key, home)
+        if state.get("keychain_refused"):   # A5: nothing removed
+            return respond(request, "codex", {"keychain_notice": state["keychain_refused"]})
         return respond(request, "codex")
 
     @app.get("/settings/linkedin/status")
@@ -603,9 +676,12 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
 
     # --- License (Setup step 5) --------------------------------------------------------------------
 
-    async def activate(request, key):
+    async def activate(request, key, to_file=False):
         had_key = bool(setup_steps.license_key(home))
-        state = await run_in_threadpool(setup_steps.activate_license, key, home, relay_url)
+        state = await run_in_threadpool(setup_steps.activate_license, key, home, relay_url, None, to_file)
+        if state.get("keychain_refused"):   # KC2: nothing saved or recorded; the typed key stays in its box
+            return respond(request, "license", {"key_box": key if isinstance(key, str) else "",
+                                                "keychain_notice": state["keychain_refused"]})
         await run_in_threadpool(_sync_license_pause, root, home)  # E8.T3: a new key resumes at once
         if setup_steps.license_done(home):  # a newly active key: read LinkedIn again at once
             await run_in_threadpool(setup_steps.linkedin_status, home, relay_url)
@@ -618,6 +694,8 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
 
     @app.post("/settings/license/activate")
     async def license_activate(request: Request):
+        if setup_steps.keys_waiting(home):   # KC3: never "no key saved" while the keychain waits
+            return respond(request, "license")
         key = setup_steps.license_key(home)
         if not key:
             setup_steps.record(home, "license", "failed", "No license key is saved yet. Paste yours below and click "
@@ -625,7 +703,20 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
             return respond(request, "license")
         return await activate(request, key)
 
+    @app.post("/settings/keys/remove")
+    async def keys_remove(request: Request):
+        # A5: "Remove Sidedoor's saved keys from this computer": the keychain items first, then
+        # any file; a refused delete leaves everything as it was and says so.
+        try:
+            await run_in_threadpool(credentials.remove_all, setup_steps._home(home))
+        except OSError:
+            return respond(request, "license", {"keys_removed": KEYS_NOT_REMOVED})
+        (setup_steps._home(home) / setup_steps.OPENROUTER_TESTED_FILE).unlink(missing_ok=True)
+        setup_steps.record(home, "openrouter", "failed", KEYS_REMOVED_OPENROUTER)
+        await run_in_threadpool(_sync_license_pause, root, home)
+        return respond(request, "license", {"keys_removed": KEYS_REMOVED}, also=("connections",))
+
     @app.post("/settings/license/change")
     async def license_change(request: Request):
         form = await request.form()
-        return await activate(request, form.get("key"))
+        return await activate(request, form.get("key"), form.get("to_file") == "1")

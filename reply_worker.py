@@ -21,10 +21,12 @@ import time
 
 import pipeline_routing as routing
 import portable
+import openai_auth
 import champion_composition
 import provider_limits
 import reply_resume
 import reply_tools
+import model_calls
 import text_model
 import workflow_tasks
 
@@ -477,12 +479,35 @@ def _command(config, schema_path, output_path):
         for setting in reply_tools.options(Path(schema_path).parent):
             command.extend(["-c", setting])
         command.extend(["--output-last-message", str(output_path), "--color", "never", "-"])
-        return text_model.command(config, command)
+        return openai_auth.command(text_model.command(config, command))
     command.extend(["--output-schema", str(schema_path), "--output-last-message", str(output_path), "--color", "never", "-"])
-    return text_model.command(config, command)
+    # E0.T8: ChatGPT sign-in returns this command untouched; an API key drops the forced login.
+    return openai_auth.command(text_model.command(config, command))
 
 
 def _execute(config, prompt, schema, timeout):
+    """`_codex`, with one model_calls row per run (C4): codex reports only its total tokens, on stderr."""
+    meta = {}
+    worker = model_calls.caller()
+    started = time.monotonic()
+
+    def recorded(outcome):
+        model_calls.record("codex", outcome, worker=worker, model=text_model.model(config),
+                           provider="openrouter" if text_model.settings(config) else "openai",
+                           total_tokens=model_calls.codex_tokens(meta.get("stderr")),
+                           seconds=round(time.monotonic() - started, 3))
+
+    try:
+        text = _codex(config, prompt, schema, timeout, meta)
+    except Held as error:
+        recorded("timeout" if error.code == "CLASSIFICATION_TIMEOUT" else "refused"
+                 if error.code in {"SUBSCRIPTION_EXECUTOR_FAILED", "SUBSCRIPTION_EXECUTOR_UNAVAILABLE"} else "invalid")
+        raise
+    recorded("ok")
+    return text
+
+
+def _codex(config, prompt, schema, timeout, meta):
     with tempfile.TemporaryDirectory(prefix="reply-worker-") as directory:
         working = Path(directory)
         schema_path = working / "schema.json"
@@ -501,15 +526,18 @@ def _execute(config, prompt, schema, timeout):
             try:
                 # stderr is read into memory only (never persisted) so the provider's usage-limit
                 # refusal can be told apart from a failed classification.
-                worker = subprocess.Popen(_command(config, schema_path, output_path), stdin=subprocess.PIPE,
+                arguments = _command(config, schema_path, output_path)
+                worker = subprocess.Popen(arguments, stdin=subprocess.PIPE,
                                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                                          encoding="utf-8", cwd=working, env=text_model.environment(config, _environment()),
+                                          encoding="utf-8", cwd=working,
+                                          env=openai_auth.environment(arguments, text_model.environment(config, _environment())),
                                           **portable.worker_spawn_options())
                 portable.contain(worker)
             except OSError:
                 raise Held("SUBSCRIPTION_EXECUTOR_UNAVAILABLE") from None
             try:
                 streams = worker.communicate(prompt, timeout=timeout)
+                meta["stderr"] = streams[1] if isinstance(streams, tuple) and len(streams) == 2 else None
             except subprocess.TimeoutExpired:
                 raise Held("CLASSIFICATION_TIMEOUT", retry=True) from None
         finally:
@@ -526,7 +554,8 @@ def _execute(config, prompt, schema, timeout):
             stderr = streams[1] if isinstance(streams, tuple) and len(streams) == 2 else None
             failed = Held("SUBSCRIPTION_EXECUTOR_FAILED", retry=True)
             failed.executor = executor_failure(worker.returncode, time.monotonic() - started, stderr, config, prompt)
-            raise failed from provider_limits.check_output(worker.returncode, stderr)
+            raise failed from provider_limits.check_output(worker.returncode, stderr, command=arguments)
+        openai_auth.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
         if not output_path.is_file() or output_path.is_symlink():
             raise Held("CLASSIFICATION_OUTPUT_MISSING")
         with output_path.open("rb") as output:

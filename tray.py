@@ -15,6 +15,21 @@ It runs in the dashboard process (`dashboard._serve`). pystray needs the main th
 tray cannot start (no display, a headless start, a missing library, an error from the backend) the
 dashboard runs as before with no tray, and `tray-state.json` in the Sidedoor home says why, for
 `sidedoor doctor` (`doctor.check_tray`).
+
+The built app is a regular app with a Dock icon as well (owner, APP1 b; tools/build_macos.py
+`--macos-app-mode=gui`). `dock_events` makes the Dock do what the tray does: clicking the Dock icon
+while Sidedoor runs is Open dashboard, and the Dock's Quit (also Cmd-Q, `osascript ... quit`) is the
+tray's Quit, the same clean stop with exit code 0. A quit that macOS sends for a log out, restart or
+shut down starts that stop and lets macOS go on at once, so Sidedoor never holds up a log out.
+
+From source (`python orchestrator.py serve`, not frozen) the process is Python's own app, so the Dock
+would show "Python" with Python's icon (DK1 a). `brand_source_dock` sets the Dock icon to the brand
+icon (`NSApplication.setApplicationIconImage_`, reliable while the process runs) and, best-effort,
+CFBundleName "Sidedoor" in the main bundle's in-memory info dictionary before NSApplication starts.
+That name reaches the application menu's title in many cases, but the Dock's label is read by the
+Dock from the bundle on disk (Python.app), so from source the Dock label can still say "Python";
+only the packaged app (its own Info.plist) shows "Sidedoor" there for sure. The packaged app is
+left alone. Every failure is silent.
 """
 
 import json
@@ -62,6 +77,38 @@ def _mac_gui_session():
     return bool(info) and bool(info.get("kCGSSessionOnConsoleKey", True))
 
 
+DOCK_NAME = "Sidedoor"
+
+
+def _frozen():
+    """True in a frozen build: PyInstaller-style `sys.frozen`, or Nuitka's `__compiled__`."""
+    return bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
+
+
+def brand_source_dock(appkit=None, foundation=None, frozen=None):
+    """macOS, from source only: the Dock shows the brand icon and (best-effort) the name Sidedoor
+    instead of Python's. Call before NSApplication starts (the name is read when it does). Returns
+    True when the icon was set; never raises."""
+    if _frozen() if frozen is None else frozen:
+        return False
+    try:
+        foundation = foundation or __import__("Foundation")
+        info = foundation.NSBundle.mainBundle().infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = DOCK_NAME
+    except Exception:
+        pass
+    try:
+        appkit = appkit or __import__("AppKit")
+        picture = appkit.NSImage.alloc().initWithContentsOfFile_(str(icon_path()))
+        if picture is None:
+            return False
+        appkit.NSApplication.sharedApplication().setApplicationIconImage_(picture)
+        return True
+    except Exception:
+        return False
+
+
 def load():
     """(pystray module, PIL.Image module) or raises ImportError."""
     import pystray
@@ -101,8 +148,11 @@ class Tray:
     flags() (the pause flags or None). `modules` is (pystray, PIL.Image), injectable for tests;
     `call_on_main` runs a callable on the tray's thread (AppKit on macOS)."""
 
-    def __init__(self, actions, modules=None, call_on_main=None):
+    def __init__(self, actions, modules=None, call_on_main=None, dock=None):
         self.actions = actions
+        # The Dock's reopen and quit (macOS, the real backend only; tests inject fake modules).
+        self.dock = dock if dock is not None else (modules is None and sys.platform == "darwin")
+        self._dock_delegate = None
         self.pystray, self.image = modules if modules is not None else load()
         self.call_on_main = call_on_main or _call_on_main
         self.icon = None
@@ -124,6 +174,14 @@ class Tray:
                 LOG.warning("Tray: %s failed (%s).", getattr(action, "__name__", "action"), type(error).__name__)
             self._refresh_flags()
         return handler
+
+    def _quit_now(self):
+        """The Dock's or the system's quit (AP5): the stop itself, nothing else. No pause-flag refresh
+        (a database read) runs inside applicationShouldTerminate_, so a log out is never delayed."""
+        try:
+            self.actions.quit()
+        except Exception as error:
+            print("Tray: quit failed (%s)." % type(error).__name__, file=sys.stderr, flush=True)
 
     def _refresh_flags(self):
         try:
@@ -147,9 +205,18 @@ class Tray:
         if self._stop.is_set():
             return
         self._refresh_flags()
+        if self.dock:  # before pystray's Icon starts NSApplication
+            brand_source_dock()
         with self.image.open(icon_path()) as picture:
             picture.load()
             self.icon = self.pystray.Icon("sidedoor", picture.copy(), TITLE, self.menu())
+        if self.dock:
+            try:
+                opening = self._do(lambda: self.actions.open_dashboard())
+                self._dock_delegate = dock_events(lambda: opening(self.icon), self._quit_now)
+            except Exception as error:  # the tray still works; the Dock icon then only shows
+                print("Tray: the Dock's Open and Quit are not connected (%s)." % type(error).__name__,
+                      file=sys.stderr, flush=True)
 
         def setup(icon):
             icon.visible = True
@@ -182,6 +249,54 @@ class Tray:
             ready = self._ready
         if ready and self.icon is not None:
             self.call_on_main(self.icon.stop)
+
+
+# kAEQuitReason values a quit carries when macOS logs out, restarts or shuts down (a quit from the
+# Dock, Cmd-Q or AppleScript carries none).
+SYSTEM_QUIT_REASONS = {b"logo", b"rlgo", b"rrst", b"rsdn", b"rest", b"shut"}
+_DELEGATE_CLASS = []
+
+
+def system_quit():
+    """True when the quit AppKit is handling now came from a log out, restart or shut down. An Apple
+    event whose reason cannot be read counts as one (AP8): never risk holding up a log out."""
+    import Foundation
+    event = Foundation.NSAppleEventManager.sharedAppleEventManager().currentAppleEvent()
+    if event is None:
+        return False
+    try:
+        reason = event.attributeDescriptorForKeyword_(int.from_bytes(b"why?", "big"))
+        return reason is not None and reason.typeCodeValue().to_bytes(4, "big") in SYSTEM_QUIT_REASONS
+    except Exception:
+        return True
+
+
+def dock_events(open_dashboard, quit, app=None):
+    """macOS: become NSApp's delegate (on the main thread, before its run loop) so a Dock click calls
+    `open_dashboard` and the Dock's Quit calls `quit`. Returns the delegate; keep it (NSApp holds its
+    delegate weakly). A user's quit is cancelled for AppKit (NSTerminateCancel) because `quit` is the
+    clean stop that ends the run loop itself; a system quit answers NSTerminateNow after starting it."""
+    import AppKit
+    import Foundation
+    if not _DELEGATE_CLASS:
+        class SidedoorAppDelegate(Foundation.NSObject):
+            def applicationShouldHandleReopen_hasVisibleWindows_(self, application, visible):
+                self.open_dashboard()
+                return False
+
+            def applicationShouldTerminate_(self, application):
+                system = False
+                try:
+                    system = system_quit()
+                except Exception:
+                    pass
+                self.quit()
+                return AppKit.NSTerminateNow if system else AppKit.NSTerminateCancel
+        _DELEGATE_CLASS.append(SidedoorAppDelegate)
+    delegate = _DELEGATE_CLASS[0].alloc().init()
+    delegate.open_dashboard, delegate.quit = open_dashboard, quit
+    (app or AppKit.NSApplication.sharedApplication()).setDelegate_(delegate)
+    return delegate
 
 
 def _call_on_main(function):

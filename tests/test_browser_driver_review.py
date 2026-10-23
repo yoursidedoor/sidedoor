@@ -203,7 +203,7 @@ class ConfirmingFix1Overview(unittest.TestCase):
         test_dashboard_overview.finished_home(self.home)
         for reason, tone in (("RUNTIME_MISSING", "error"), ("PROFILE_IN_USE", "warning")):
             with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"), \
-                    mock.patch.object(browser_runtime, "unavailable", lambda config=None, run=None: reason):
+                    mock.patch.object(browser_runtime, "display_state", lambda config=None, root=None, run=None: reason):
                 item = {entry["name"]: entry for entry in self.gather()["health"]}["Browser profile"]
             self.assertEqual(item["tone"], tone)
             self.assertEqual(item["text"], browser_runtime.UNAVAILABLE_WORDS[reason] + " " + browser_runtime.UNAVAILABLE_TODO[reason])
@@ -228,6 +228,16 @@ class ConfirmingFix1Failures(unittest.TestCase):
         self.assertEqual(texts(self.gather()), [browser_runtime.UNAVAILABLE_WORDS["RUNTIME_MISSING"]])
         browser_runtime.clear_unavailable(self.database)
         self.assertEqual(texts(self.gather()), [])
+
+    def test_a_close_the_window_record_goes_once_the_window_is_gone(self):
+        # Orphan-chrome review: Sidedoor closed its own leftover Chrome, so the stale record is not shown.
+        started = self.now - dt.timedelta(hours=2)
+        browser_runtime.note_unavailable(self.database, "APPLICATION_BROWSER_PROFILE_IN_USE", "applications", started.isoformat())
+        texts = lambda view: [entry["text"] for entry in view["needs_you"]]
+        with mock.patch.object(browser_runtime, "display_state", return_value="PROFILE_IN_USE"):
+            self.assertEqual(texts(self.gather()), [browser_runtime.UNAVAILABLE_WORDS["PROFILE_IN_USE"]])
+        with mock.patch.object(browser_runtime, "display_state", return_value=None):
+            self.assertEqual(texts(self.gather()), [])
 
     def test_the_finder_records_its_deferral_without_a_run(self):
         root = scratch(self)

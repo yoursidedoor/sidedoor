@@ -391,10 +391,24 @@ def serve(directory):
 
 # --- the reply worker's side --------------------------------------------------------------------
 
+def server_argv(directory, executable=None):
+    """The command codex starts as this server. From source: this Python with reply_tools.py. In a
+    frozen build there is no .py file and the binary takes no script (E9.T1): the binary itself with
+    the `reply-tools` subcommand (orchestrator.main), as scheduler_loop.job_command runs the jobs."""
+    import scheduler_loop
+    tail = ["serve", "--directory", str(directory)]
+    if scheduler_loop.frozen():
+        if executable is not None:  # a frozen build has no reply_tools.py for another program to run
+            raise ValueError("REPLY_TOOLS_EXECUTABLE_FROZEN: a frozen build starts its own binary")
+        return [scheduler_loop.program(), "reply-tools"] + tail
+    return [executable or sys.executable, str(Path(__file__).resolve())] + tail
+
+
 def options(directory, executable=None):
     """codex -c settings that attach this server to one run."""
-    command = json.dumps(executable or sys.executable)
-    arguments = json.dumps([str(Path(__file__).resolve()), "serve", "--directory", str(directory)])
+    argv = server_argv(directory, executable)
+    command = json.dumps(argv[0])
+    arguments = json.dumps(argv[1:])
     result = ["mcp_servers." + SERVER + ".command=" + command,
               "mcp_servers." + SERVER + ".args=" + arguments,
               "mcp_servers." + SERVER + ".enabled=true",
@@ -508,10 +522,15 @@ def mark_done(database, note_id, now):
     return changed.rowcount == 1
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    """`reply_tools.py serve --directory D` from source, `sidedoor reply-tools serve --directory D` frozen."""
     parser = argparse.ArgumentParser(description="The reply AI's tools (one run); started by codex, not by hand")
     parser.add_argument("command", choices=["serve"])
     parser.add_argument("--directory", type=Path, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    return serve(args.directory)
+
+
+if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    sys.exit(serve(args.directory))
+    sys.exit(main())

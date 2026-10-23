@@ -283,3 +283,94 @@ class UnavailableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(importlib.util.find_spec("AppKit"), "pyobjc (macOS only)")
+class DockEventsTest(unittest.TestCase):
+    """APP1 b: the Dock icon's click is Open dashboard and its Quit is the tray's Quit."""
+
+    def test_reopen_opens_and_quit_takes_the_clean_stop(self):
+        import AppKit
+        calls = []
+
+        class App:
+            def setDelegate_(self, delegate):
+                calls.append("delegate")
+        delegate = tray.dock_events(lambda: calls.append("open"), lambda: calls.append("quit"), app=App())
+        self.assertFalse(delegate.applicationShouldHandleReopen_hasVisibleWindows_(None, False))
+        # A user's quit (no Apple event reason): the clean stop runs and AppKit does not exit itself.
+        self.assertEqual(delegate.applicationShouldTerminate_(None), AppKit.NSTerminateCancel)
+        with mock.patch.object(tray, "system_quit", return_value=True):  # log out / shut down: never block it
+            self.assertEqual(delegate.applicationShouldTerminate_(None), AppKit.NSTerminateNow)
+        self.assertEqual(calls, ["delegate", "open", "quit", "quit"])
+
+    def test_the_tray_connects_its_own_actions_to_the_dock(self):
+        actions = mock.Mock(flags=mock.Mock(return_value={}))
+        picture = mock.MagicMock()
+        image = mock.Mock(open=mock.Mock(return_value=picture))
+        picture.__enter__.return_value = picture
+        icon = tray.Tray(actions, modules=(mock.Mock(), image), dock=True)
+        with mock.patch.object(tray, "dock_events", return_value="delegate") as events, \
+                mock.patch.object(tray, "brand_source_dock"):  # never the real Dock in a test
+            icon.run()
+        opening, quitting = events.call_args.args
+        opening()
+        reads = actions.flags.call_count
+        quitting()
+        self.assertEqual(actions.flags.call_count, reads)  # AP5: no database read inside the quit
+        actions.open_dashboard.assert_called_once_with()
+        actions.quit.assert_called_once_with()
+
+    def test_fake_backends_never_touch_the_dock(self):
+        with mock.patch.object(tray, "brand_source_dock") as brand:
+            tray.Tray(mock.Mock(flags=mock.Mock(return_value={})),
+                      modules=(mock.MagicMock(), mock.MagicMock())).run()
+        brand.assert_not_called()
+        self.assertFalse(tray.Tray(mock.Mock(), modules=(mock.Mock(), mock.Mock())).dock)
+
+
+class SourceDockBrandingTest(unittest.TestCase):
+    """DK1 a: from source the Dock shows Sidedoor's icon (and, best-effort, name), never Python's."""
+
+    def fakes(self):
+        info = {"CFBundleName": "Python"}
+        foundation = mock.Mock()
+        foundation.NSBundle.mainBundle.return_value.infoDictionary.return_value = info
+        appkit = mock.Mock()
+        return info, foundation, appkit
+
+    def test_source_mode_sets_the_icon_and_the_name(self):
+        info, foundation, appkit = self.fakes()
+        self.assertTrue(tray.brand_source_dock(appkit, foundation, frozen=False))
+        self.assertEqual(info["CFBundleName"], "Sidedoor")
+        appkit.NSImage.alloc.return_value.initWithContentsOfFile_.assert_called_once_with(str(tray.icon_path()))
+        appkit.NSApplication.sharedApplication.return_value.setApplicationIconImage_.assert_called_once_with(
+            appkit.NSImage.alloc.return_value.initWithContentsOfFile_.return_value)
+
+    def test_the_packaged_app_is_left_alone(self):
+        info, foundation, appkit = self.fakes()
+        self.assertFalse(tray.brand_source_dock(appkit, foundation, frozen=True))
+        self.assertEqual(info["CFBundleName"], "Python")
+        appkit.NSApplication.sharedApplication.assert_not_called()
+        foundation.NSBundle.mainBundle.assert_not_called()
+
+    def test_failures_are_swallowed(self):
+        info, foundation, appkit = self.fakes()
+        foundation.NSBundle.mainBundle.side_effect = RuntimeError("no bundle")
+        appkit.NSApplication.sharedApplication.side_effect = RuntimeError("no app")
+        self.assertFalse(tray.brand_source_dock(appkit, foundation, frozen=False))
+        _, foundation, appkit = self.fakes()
+        appkit.NSImage.alloc.return_value.initWithContentsOfFile_.return_value = None  # unreadable file
+        self.assertFalse(tray.brand_source_dock(appkit, foundation, frozen=False))
+        appkit.NSApplication.sharedApplication.assert_not_called()
+
+    def test_the_tray_brands_before_starting_and_a_failure_never_blocks_it(self):
+        actions = mock.Mock(flags=mock.Mock(return_value={}))
+        order = []
+        pystray = mock.MagicMock()
+        pystray.Icon.side_effect = lambda *a: order.append("icon") or mock.Mock()
+        icon = tray.Tray(actions, modules=(pystray, mock.MagicMock()), dock=True)
+        with mock.patch.object(tray, "dock_events"), \
+                mock.patch.object(tray, "brand_source_dock", side_effect=lambda: order.append("brand")):
+            icon.run()
+        self.assertEqual(order, ["brand", "icon"])

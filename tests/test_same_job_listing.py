@@ -101,6 +101,20 @@ class SameJobListingTests(unittest.TestCase):
         self.assertNotEqual(state[0], "DUPLICATE")
         self.assertTrue(adapter.read)
 
+    def test_two_listings_are_never_both_copies(self):
+        # Cognition, 2026-10-23: A was attached as a copy of B; B was then judged a copy of A, and
+        # neither was applied to. A copy is not shown as a candidate, so B proceeds to its read.
+        self.database.execute("DELETE FROM application_jobs WHERE job_key='mooby:a0000003'")
+        self.add("mooby:unresolved:aaaa", "unresolved:aaaa", "QUEUED", "https://mooby.example/careers")
+        self.database.execute("UPDATE application_jobs SET state='DUPLICATE', blocker=? WHERE job_key='mooby:unresolved:aaaa'",
+                              (posting_judge.SAME_JOB_BLOCKER,))
+        self.database.commit()
+        copy = self.database.execute("SELECT * FROM application_jobs WHERE job_key='mooby:unresolved:8b1a'").fetchone()
+        self.assertIsNone(posting_judge.same_job_packet(self.database, copy))
+        adapter, state = self.run_copy(self.answer("SAME", "mooby:unresolved:aaaa"))
+        self.assertNotEqual(state[0], "DUPLICATE")
+        self.assertTrue(adapter.read)
+
     def test_different_proceeds_and_is_not_asked_twice(self):
         value = posting_judge.same_job_packet(self.database, self.database.execute(
             "SELECT * FROM application_jobs WHERE job_key='mooby:unresolved:8b1a'").fetchone())

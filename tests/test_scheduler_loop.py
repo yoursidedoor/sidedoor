@@ -445,7 +445,23 @@ class LoopRecordTests(Base):
         self.clock.now = at(8, 51)
         loop.tick()
         self.assertEqual(scheduler_loop.status(self.root)["job_failures"],
-                         {"applications": {"exit_code": 3, "at": at(8, 51).isoformat(timespec="seconds")}})
+                         {"applications": {"exit_code": 3, "at": at(8, 51).isoformat(timespec="seconds"),
+                                           "started": at(8, 50).isoformat(timespec="seconds")}})
+
+    def test_ov_a_failure_carries_its_childs_start_not_a_passed_over_instant(self):
+        # A round still running at the next :00 is passed over (last_fired moves on) and exits
+        # non-zero later: its failure names the start of THAT child, which Overview compares with
+        # the runs row (overview_page._crashed), never the passed-over instant.
+        loop = scheduler_loop.install(self.loop())
+        loop.tick()                                   # 8:50: the 8:00 run starts
+        self.clock.now = at(9, 1)
+        self.assertIn("run", loop.tick()["skipped_alive"])
+        self.assertEqual(loop.last_fired["run"], at(9, 0).timestamp())
+        self.spawner.children[1].alive = False
+        self.spawner.children[1].poll = lambda: 1
+        self.clock.now = at(9, 20)
+        loop.tick()
+        self.assertEqual(loop.job_failures["run"]["started"], at(8, 50).isoformat(timespec="seconds"))
 
     def test_o26_a_clean_exit_clears_the_jobs_failure(self):
         loop = self.loop()
