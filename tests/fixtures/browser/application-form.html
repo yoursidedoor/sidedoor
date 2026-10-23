@@ -1,0 +1,45 @@
+<!doctype html>
+<!-- E7.T1 test fixture: a LOCAL application form (not any real ATS). The résumé input is hidden
+     behind a visible "Attach" button, as on Greenhouse; the file name shows after a choice; Submit
+     posts the answers and the chosen file's name to the local test server (/submit) and shows a
+     confirmation. Nothing leaves 127.0.0.1. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Staff Software Engineer at Synthetic Company</title></head>
+<body>
+<h1>Apply: Staff Software Engineer</h1>
+<form id="form">
+  <p><label>Full name <input name="full_name"></label></p>
+  <p><label>Email <input name="email" type="email"></label></p>
+  <div id="extra"></div>
+  <p>Resume
+    <button type="button" id="attach" onclick="document.getElementById('resume').click()">Attach</button>
+    <input type="file" id="resume" name="resume" style="display:none">
+    <span id="chosen"></span>
+  </p>
+  <p><button type="submit">Submit application</button></p>
+</form>
+<p id="done" role="status"></p>
+<script>
+  const count = Number(new URLSearchParams(location.search).get('questions') || 0);
+  const extra = document.getElementById('extra');
+  for (let i = 1; i <= count; i++) {
+    const p = document.createElement('p');
+    p.innerHTML = '<label>Question ' + i + ' <input name="q' + i + '"></label>';
+    extra.appendChild(p);
+  }
+  const resume = document.getElementById('resume');
+  resume.addEventListener('change', () => {
+    document.getElementById('chosen').textContent = resume.files.length ? resume.files[0].name : '';
+  });
+  document.getElementById('form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const body = {};
+    for (const [key, value] of new FormData(event.target)) if (typeof value === 'string') body[key] = value;
+    body.resume = resume.files.length ? resume.files[0].name : null;
+    fetch('/submit', {method: 'POST', body: JSON.stringify(body)}).then(() => {
+      document.getElementById('done').textContent = 'Thank you for applying to Synthetic Company!';
+    });
+  });
+</script>
+</body>
+</html>

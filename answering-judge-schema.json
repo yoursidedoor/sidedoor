@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdicts"
+  ],
+  "properties": {
+    "verdicts": {
+      "type": "array",
+      "description": "Exactly one entry per item in answers_to_review, using its question's question_key, with no duplicates and no invented keys.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question_key",
+          "verdict",
+          "reason",
+          "correction",
+          "untrue_fact"
+        ],
+        "properties": {
+          "question_key": {
+            "type": "string",
+            "description": "Copy the reviewed question's question_key exactly."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "ACCEPT",
+              "REVISE",
+              "CANNOT_ANSWER"
+            ],
+            "description": "ACCEPT: the answer may be sent as it is. REVISE: the answering AI should answer it again; say why in reason and what you want in correction. CANNOT_ANSWER: nothing in the packet can answer this question truthfully, or a revision cannot fix it."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One or two sentences: what you checked and why this verdict. For REVISE, the exact problem."
+          },
+          "correction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For REVISE, the change you want (e.g. which recorded fact to use, which of the employer's choices fits, a shorter text). null otherwise."
+          },
+          "untrue_fact": {
+            "type": "boolean",
+            "description": "true only when your objection is that the answer states a fact about the owner that the packet does not support or contradicts (the one hard line); false for ACCEPT and for every other objection."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,101 @@
+<!doctype html>
+<!-- E0.T2 spike fixture: a LOCAL, LinkedIn-like profile page. Not LinkedIn markup; it only
+     reproduces the accessible roles and names the contact finder meets. Every control reports
+     its click to the local test server (/hit?kind=...&name=...), so a test can tell from the
+     server side, independent of the page and the proxy, whether a click reached the browser. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Jane Doe | Example Profile</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; }
+  .card { position: relative; width: 300px; height: 80px; border: 1px solid #999; margin: 12px 0; }
+  .card .center { position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: 100%; height: 100%; }
+  [role=menu][hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Jane Doe</h1>
+  <p>Head of Engineering at Example Robotics</p>
+
+  <section aria-label="Profile actions">
+    <!-- LinkedIn's primary Connect: visible text "Connect", accessible name "Invite Jane Doe to connect" -->
+    <button data-kind="contact" aria-label="Invite Jane Doe to connect">Connect</button>
+    <button data-kind="contact">Message</button>
+    <button data-kind="contact">Follow</button>
+    <button data-kind="contact" aria-label="Pending, click to withdraw invitation sent to Jane Doe">Pending</button>
+    <a data-kind="contact" href="#connect-link" role="link">Connect</a>
+    <button data-kind="contact">+ Follow</button>
+    <button data-kind="contact">&#10003; Following</button>
+    <!-- Names Playwright writes as YAML-quoted snapshot lines. -->
+    <button data-kind="contact" aria-label="Invite Jane Doe #OpenToWork to connect">Connect</button>
+    <button data-kind="contact" aria-label="Message {Jane}">Message</button>
+    <button data-kind="contact" aria-label="Invite Jane O'Neil to connect">Connect</button>
+    <button id="more" data-kind="benign" aria-haspopup="menu" aria-expanded="false">More actions</button>
+    <div role="menu" id="more-menu" aria-label="More actions menu" hidden>
+      <div role="menuitem" tabindex="-1" data-kind="contact">Send profile in a message</div>
+      <div role="menuitem" tabindex="-1" data-kind="contact">Withdraw invitation</div>
+      <div role="menuitem" tabindex="-1" data-kind="contact">Unfollow</div>
+      <div role="menuitem" tabindex="-1" data-kind="benign">Save to PDF</div>
+    </div>
+  </section>
+
+  <section aria-label="Benign controls">
+    <a data-kind="benign" href="#in-jane-doe">Jane Doe</a>
+    <a data-kind="benign" href="#people">See all people at Example Robotics</a>
+    <button data-kind="benign">Show all experiences</button>
+    <button data-kind="benign">Compose message</button>
+    <a data-kind="benign" href="#followers">Ada and 4 other connections follow this page</a>
+    <a data-kind="benign" href="#connections">500+ connections</a>
+    <a data-kind="benign" href="#followers-list">Followers</a>
+    <a data-kind="benign" href="#messaging">Messaging</a>
+    <a data-kind="benign" href="#notes" aria-label="Notes: Jane's #1 pick">Notes</a>
+    <div role="dialog" tabindex="-1" aria-label="Send profile in a message">
+      <button data-kind="benign">Cancel</button>
+    </div>
+  </section>
+
+  <section aria-label="Search">
+    <label>Search employees <input type="search" placeholder="Search employees"></label>
+    <input role="combobox" aria-label="Search people" aria-expanded="false">
+    <input type="text" aria-label="Employee title" placeholder="Search employees by title">
+  </section>
+
+  <ul aria-label="People results">
+    <!-- A card whose centre is covered by its own Connect button: clicking the card clicks Connect. -->
+    <li class="card" aria-label="Sam Roe, Engineering Manager">
+      <button class="center" data-kind="contact">Connect</button>
+    </li>
+    <!-- Profile cards whose TEXT starts with a contact word (no control does): clicked, as live. -->
+    <li><a data-kind="benign" href="#in-ada"><div><span>Ada Lovelace</span><span> · 2nd</span></div><div>Follow for daily notes on robotics</div></a></li>
+    <li><a data-kind="benign" href="#in-bo"><div>Bo Chen</div><p>Send me a note about hiring</p></a></li>
+    <li><a data-kind="benign" href="#in-cy"><div>Cy Dale</div><p>Message me for referrals</p></a></li>
+    <!-- A profile link that wraps a Message button: refused by the kept "contains" rule. -->
+    <li><a data-kind="benign" href="#in-kim-lee">Kim Lee, CTO <button data-kind="contact">Message Kim</button></a></li>
+  </ul>
+
+  <iframe src="/frame.html" title="Embedded people" width="420" height="160"></iframe>
+
+  <aside aria-label="Messaging">
+    <textarea aria-label="Write a message"></textarea>
+    <button data-kind="contact" aria-label="Send">&#10148;</button>
+  </aside>
+</main>
+<script>
+  function report(kind, name) {
+    fetch('/hit?kind=' + encodeURIComponent(kind) + '&name=' + encodeURIComponent(name)).catch(() => {});
+  }
+  document.addEventListener('click', (event) => {
+    const el = event.target.closest('[data-kind]');
+    if (el) report(el.dataset.kind, el.getAttribute('aria-label') || el.innerText.replace(/\s+/g, ' ').trim());
+  });
+  const more = document.getElementById('more');
+  const menu = document.getElementById('more-menu');
+  more.addEventListener('click', () => {
+    menu.hidden = !menu.hidden;
+    more.setAttribute('aria-expanded', String(!menu.hidden));
+  });
+</script>
+</body>
+</html>

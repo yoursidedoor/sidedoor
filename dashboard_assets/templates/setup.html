@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="title">Set up Your Sidedoor</h1>
+{% include "setup_progress.html" %}
+<div class="setup-layout">
+  <ol class="steps" id="steps">
+    {% for step in steps %}{% include "setup_step.html" %}{% endfor %}
+  </ol>
+  <aside class="guide-panel card" id="guide-panel" aria-live="polite">
+    <p class="muted">Steps that send you to another website have a "Show me how" guide. It opens here.</p>
+  </aside>
+</div>
+{% endblock %}

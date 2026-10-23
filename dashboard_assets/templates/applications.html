@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% macro receipt_block(r, v) %}
+<div class="app-receipt">
+  <strong>{{ r.words }}</strong>{% if r.at %} <span class="muted">{{ v.when(r.at) }}</span>{% endif %}
+  {% if r.to %}<br><span class="muted">To {{ r.to }}</span>{% endif %}
+  {% if r.confirmation %}<blockquote>{{ r.confirmation }}</blockquote>{% endif %}
+</div>
+{% endmacro %}
+{% macro next_steps(j) %}
+  {% if j.problem %}<p class="app-problem">{{ j.problem }}</p>{% endif %}
+  {% if j.todo %}<p class="app-todo{% if j.needs_you %} app-todo-you{% endif %}">{{ j.todo }}{% if j.todo_href %} <a class="button app-fix" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}</p>{% endif %}
+{% endmacro %}
+{% macro closing_block(j) %}
+  {% if j.closed %}<p class="app-closed"><strong>Why it closed:</strong> {{ j.closed }}
+    {% if j.closing and j.closing.other %}<br>Same as: {{ j.closing.other }}{% endif %}
+    {% if j.closing and j.closing.reason %}<br><span class="muted">Sidedoor's reasoning:</span> {{ j.closing.reason }}{% endif %}</p>{% endif %}
+{% endmacro %}
+{% block content %}
+<h1 class="title">Applications</h1>
+{% set v = view %}
+{% set na = v.unavailable %}
+{% if v.unreadable %}<p class="note note-warning app-unreadable" role="status">Sidedoor couldn't read its records.</p>{% endif %}
+
+{% if v.job or v.detail_missing %}
+<p><a href="{{ v.link() }}">Back to all applications</a></p>
+{% if v.job == na %}
+<div class="card"><p class="muted">Not available</p></div>
+{% elif v.detail_missing %}
+<div class="card empty"><p>This application is not on file.</p></div>
+{% else %}
+{% set j = v.job %}
+<article class="card app-detail">
+  <h2>{{ j.company }} <span class="muted">·</span> {{ j.role }}</h2>
+  <p><span class="chip chip-{{ j.tone }}">{{ j.state }}</span>{% if j.reading and j.state != "Reading now" %} <span class="chip chip-info">Reading now</span>{% endif %}
+    {% if j.url %}<a href="{{ j.url }}" rel="noopener noreferrer" target="_blank">Open the posting</a>{% endif %}</p>
+  <dl class="facts">
+    {% if j.updated %}<dt>Last activity</dt><dd>{{ v.when(j.updated) }}</dd>{% endif %}
+    {% if j.next_at %}<dt>Next attempt</dt><dd>{{ v.when(j.next_at) }}</dd>{% endif %}
+  </dl>
+  {{ next_steps(j) }}
+  {{ closing_block(j) }}
+  {% if j.receipt %}<h3>Receipt</h3>{{ receipt_block(j.receipt, v) }}{% endif %}
+
+  <h3>Eligibility</h3>
+  {% if j.verdict %}
+  <p>{{ j.verdict.words }} {% if j.verdict.at %}<span class="muted">Checked {{ v.when(j.verdict.at) }}</span>{% endif %}</p>
+  {% if j.verdict.reasons %}<ul class="app-reasons">
+    {% for item in j.verdict.reasons %}<li><strong>{{ item.topic }}:</strong> {{ "fits" if item.fits else "does not fit" }}. {{ item.reason }}</li>{% endfor %}
+  </ul>{% endif %}
+  {% else %}<p class="muted">Not checked yet.</p>{% endif %}
+
+  <h3>Attempts</h3>
+  {% if j.attempts %}
+  <ol class="app-attempts">
+    {% for a in j.attempts %}
+    <li><strong>{{ a.outcome }}</strong> <span class="muted">{{ v.when(a.at) if a.at else "time not recorded" }}</span>
+      {% if a.resume %}<br>Résumé: {{ a.resume }}{% endif %}
+      {% if a.answers %}<details><summary>Answers used ({{ a.answers|length }})</summary>
+        <dl class="app-answers">{% for item in a.answers %}<dt>{{ item.question }}</dt><dd>{{ item.answer }}</dd>{% endfor %}</dl>
+      </details>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}<p class="muted">No submit attempts yet.</p>{% endif %}
+
+  <h3>History</h3>
+  {% if j.history %}
+  <ul class="app-history">{% for h in j.history %}<li><span class="muted">{{ v.when(h.at) if h.at else "" }}</span> {{ h.text }}</li>{% endfor %}</ul>
+  {% else %}<p class="muted">Nothing recorded yet.</p>{% endif %}
+</article>
+{% endif %}
+
+{% else %}
+<nav class="app-filters" aria-label="Filter applications">
+  {% for key, label in v.filters %}
+  <a class="chip {{ 'chip-info app-filter-active' if key == v.show else 'chip-muted' }}" href="{{ v.link(show=key) }}"{% if key == v.show %} aria-current="true"{% endif %}>{{ label }}{% if v.counts != na %} <span class="app-count">{{ v.counts[key] }}</span>{% endif %}</a>
+  {% endfor %}
+</nav>
+<form class="app-search" method="get" action="/applications" role="search">
+  {% if v.show != "all" %}<input type="hidden" name="show" value="{{ v.show }}">{% endif %}
+  {% if v.company %}<input type="hidden" name="company" value="{{ v.company }}">{% endif %}
+  <label for="app-q" class="muted">Search by company or role</label>
+  <div class="app-search-row">
+    <input id="app-q" name="q" type="search" value="{{ v.query or '' }}" maxlength="200">
+    <button class="button" type="submit">Search</button>
+  </div>
+</form>
+{% if v.company %}<p class="app-scope">Showing {{ v.company_name or v.company }} only. <a href="{{ v.link(company=None) }}">Show every company</a></p>{% endif %}
+{% if v.query %}<p class="app-scope">Matching “{{ v.query }}”. <a href="{{ v.link(q=None) }}">Clear search</a></p>{% endif %}
+
+{% if v.list == na %}
+<div class="card"><p class="muted">Not available</p></div>
+{% elif not v.list.jobs %}
+<div class="card empty app-empty">
+  {% if v.counts != na and v.counts.all == 0 %}
+  <p>No applications yet. Sidedoor applies once research finds matching roles, usually within a day of starting.</p>
+  {% else %}
+  <p>No applications here right now.{% if v.show != "all" or v.company or v.query %} <a href="/applications">See all applications</a>{% endif %}</p>
+  {% endif %}
+</div>
+{% else %}
+<p class="muted app-total">{{ v.list.total }} application{{ "s" if v.list.total != 1 }}{% if v.list.pages > 1 %}, page {{ v.list.page }} of {{ v.list.pages }}{% endif %}</p>
+<ul class="app-list">
+  {% for j in v.list.jobs %}
+  <li class="card app-row app-{{ j.tone }}">
+    <details>
+      <summary>
+        <span class="app-head"><strong>{{ j.company }}</strong> <span class="app-role">{{ j.role }}</span></span>
+        <span class="chip chip-{{ j.tone }}">{{ j.state }}</span>{% if j.reading and j.state != "Reading now" %} <span class="chip chip-info">Reading now</span>{% endif %}
+        <span class="muted app-times">{% if j.updated %}Last activity {{ v.when(j.updated) }}{% endif %}{% if j.next_at %} · Next attempt {{ v.when(j.next_at) }}{% endif %}</span>
+        {% if j.todo and (j.needs_you or not j.closed) %}<span class="app-summary-todo{% if j.needs_you %} app-todo-you{% endif %}">{{ j.todo }}</span>{% endif %}
+      </summary>
+      <div class="app-body">
+        <p>{% if j.url %}<a href="{{ j.url }}" rel="noopener noreferrer" target="_blank">Open the posting</a> · {% endif %}<a href="{{ v.link(company=j.employer, page=None) }}">More at {{ j.company }}</a></p>
+        {{ next_steps(j) }}
+        {{ closing_block(j) }}
+        {% if j.receipt %}{{ receipt_block(j.receipt, v) }}{% endif %}
+        {% if j.attempts %}
+        <p class="app-attempts-line"><strong>Attempts:</strong>
+          {% for a in j.attempts %}{{ a.outcome }}{% if a.at %} ({{ v.when(a.at) }}){% endif %}{{ "; " if not loop.last }}{% endfor %}</p>
+        {% endif %}
+        <p><a href="{{ v.link(job=j.key) }}">Eligibility, answers used and full history</a></p>
+      </div>
+    </details>
+  </li>
+  {% endfor %}
+</ul>
+{% if v.list.pages > 1 %}
+<nav class="app-pages" aria-label="Pages">
+  {% if v.list.page > 1 %}<a class="button" href="{{ v.link(page=v.list.page - 1) }}">Newer</a>{% endif %}
+  <span class="muted">Page {{ v.list.page }} of {{ v.list.pages }}</span>
+  {% if v.list.page < v.list.pages %}<a class="button" href="{{ v.link(page=v.list.page + 1) }}">Older</a>{% endif %}
+</nav>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

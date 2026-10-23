@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "output_version",
+    "source_sha256",
+    "label",
+    "literal_quote",
+    "quote_span",
+    "role_reference",
+    "reason",
+    "unknown_factual_requirements",
+    "reply_proposal",
+    "next_action",
+    "review_at",
+    "champion_handoff",
+    "speaker_context"
+  ],
+  "properties": {
+    "output_version": {
+      "type": "string",
+      "const": "reply-decision-v2"
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "label": {
+      "type": "string",
+      "enum": [
+        "AGREEMENT",
+        "DECLINE",
+        "AMBIGUOUS",
+        "QUESTION",
+        "INTERVIEW",
+        "REJECTION",
+        "QUOTED_OR_FORWARDED",
+        "OTHER"
+      ]
+    },
+    "literal_quote": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "quote_span": {
+      "$ref": "#/$defs/span"
+    },
+    "role_reference": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "speaker_context": {
+      "type": "string",
+      "enum": [
+        "DIRECT_SPEAKER",
+        "QUOTED_OR_FORWARDED",
+        "UNKNOWN"
+      ]
+    },
+    "champion_handoff": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "job_key",
+            "resume_quotes",
+            "role_quotes"
+          ],
+          "properties": {
+            "job_key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "resume_quotes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "role_quotes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "next_action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "review_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "unknown_factual_requirements": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+        "type": "string",
+        "enum": [
+          "SENDER_IDENTITY",
+          "ROLE_ASSOCIATION",
+          "QUOTED_CONTEXT",
+          "FORWARDED_CONTEXT",
+          "AGREEMENT_INTENT",
+          "CANDIDATE_FACTS",
+          "OTHER"
+        ]
+      }
+    },
+    "reply_proposal": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "text",
+            "basis_quote"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2500
+            },
+            "basis_quote": {
+              "$ref": "#/$defs/span"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end",
+        "text"
+      ],
+      "properties": {
+        "start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "end": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      }
+    }
+  }
+}

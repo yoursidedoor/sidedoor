@@ -1,0 +1,17 @@
+{
+ "request_id": "request-fixt0012",
+ "binding": "synthetic-binding-request-fixt0012",
+ "max_tool_calls": 40,
+ "payload": {
+  "operation": "investigate",
+  "job": {
+   "job_key": "weyland ai:a0000011",
+   "employer": "weyland ai",
+   "requisition": "a0000011",
+   "candidate_email": "alex.example@example.com",
+   "payload": "{\"company\": \"Weyland AI\", \"role\": \"Senior Backend Engineer (Platform)\", \"url\": \"https://jobs.ashbyhq.com/weyland-ai/a0000011\", \"requisition_id\": \"a0000011\"}"
+  },
+  "attempt_id": null
+ },
+ "context": {}
+}

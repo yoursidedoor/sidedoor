@@ -1,0 +1,7 @@
+<div class="chosen" id="pick-{{ pick.field }}-chosen">
+  {% for value in pick.chosen %}
+  <span class="chip chip-info">{{ value }}<input type="hidden" name="{{ pick.field }}" value="{{ value }}"><button class="remove" type="button" aria-label="Remove {{ value }}" hx-post="/setup/pick/{{ pick.field }}/remove" hx-vals='{{ {"pick_value": value} | tojson }}' hx-target="#pick-{{ pick.field }}-chosen" hx-swap="outerHTML" hx-include="#pick-{{ pick.field }}-chosen">×</button></span>
+  {% else %}
+  <span class="muted">Nothing picked yet.</span>
+  {% endfor %}
+</div>

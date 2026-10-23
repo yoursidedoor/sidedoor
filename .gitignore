@@ -1,0 +1,46 @@
+# Runtime state. state/orchestrator.sqlite3 alone is ~5.2GB and is the live execution
+# queue, not source. Never commit it (see the owner's standing no-DB-copies rule).
+state/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Browser and agent artifacts: ~3.9GB of traces, prompts and outputs per request.
+reports/
+
+# Rotated runtime logs (~60MB) and the installer's pre-change backups (~61MB).
+logs/
+backups/
+
+# The letter-staging system of the original install was removed (E1.T1); this repo uses
+# plain git. Local scratch roots may still be created here and are never committed.
+_staging/
+
+# Local scratch
+__pycache__/
+*.pyc
+.DS_Store
+
+# Session lock, not source
+.claude/scheduled_tasks.lock
+
+# Temporary roots left by manual_reply_execution.py
+reply-manual-*/
+
+# The user's profile (facts and preferences) lives in ~/.config/sidedoor or $SIDEDOOR_HOME,
+# never in git (E1.T3). profile.example.json is the committed template.
+profile.json
+
+# Runtime research source observations (research_sources.py); user data, never committed.
+research-source-observations.json
+
+# Packaging (pip install -e .)
+*.egg-info/
+build/
+dist/
+
+# Local venv for the relay (its requirements.txt; the app itself is standard library only).
+.venv-relay/
+
+# Local venv for the dashboard's pinned packages (pyproject.toml dependencies) and its tests.
+.venv-dashboard/

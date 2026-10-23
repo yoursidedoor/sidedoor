@@ -1,0 +1,27 @@
+{# LinkedIn in Settings > Connections; re-rendered on its own so typing elsewhere in the section is kept. #}
+<div class="connection" id="connection-linkedin"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if x.page_load %}<div hx-get="/settings/linkedin/status" hx-trigger="load" hx-target="#connection-linkedin" hx-swap="outerHTML"></div>{% endif %}
+  <h3>LinkedIn</h3>
+  {% set l = x.linkedin %}
+  {% if not x.has_license %}
+  <p class="muted">Needs your license first (<a href="#license">License</a>).</p>
+  {% else %}
+  {% if l.message %}<p class="note note-{{ 'success' if l.status == 'done' else ('error' if l.status == 'failed' else 'info') }}" role="status">{{ x.say(l.message) }}</p>{% endif %}
+  {% if l.offer == "waiting" %}
+  {% if x.link_url %}<p><a class="button" href="{{ x.link_url }}" target="_blank" rel="noopener noreferrer">Open the LinkedIn sign-in page</a></p>{% endif %}
+  {% set again = "reconnect" if l.kind == "reconnect" else "connect" %}
+  <form method="post" action="/settings/linkedin/{{ again }}" hx-post="/settings/linkedin/{{ again }}" hx-target="#connection-linkedin" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button{% if x.link_url %} button-quiet{% endif %}" type="submit">{% if x.link_url %}Get a new link{% else %}{{ "Reconnect" if again == "reconnect" else "Connect" }} again{% endif %}</button></form>
+  <div id="linkedin-wait" hx-get="/settings/linkedin/status?poll=1" hx-trigger="every 5s" hx-target="#linkedin-wait" hx-swap="innerHTML"></div>
+  {% elif l.offer == "connect" %}
+  <form method="post" action="/settings/linkedin/connect" hx-post="/settings/linkedin/connect" hx-target="#connection-linkedin" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Connect LinkedIn</button></form>
+  {% elif l.offer == "reconnect" %}
+  <form method="post" action="/settings/linkedin/reconnect" hx-post="/settings/linkedin/reconnect" hx-target="#connection-linkedin" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button{% if l.status == 'done' %} button-quiet{% endif %}" type="submit">Reconnect</button></form>
+  {% else %}
+  <button class="button" type="button" hx-get="/settings/linkedin/status" hx-target="#connection-linkedin" hx-swap="outerHTML">Check again</button>
+  {% endif %}
+  {% endif %}
+  <a class="guide-link" href="/setup/guide/linkedin" hx-get="/setup/guide/linkedin" hx-target="#guide-panel">Show me how</a>
+</div>

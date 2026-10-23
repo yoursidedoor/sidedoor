@@ -1,0 +1,178 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sidedoor"
+version = "0.0.1"
+description = "Referral-first job-search agent for engineers that runs on your machine."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+# The dashboard (E6.T1 option A, owner 2026-10-21), résumé intake's PDF reader (pypdf, E4.T2) and
+# the PDF writer (fpdf2, E4.T2) are the only users of third-party packages; the rest is standard
+# library. Exact pins, the versions E6.T1-dashboard-shell-options.md cites.
+dependencies = [
+    "fastapi==0.158.1",
+    "starlette==1.9.0",
+    "uvicorn==0.54.0",
+    "jinja2==3.1.6",
+    "pydantic==2.14.1",
+    "pydantic-core==2.50.1",
+    "python-multipart==0.0.32",
+    # Résumé intake (E4.T2 option A, owner 2026-10-21): PDF text, extracted once at upload.
+    "pypdf==6.21.2",
+    # PDF writer for the ATS résumé and cover letters with the bundled DejaVu Sans font
+    # (assets/fonts; E4.T2 review, owner 2026-10-21). 2.8.9 was released 2026-09-29. It pulls
+    # in Pillow, fontTools and defusedxml.
+    "fpdf2==2.8.9",
+    # The tray icon (E5.T3, owner-approved 2026-10-22): macOS menu bar and Windows notification area
+    # only (no tray on Linux yet). pystray is LGPLv3 (E5.T1 note: check the relinking terms before
+    # the Nuitka build). On macOS it brings pyobjc's AppKit and Quartz bindings; `tray.py` also
+    # imports Quartz (desktop-session check) and PyObjCTools, so they are pinned too. Pillow comes
+    # with fpdf2.
+    "pystray==0.19.5; sys_platform == 'darwin' or sys_platform == 'win32'",
+    "six==1.17.0; sys_platform == 'darwin' or sys_platform == 'win32'",
+    "pyobjc-core==12.2.2; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa==12.2.2; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+# FastAPI's TestClient needs httpx (tests/test_dashboard.py only).
+test = ["httpx==0.28.1"]
+
+[project.scripts]
+sidedoor = "orchestrator:cli"
+
+[tool.setuptools]
+# Flat layout: every top-level module is listed (tests/test_packaging.py keeps this list complete).
+# Prompts, schemas, defaults and dashboard assets are read through resources.py (E2.T5): next to the
+# modules (source checkout, `pip install -e .`, Nuitka) or from <prefix>/share/sidedoor, where
+# [tool.setuptools.data-files] below installs them for a plain `pip install .`.
+py-modules = [
+    "agent_worker",
+    "answering_agent",
+    "application_browser",
+    "application_connection",
+    "application_destination",
+    "application_recovery",
+    "application_recovery_decision",
+    "applications",
+    "applications_page",
+    "approvals",
+    "approvals_page",
+    "ats_browser",
+    "backfill_inactivity_anchors",
+    "browser_guard",
+    "browser_runtime",
+    "champion",
+    "champion_composition",
+    "champion_reporting",
+    "conversion",
+    "cover_letter",
+    "dashboard",
+    "daily_schedule",
+    "decision_transport",
+    "desktop_adapter",
+    "doctor",
+    "engagement",
+    "external_history",
+    "failures_page",
+    "followup_execution",
+    "heyreach_schema",
+    "identity_reconciliation",
+    "inactivity_closure",
+    "industry_discovery",
+    "job_description",
+    "license_clock",
+    "linkedin_contacts",
+    "linkedin_port",
+    "log",
+    "log_retention",
+    "login_item",
+    "manual_answering_coverage",
+    "manual_answering_demo",
+    "manual_application_browser",
+    "manual_application_compute_recovery",
+    "manual_application_connection",
+    "manual_application_failure_context",
+    "manual_application_receipts",
+    "manual_application_recovery_decision_slice",
+    "manual_application_recovery_integrated",
+    "manual_application_recovery_lifecycle",
+    "manual_browser_failed_diagnostic_quotes",
+    "manual_browser_recovery_slice",
+    "manual_campaign_e2e",
+    "manual_champion_handoff",
+    "manual_checkpoint_scope",
+    "manual_engagement_review_handoff",
+    "manual_followup_e2e",
+    "manual_inactivity_browser",
+    "manual_inactivity_closure",
+    "manual_inactivity_provider",
+    "manual_new_contact_e2e",
+    "manual_partial_review_recovery",
+    "manual_recipient_closure",
+    "manual_reply_execution",
+    "manual_reporting_recovery_20260917",
+    "manual_research_recovery",
+    "manual_service_headroom",
+    "manual_unknown_inspection_recovery",
+    "manual_unreadable_form_escalation",
+    "migrate_inactivity_identity",
+    "networking_page",
+    "notifications",
+    "orchestrator",
+    "outreach",
+    "outreach_agent",
+    "outreach_campaign",
+    "outreach_history",
+    "outreach_history_browser",
+    "outreach_owner_approval",
+    "outreach_promotion",
+    "outreach_provider",
+    "overview_page",
+    "owner_seed",
+    "parallel_research",
+    "paths",
+    "pipeline_routing",
+    "portable",
+    "posting_judge",
+    "provider_limits",
+    "reconciliation",
+    "referrals",
+    "reply_execution",
+    "reply_resume",
+    "reply_tools",
+    "reply_worker",
+    "reporting",
+    "research_recovery",
+    "research_sources",
+    "research_workflow",
+    "resources",
+    "resume_intake",
+    "run_locks",
+    "scheduler_control",
+    "scheduler_loop",
+    "settings_page",
+    "setup_steps",
+    "source_records",
+    "strategy_execution",
+    "text_model",
+    "tray",
+    "unipile_port", "sequence", "pacing",
+    "user_profile",
+    "update_check",
+    "version",
+    "workflow_tasks",
+]
+
+# resources.DATA_FILES and DATA_DIRS, folder by folder (tests/test_packaging.py checks they match).
+[tool.setuptools.data-files]
+"share/sidedoor" = ["*-prompt.md", "*-schema.json", "config.json", "settings.json", "profile.example.json"]
+"share/sidedoor/dashboard_assets" = ["dashboard_assets/*.json"]
+"share/sidedoor/dashboard_assets/static" = ["dashboard_assets/static/*"]
+"share/sidedoor/dashboard_assets/templates" = ["dashboard_assets/templates/*.html"]
+"share/sidedoor/dashboard_assets/templates/guides" = ["dashboard_assets/templates/guides/*.html"]
+"share/sidedoor/assets/brand" = ["assets/brand/*"]
+"share/sidedoor/assets/fonts" = ["assets/fonts/*"]

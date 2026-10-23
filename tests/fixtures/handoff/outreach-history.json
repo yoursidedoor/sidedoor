@@ -1,0 +1,162 @@
+{
+ "historical_only": true,
+ "provider_refreshed": false,
+ "contact_count": 10,
+ "contacts": [
+  {
+   "recipient": "Morgan Lee",
+   "company": "Fixture Robotics",
+   "profile": "https://www.linkedin.com/in/morgan-lee-fixture/",
+   "message": "Synthetic test invitation to Morgan.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Jordan Park",
+   "company": "Fixture Robotics",
+   "profile": "https://www.linkedin.com/in/jordan-park-fixture/",
+   "message": "Synthetic test invitation to Jordan.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Riley Chen",
+   "company": "Example Grid",
+   "profile": "https://www.linkedin.com/in/riley-chen-fixture/",
+   "message": "Synthetic test invitation to Riley.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Taylor Brooks",
+   "company": "Example Grid",
+   "profile": "https://www.linkedin.com/in/taylor-brooks-fixture/",
+   "message": "Synthetic test invitation to Taylor.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Casey Diaz",
+   "company": "Sample AI",
+   "profile": "https://www.linkedin.com/in/casey-diaz-fixture/",
+   "message": "Synthetic test invitation to Casey.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Jamie Fox",
+   "company": "Sample AI",
+   "profile": "https://www.linkedin.com/in/jamie-fox-fixture/",
+   "message": "Synthetic test invitation to Jamie.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Avery Stone",
+   "company": "Sample AI",
+   "profile": "https://www.linkedin.com/in/avery-stone-fixture/",
+   "message": "Synthetic test invitation to Avery.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Quinn Hart",
+   "company": "Placeholder Pay",
+   "profile": "https://www.linkedin.com/in/quinn-hart-fixture/",
+   "message": "Synthetic test invitation to Quinn.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Drew Kim",
+   "company": "Placeholder Pay",
+   "profile": "https://www.linkedin.com/in/drew-kim-fixture/",
+   "message": "Synthetic test invitation to Drew.",
+   "status": "Invitation sent; pending",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  },
+  {
+   "recipient": "Jamie Rivera",
+   "company": "Globex",
+   "profile": "https://www.linkedin.com/in/jrivera/",
+   "message": "Synthetic test invitation.",
+   "status": "Invitation sent",
+   "send_date": "2026-09-14",
+   "source": "synthetic test fixture",
+   "history_requires_live_reconciliation": true
+  }
+ ],
+ "rules": {
+  "channel": "LinkedIn via HeyReach",
+  "outbound_preapproved": true,
+  "max_unique_contacts_per_company": 3,
+  "max_followups_per_contact": 2,
+  "exclude_all_outreach": [
+   "Excluded Recruiter"
+  ],
+  "no_email": [
+   "No Email Person"
+  ],
+  "stop_on_reply": true,
+  "stop_on_negative_reply": true,
+  "no_reinvite_pending": true,
+  "no_new_initial_message_to_previously_contacted": true,
+  "unknown_history_blocks_send": true,
+  "count_existing_recruiting_contacts_conservatively": true,
+  "followup_cadence": "3 business days after the initial message, then 5 business days after the first follow-up.",
+  "automatic_followups_this_test": 0,
+  "no_paid_upgrade": true
+ },
+ "interviews": [
+  {
+   "company": "Fixture Robotics",
+   "date": "2026-09-23",
+   "time_if_known": null,
+   "role": "Senior Software Engineer (synthetic)",
+   "stage": "Tech screen 1 (synthetic)",
+   "source": "synthetic test fixture"
+  },
+  {
+   "company": "Example Grid",
+   "date": "2026-09-23",
+   "time_if_known": null,
+   "role": "Senior Software Engineer (synthetic)",
+   "stage": "Tech screen 1 (synthetic)",
+   "source": "synthetic test fixture"
+  },
+  {
+   "company": "Sample AI",
+   "date": "2026-09-24",
+   "time_if_known": null,
+   "role": "Senior Software Engineer (synthetic)",
+   "stage": "Tech screen 1 (synthetic)",
+   "source": "synthetic test fixture"
+  },
+  {
+   "company": "Placeholder Pay",
+   "date": "2026-09-24",
+   "time_if_known": null,
+   "role": "Senior Software Engineer (synthetic)",
+   "stage": "Tech screen 1 (synthetic)",
+   "source": "synthetic test fixture"
+  }
+ ]
+}

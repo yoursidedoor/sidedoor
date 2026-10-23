@@ -1,0 +1,7 @@
+{# A Profile and search field whose kept Approvals answer `o` is in force instead (E6.T4 A3, item 4). #}
+<div class="kept-override">
+  {% if notice %}<p class="note note-info" role="status">{{ notice }}</p>{% endif %}
+  <p class="note note-warning">Your answer on Approvals is used instead of this: <strong>{{ "Yes" if o.value is sameas true else "No" if o.value is sameas false else o.value }}</strong>.</p>
+  <button class="button button-quiet" type="submit" name="key" value="{{ o.key }}" formaction="/settings/answers/use-setup" formnovalidate
+          hx-post="/settings/answers/use-setup" hx-target="closest .kept-override" hx-swap="outerHTML">Use this value</button>
+</div>

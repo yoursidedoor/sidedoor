@@ -1,0 +1,20 @@
+{# One owner question (approvals_page.questions): `item`, its flash `f` ({tone, text, kept}). #}
+{% set q = item %}{% set f = f or {} %}
+<article class="approval-card" id="{{ q.dom }}">
+  <h3>{{ q.employer }}{% if q.role %}: {% if q.url %}<a href="{{ q.url }}" rel="noopener noreferrer" target="_blank">{{ q.role }}</a>{% else %}{{ q.role }}{% endif %}{% endif %}</h3>
+  <p>{{ q.question }}</p>
+  {% if q.expires %}<p class="muted">Answer by {{ v.when(q.expires) }}. Until then this application waits; nothing is submitted without your answer.</p>{% endif %}
+  {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
+  <form method="post" action="/approvals/questions/answer" hx-post="/approvals/questions/answer" hx-target="closest article" hx-swap="outerHTML">
+    <input type="hidden" name="decision_id" value="{{ q.id }}"><input type="hidden" name="payload_hash" value="{{ q.payload_hash }}">
+    {% if q.answer_type == "boolean" %}
+    {% for choice in ("Yes", "No") %}<label class="choice"><input type="radio" name="answer" value="{{ choice }}"{% if loop.first %} required{% endif %}{% if f.kept == choice %} checked{% endif %}> <span>{{ choice }}</span></label>{% endfor %}
+    {% elif q.answer_type == "choice" and q.choices %}
+    {% for choice in q.choices %}<label class="choice"><input type="radio" name="answer" value="{{ choice }}"{% if loop.first %} required{% endif %}{% if f.kept == choice %} checked{% endif %}> <span>{{ choice }}</span></label>{% endfor %}
+    {% else %}
+    <label for="answer-{{ q.dom }}">Your answer</label>
+    <textarea id="answer-{{ q.dom }}" name="answer" rows="3" maxlength="4000" required>{{ f.kept or "" }}</textarea>
+    {% endif %}
+    <button class="button" type="submit">Save answer</button>
+  </form>
+</article>

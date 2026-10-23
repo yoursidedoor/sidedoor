@@ -1,0 +1,4 @@
+<div class="chips" id="chips"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if mode %}<a class="chip chip-{{ mode.tone }}" href="/settings#mode">{{ mode.label }}</a>{% endif %}
+  {% if license %}<a class="chip chip-{{ license.tone }}" href="{{ license.href or '/settings#license' }}">{{ license.label }}</a>{% endif %}
+</div>

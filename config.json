@@ -1,0 +1,110 @@
+{
+  "source_root": null,
+  "credential_config": "~/.codex/config.toml",
+  "codex": "/opt/homebrew/bin/codex",
+  "model": "gpt-6-astra",
+  "browser_read_model": "gpt-6-sol",
+  "text_model": {
+    "model": "z-ai/glm-5.3"
+  },
+  "agent_worker": {
+    "enabled": true,
+    "timeout_seconds": 60,
+    "max_items": 1
+  },
+  "timezone": "America/Los_Angeles",
+  "scope": "job_search_e2e",
+  "bridge_transport": {
+    "url": "",
+    "owner_id": "",
+    "credential_file": null
+  },
+  "telegram": {
+    "transport": "bridge_relay"
+  },
+  "cloud_transport_deployed": true,
+  "billing_portal_url": "https://billing.stripe.com/p/login/fZu7sM0004Gy9yq1jMeIw00",
+  "research_enabled": true,
+  "applications_enabled": true,
+  "application_adapter": "desktop",
+  "application_recovery": {
+    "enabled": true,
+    "max_attempts": 7
+  },
+  "application_browser": {
+    "enabled": true,
+    "max_operations": null,
+    "timeout_seconds": 900,
+    "max_tool_calls": 70
+  },
+  "application_answering": {
+    "enabled": true,
+    "timeout_seconds": 600
+  },
+  "execution_ownership_verified": true,
+  "reporting_owner_confirmed": true,
+  "daily_report_hour": 18,
+  "research_hour": 9,
+  "day_start_hour": 9,
+  "research_max_attempts": 3,
+  "research_retry_delays_seconds": [
+    900,
+    3600
+  ],
+  "research_dispatch_interval_seconds": 300,
+  "applications_minute": 30,
+  "research_timeout_seconds": 2000,
+  "research_company_limit": 20,
+  "research_phase_timeout_seconds": 600,
+  "daily_compute_seconds": 21000,
+  "research_service_reserve_seconds": 9000,
+  "campaign_id": null,
+  "sender_id": null,
+  "linkedin_provider": "unipile",
+  "outreach_mode": "guarded",
+  "outreach_actions_enabled": true,
+  "outreach_allowed_purposes": [
+    "INITIAL",
+    "FIRST_MESSAGE",
+    "PREPARE_CAMPAIGN",
+    "FOLLOWUP",
+    "REPLY",
+    "INVITE"
+  ],
+  "outreach_agent": {
+    "enabled": true,
+    "compose": true,
+    "timeout_seconds": 600,
+    "max_items": 7,
+    "max_prompt_bytes": 400000
+  },
+  "linkedin_contacts": {
+    "enabled": true,
+    "max_operations_per_cycle": 1,
+    "max_operations_per_day": 3
+  },
+  "outreach_pause_reason": null,
+  "outreach_history_max_age_seconds": 3600,
+  "outreach_inactivity_days": 27,
+  "engagement_enabled": true,
+  "engagement_page_size": 20,
+  "sender_profile": null,
+  "reply_execution": {
+    "enabled": true
+  },
+  "followup_execution": {
+    "enabled": true,
+    "dispatch_enabled": true,
+    "timeout_seconds": 600,
+    "max_items": 7
+  },
+  "conversion": {
+    "champion_handoff_enabled": true
+  },
+  "reply_worker": {
+    "enabled": true,
+    "timeout_seconds": 600,
+    "max_items": 7
+  },
+  "email_applications_enabled": true
+}

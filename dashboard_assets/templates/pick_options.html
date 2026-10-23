@@ -1,0 +1,8 @@
+{% for label in matches %}
+<button class="option" type="button" hx-post="/setup/pick/{{ field }}/add" hx-vals='{{ {"pick_value": label} | tojson }}' hx-target="#pick-{{ field }}-chosen" hx-swap="outerHTML" hx-include="#pick-{{ field }}-chosen">{{ label }}</button>
+{% else %}
+{% if not typed %}<p class="muted">Nothing in the list starts with that. Try fewer letters.</p>{% endif %}
+{% endfor %}
+{% if typed %}
+<button class="option option-typed" type="button" hx-post="/setup/pick/{{ field }}/add" hx-vals='{{ {"pick_value": typed} | tojson }}' hx-target="#pick-{{ field }}-chosen" hx-swap="outerHTML" hx-include="#pick-{{ field }}-chosen">Use "{{ typed }}"</button>
+{% endif %}

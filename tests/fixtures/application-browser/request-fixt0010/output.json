@@ -1,0 +1,4 @@
+{
+ "request_id": "request-fixt0010",
+ "result_json": "{\"partial_review\": {\"questions\": [{\"label\": \"Name\", \"required\": true}, {\"label\": \"Email\", \"required\": true}, {\"label\": \"Resume\", \"required\": true}, {\"label\": \"Why Mooby, and why are you a fit for this role?\", \"required\": true, \"instructions\": \"Please share in 1-3 sentences.\"}, {\"label\": \"Have you worked at an early-stage startup before?\", \"required\": true, \"conditional_instructions\": [\"If yes, please describe the company size and stage.\", \"If no, write N/A.\"]}, {\"label\": \"Current Location\", \"required\": true, \"options\": null}, {\"label\": \"LinkedIn Profile\", \"required\": true}]}}"
+}

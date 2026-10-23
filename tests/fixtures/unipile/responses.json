@@ -1,0 +1,293 @@
+{
+ "_note": "Synthetic shapes modelled on the E0.T1 observations and the 2026-10-15 read-only smoke test (BACKLOG E0.T1.S1-S4a, E3.T2); no real id, name or text. Profiles carry `invitation` ({type SENT, status PENDING} or null); invite/sent `date` is LinkedIn's relative text.",
+ "GET /accounts": [
+  200,
+  {
+   "object": "AccountList",
+   "items": [
+    {
+     "object": "Account",
+     "type": "LINKEDIN",
+     "id": "acct-synthetic-1",
+     "name": "Synthetic Owner",
+     "created_at": "2026-10-14T18:00:00.000Z",
+     "sources": [
+      {
+       "id": "src-synthetic-1",
+       "status": "OK"
+      }
+     ],
+     "connection_params": {
+      "im": {
+       "id": "ACoAASyntheticOwner00000000000000000000",
+       "publicIdentifier": "synthetic-owner"
+      }
+     },
+     "groups": []
+    }
+   ],
+   "cursor": null
+  }
+ ],
+ "GET /users/alice": [
+  200,
+  {
+   "object": "UserProfile",
+   "provider_id": "ACoAASyntheticAlice00000000000000000000",
+   "public_identifier": "alice",
+   "first_name": "Alice",
+   "last_name": "Synthetic",
+   "network_distance": "SECOND_DEGREE",
+   "is_relationship": false,
+   "invitation": null
+  }
+ ],
+ "GET /users/bob": [
+  200,
+  {
+   "object": "UserProfile",
+   "provider_id": "ACoAASyntheticBob0000000000000000000000",
+   "public_identifier": "bob",
+   "first_name": "Bob",
+   "last_name": "Synthetic",
+   "network_distance": "FIRST_DEGREE",
+   "is_relationship": true,
+   "invitation": {
+    "type": "SENT",
+    "status": "PENDING"
+   }
+  }
+ ],
+ "GET /users/carol": [
+  200,
+  {
+   "object": "UserProfile",
+   "provider_id": "ACoAASyntheticCarol00000000000000000000",
+   "public_identifier": "carol",
+   "first_name": "Carol",
+   "last_name": "Synthetic",
+   "network_distance": "OUT_OF_NETWORK",
+   "is_relationship": false,
+   "invitation": null
+  }
+ ],
+ "GET /users/dan": [
+  200,
+  {
+   "object": "UserProfile",
+   "provider_id": "ACoAASyntheticDan0000000000000000000000",
+   "public_identifier": "dan",
+   "first_name": "Dan",
+   "last_name": "Synthetic",
+   "network_distance": "THIRD_DEGREE",
+   "is_relationship": false,
+   "invitation": null
+  }
+ ],
+ "GET /users/ACoAASyntheticAlice00000000000000000000": [
+  200,
+  {
+   "object": "UserProfile",
+   "provider_id": "ACoAASyntheticAlice00000000000000000000",
+   "public_identifier": "alice",
+   "first_name": "Alice",
+   "last_name": "Synthetic",
+   "network_distance": "SECOND_DEGREE",
+   "is_relationship": false,
+   "invitation": null
+  }
+ ],
+ "GET /users/nobody": [
+  404,
+  {
+   "status": 404,
+   "type": "errors/resource_not_found",
+   "title": "Resource not found",
+   "detail": "The requested resource was not found."
+  }
+ ],
+ "GET /users/invite/sent": [
+  200,
+  {
+   "object": "InvitationList",
+   "items": [
+    {
+     "object": "Invitation",
+     "id": "inv-synthetic-1",
+     "date": "Sent yesterday",
+     "parsed_datetime": "2026-10-15T10:00:00.000Z",
+     "invitation_text": "Hello Bob, synthetic note.",
+     "invited_user": "Bob Synthetic",
+     "invited_user_id": "ACoAASyntheticBob0000000000000000000000",
+     "invited_user_public_id": "bob",
+     "specifics": {
+      "type": "LINKEDIN_CLASSIC"
+     }
+    }
+   ],
+   "cursor": "inv-page-2"
+  }
+ ],
+ "GET /users/invite/sent?cursor=inv-page-2": [
+  200,
+  {
+   "object": "InvitationList",
+   "items": [
+    {
+     "object": "Invitation",
+     "id": "inv-synthetic-2",
+     "date": "Sent 3 days ago",
+     "parsed_datetime": "2026-10-13T08:30:00.000+02:00",
+     "invitation_text": null,
+     "invited_user": "Dan Synthetic",
+     "invited_user_id": "ACoAASyntheticDan0000000000000000000000",
+     "invited_user_public_id": null
+    }
+   ],
+   "cursor": null
+  }
+ ],
+ "GET /users/relations": [
+  200,
+  {
+   "object": "UserRelationsList",
+   "items": [
+    {
+     "object": "UserRelation",
+     "member_id": "ACoAASyntheticBob0000000000000000000000",
+     "public_identifier": "bob",
+     "public_profile_url": "https://www.linkedin.com/in/bob",
+     "first_name": "Bob",
+     "last_name": "Synthetic",
+     "headline": "Synthetic headline",
+     "created_at": "2026-10-16T12:00:00.000Z"
+    }
+   ],
+   "cursor": null
+  }
+ ],
+ "GET /chats": [
+  200,
+  {
+   "object": "ChatList",
+   "items": [
+    {
+     "object": "Chat",
+     "id": "chat-synthetic-2",
+     "account_id": "acct-synthetic-1",
+     "account_type": "LINKEDIN",
+     "attendee_provider_id": "ACoAASyntheticBob0000000000000000000000",
+     "timestamp": "2026-10-15T11:00:00.000Z",
+     "unread_count": 0,
+     "name": null
+    },
+    {
+     "object": "Chat",
+     "id": "chat-synthetic-1",
+     "account_id": "acct-synthetic-1",
+     "account_type": "LINKEDIN",
+     "attendee_provider_id": "ACoAASyntheticAlice00000000000000000000",
+     "timestamp": "2026-10-14T09:00:00.000Z",
+     "unread_count": 1,
+     "name": null
+    }
+   ],
+   "cursor": "chats-page-2"
+  }
+ ],
+ "GET /chats?cursor=chats-page-2": [
+  200,
+  {
+   "object": "ChatList",
+   "items": [
+    {
+     "object": "Chat",
+     "id": "chat-synthetic-0",
+     "account_id": "acct-synthetic-1",
+     "account_type": "LINKEDIN",
+     "attendee_provider_id": "ACoAASyntheticDan0000000000000000000000",
+     "timestamp": "2026-10-13T07:00:00.000Z",
+     "unread_count": 0,
+     "name": null
+    }
+   ],
+   "cursor": null
+  }
+ ],
+ "GET /chats/chat-synthetic-1/messages": [
+  200,
+  {
+   "object": "MessageList",
+   "items": [
+    {
+     "object": "Message",
+     "id": "msg-synthetic-3",
+     "chat_id": "chat-synthetic-1",
+     "is_sender": 0,
+     "timestamp": "2026-10-14T09:00:00.000Z",
+     "text": "Thanks, talk soon.",
+     "sender_id": "ACoAASyntheticAlice00000000000000000000"
+    },
+    {
+     "object": "Message",
+     "id": "msg-synthetic-2",
+     "chat_id": "chat-synthetic-1",
+     "is_sender": 1,
+     "timestamp": "2026-10-13T09:00:00.000Z",
+     "text": "Hi Alice, synthetic first message.",
+     "sender_id": "ACoAASyntheticOwner00000000000000000000"
+    }
+   ],
+   "cursor": "msgs-page-2"
+  }
+ ],
+ "GET /chats/chat-synthetic-1/messages?cursor=msgs-page-2": [
+  200,
+  {
+   "object": "MessageList",
+   "items": [
+    {
+     "object": "Message",
+     "id": "msg-synthetic-1",
+     "chat_id": "chat-synthetic-1",
+     "is_sender": 1,
+     "timestamp": "2026-10-12T09:00:00.000Z",
+     "text": "Synthetic invitation note.",
+     "sender_id": "ACoAASyntheticOwner00000000000000000000"
+    }
+   ],
+   "cursor": null
+  }
+ ],
+ "GET /chats/no-such-chat/messages": [
+  404,
+  {
+   "status": 404,
+   "type": "errors/resource_not_found",
+   "title": "Resource not found",
+   "detail": "The requested resource was not found."
+  }
+ ],
+ "POST /users/invite": [
+  201,
+  {
+   "object": "UserInvitationSent",
+   "invitation_id": "inv-synthetic-3"
+  }
+ ],
+ "POST /chats/chat-synthetic-1/messages": [
+  201,
+  {
+   "object": "MessageSent",
+   "message_id": "msg-synthetic-4"
+  }
+ ],
+ "POST /chats": [
+  201,
+  {
+   "object": "ChatStarted",
+   "chat_id": "chat-synthetic-1",
+   "message_id": "msg-synthetic-5"
+  }
+ ]
+}

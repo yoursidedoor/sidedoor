@@ -1,0 +1,94 @@
+{
+  "_comment": "Fictional seed for tests (owner_seed.py). Every person and campaign here is invented.",
+  "excluded_contact_names": [
+    "Taylor Quinn",
+    "Robert Vance",
+    "Rob",
+    "Rob Vance"
+  ],
+  "no_automatic_outreach": {
+    "names": [
+      "Jamie Rivera"
+    ],
+    "profiles": [
+      "https://www.linkedin.com/in/jrivera/"
+    ],
+    "campaign_ids": [
+      700001
+    ]
+  },
+  "prior_outreach_attempts": [
+    {
+      "identity": "linkedin.com/in/jrivera",
+      "campaign_id": 700001,
+      "state": "ALREADY_SENT",
+      "evidence": {
+        "source": "backups/delivery-evidence.json",
+        "no_retry": true
+      }
+    }
+  ],
+  "delivery_evidence_contacts": [
+    {
+      "recipient": "Jamie Rivera",
+      "company": "Globex",
+      "profile": "https://www.linkedin.com/in/jrivera/",
+      "campaign_id": 700001
+    }
+  ],
+  "baseline_priorities": {
+    "pattern": "Northwind and Contoso September 23, 2026; Fabrikam September 24 at 09:15 PDT; Globex September 24 at 13:45 PDT",
+    "entries": [
+      [
+        "Northwind",
+        "2026-09-23",
+        null
+      ],
+      [
+        "Contoso",
+        "2026-09-23",
+        null
+      ],
+      [
+        "Fabrikam",
+        "2026-09-24",
+        "2026-09-24T09:15:00-07:00"
+      ],
+      [
+        "Globex",
+        "2026-09-24",
+        "2026-09-24T13:45:00-07:00"
+      ]
+    ]
+  },
+  "designated_claims": [
+    {
+      "text": "Designed a sharded job scheduler with lease-based ownership that let route planning workers fail over between data centers",
+      "invitation_text": "I designed a sharded scheduler with failover",
+      "tags": [
+        "distributed systems",
+        "infrastructure",
+        "backend"
+      ],
+      "page": 2
+    },
+    {
+      "text": "Wrote a TypeScript and Postgres backend that matches volunteers to garden shifts, sends reminders, and keeps a history of every plot",
+      "invitation_text": "I wrote a TypeScript/Postgres backend",
+      "tags": [
+        "backend",
+        "platform"
+      ],
+      "page": 3
+    },
+    {
+      "text": "Moved the booking database from a single primary to a replicated cluster in stages, keeping carriers able to book throughout each cutover",
+      "invitation_text": "I moved a booking database to a replicated cluster",
+      "tags": [
+        "platform",
+        "infrastructure"
+      ],
+      "page": 4
+    }
+  ]
+}

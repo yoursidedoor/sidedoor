@@ -1,0 +1,10 @@
+{
+  "max_attempts": 3,
+  "max_reconcile_attempts": 3,
+  "retry_delays_seconds": [
+    900,
+    3600
+  ],
+  "preapproved_applications": true,
+  "referrals_block_applications": false
+}

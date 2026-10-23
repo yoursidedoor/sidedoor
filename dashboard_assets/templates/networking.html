@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="title">Networking &amp; Referrals</h1>
+{% set v = view %}
+{% set na = v.unavailable %}
+{% if v.unreadable %}<p class="note note-warning net-unreadable" role="status">Sidedoor couldn't read its records.</p>{% endif %}
+{% if flash and flash.text %}<p class="note note-{{ flash.tone }}" role="alert">{{ flash.text }}</p>{% endif %}
+
+<nav class="net-filters" aria-label="Filter contacts">
+  {% for key, label in v.filters %}
+  <a class="chip {{ 'chip-info net-filter-active' if key == v.show else 'chip-muted' }}" href="{{ v.link(show=key, page=None) }}"{% if key == v.show %} aria-current="true"{% endif %}>{{ label }}{% if v.list != na %} <span class="net-count">{{ v.list.counts[key] }}</span>{% endif %}</a>
+  {% endfor %}
+</nav>
+<form class="net-search" method="get" action="/sent" role="search">
+  {% if v.show != "all" %}<input type="hidden" name="show" value="{{ v.show }}">{% endif %}
+  <label for="net-q" class="muted">Search by name or company</label>
+  <div class="net-search-row">
+    <input id="net-q" name="q" type="search" value="{{ v.query or '' }}" maxlength="200">
+    <button class="button" type="submit">Search</button>
+  </div>
+</form>
+{% if v.query %}<p class="net-scope">Matching “{{ v.query }}”. <a href="{{ v.link(q=None, page=None) }}">Clear search</a></p>{% endif %}
+
+<section id="conversations" aria-label="Contacts">
+{% if v.list == na %}
+<div class="card"><p class="muted">Not available</p></div>
+{% elif not v.list.contacts %}
+<div class="card empty net-empty">
+  {% if v.list.counts.all == 0 %}
+  <p>No one contacted yet. Outreach starts after research finds contacts, usually within a day.</p>
+  {% else %}
+  <p>No contacts here right now.{% if v.show != "all" or v.query %} <a href="/sent">See everyone</a>{% endif %}</p>
+  {% endif %}
+</div>
+{% else %}
+<p class="muted net-total">{{ v.list.total }} contact{{ "s" if v.list.total != 1 }}{% if v.list.pages > 1 %}, page {{ v.list.page }} of {{ v.list.pages }}{% endif %}</p>
+<ul class="net-list">
+  {% for c in v.list.contacts %}
+  <li class="card net-row" id="{{ c.dom }}">
+    <details>
+      <summary>
+        <span class="net-head"><strong>{{ c.name }}</strong>{% if c.title or c.company %} <span class="net-role">{{ c.title or "" }}{% if c.title and c.company %} · {% endif %}{{ c.company or "" }}</span>{% endif %}</span>
+        <span class="chip chip-{{ c.tone }}">{{ c.status }}</span>
+        {% if c.referral %}<span class="chip chip-{{ c.referral.tone }}">{{ c.referral.words }}</span>{% endif %}
+        {% if c.notes or c.refused %}<span class="chip chip-error">Needs you</span>{% endif %}
+        {% if c.last %}<span class="muted net-times">Last activity {{ v.when(c.last) }}</span>{% endif %}
+      </summary>
+      <div class="net-body">
+        {% if c.linkedin %}<p><a href="{{ c.linkedin }}" rel="noopener noreferrer" target="_blank">Open their LinkedIn profile</a></p>{% endif %}
+        {% if c.why %}<div class="net-why"><strong>Why this person</strong><ul>{% for line in c.why %}<li>{{ line }}</li>{% endfor %}</ul></div>{% endif %}
+        <h3>Conversation</h3>
+        {% if c.conversation %}
+        <ol class="net-thread">
+          {% for m in c.conversation %}
+          <li class="net-message net-{{ m.who }}{% if m.pending %} net-pending{% endif %}">
+            <p class="net-message-head"><strong>{{ "You" if m.who == "you" else "Them" }}</strong> · {{ m.label }}{% if m.at %} <span class="muted">{{ v.when(m.at) }}</span>{% endif %}</p>
+            {% if m.text %}<p class="net-text">{{ m.text }}</p>{% elif m.label not in ("Accepted your invitation", "Asked not to be contacted", "Invitation (no note)") %}<p class="muted">Message text not on record.</p>{% endif %}
+            {% if m.state %}<p class="net-state{% if m.pending %} net-state-pending{% endif %}">{{ m.state }}</p>{% endif %}
+            {% if m.who == "you" and m.judge %}
+            <p class="muted net-judge">{% if m.judge.approved %}Approved by you{% else %}{% if m.state == "Sent" %}Sent automatically. {% endif %}Judge: {{ m.judge.verdict }}{% if m.judge.reason %}. {{ m.judge.reason }}{% endif %}{% endif %}</p>
+            {% elif m.who == "you" and m.state %}<p class="muted net-judge">Judge's verdict not on record.</p>{% endif %}
+          </li>
+          {% endfor %}
+        </ol>
+        {% else %}<p class="muted">No messages on record yet.</p>{% endif %}
+        {% for r in c.refused %}
+        <div class="net-refused">
+          <p><strong>Couldn't send:</strong> {{ r.kind }}. {{ r.reasons|join(" ") }} <a href="/approvals#refused">See it on Approvals</a></p>
+          {% if r.text %}<p class="net-text">{{ r.text }}</p>{% endif %}
+        </div>
+        {% endfor %}
+        {% if c.referral %}
+        <h3>Referral</h3>
+        <p><span class="chip chip-{{ c.referral.tone }}">{{ c.referral.words }}</span>{% if c.referral.at %} <span class="muted">{{ v.when(c.referral.at) }}</span>{% endif %}</p>
+        {% if c.referral.statement %}<p class="net-text">{{ c.referral.statement }}</p>{% endif %}
+        {% if c.referral.next %}<p><strong>Next step:</strong> {{ c.referral.next }}</p>{% endif %}
+        {% if c.referral.review %}<p class="muted">Check again {{ v.when(c.referral.review) }}</p>{% endif %}
+        {% endif %}
+      </div>
+    </details>
+    {% for n in c.notes %}{% with f = {}, back = v.link(page=v.list.page), anchor = c.dom %}{% include "networking_note.html" %}{% endwith %}{% endfor %}
+  </li>
+  {% endfor %}
+</ul>
+{% if v.list.pages > 1 %}
+<nav class="net-pages" aria-label="Pages">
+  {% if v.list.page > 1 %}<a class="button" href="{{ v.link(page=v.list.page - 1) }}">Newer</a>{% endif %}
+  <span class="muted">Page {{ v.list.page }} of {{ v.list.pages }}</span>
+  {% if v.list.page < v.list.pages %}<a class="button" href="{{ v.link(page=v.list.page + 1) }}">Older</a>{% endif %}
+</nav>
+{% endif %}
+{% endif %}
+</section>
+{% endblock %}

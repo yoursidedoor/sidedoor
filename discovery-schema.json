@@ -1,0 +1,122 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "inability",
+    "discovery_status",
+    "summary",
+    "companies",
+    "blockers"
+  ],
+  "properties": {
+    "inability": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "error_class",
+            "diagnostic",
+            "attempted_methods",
+            "required_input",
+            "progress"
+          ],
+          "properties": {
+            "error_class": {
+              "type": "string"
+            },
+            "diagnostic": {
+              "type": "string"
+            },
+            "attempted_methods": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "required_input": {
+              "type": "string"
+            },
+            "progress": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "discovery_status": {
+      "type": "string",
+      "enum": [
+        "COMPLETE",
+        "PARTIAL",
+        "FAILED"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000,
+      "pattern": "\\S"
+    },
+    "companies": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "company",
+          "industry",
+          "source",
+          "observed_at",
+          "excerpt",
+          "excerpt_names_company"
+        ],
+        "properties": {
+          "company": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "\\S"
+          },
+          "industry": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "\\S"
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 2048,
+            "pattern": "^https://[^\\s]+$"
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "excerpt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          },
+          "excerpt_names_company": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000,
+        "pattern": "\\S"
+      }
+    }
+  }
+}

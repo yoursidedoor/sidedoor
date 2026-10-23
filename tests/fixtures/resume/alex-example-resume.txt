@@ -1,0 +1,85 @@
+                                ALEX EXAMPLE
+    Staff Platform Engineer | Data Pipelines & Developer Tooling
+        Springfield, Illinois, USA | alex.example@example.com | +1-555-010-0100
+         LinkedIn: https://www.linkedin.com/in/alex-example/
+
+
+
+
+PROFESSIONAL SUMMARY
+Platform engineer with 9+ years of experience in freight and warehouse software at
+Tailspin Freight and Fabrikam Logistics. Enjoys turning slow, fragile batch jobs into
+observable streaming services, and writing the runbooks that let a small team sleep
+through the night.
+
+CORE SKILLS
+Languages: Go, Java, TypeScript, SQL
+Infrastructure: Kubernetes, Terraform, Helm, Linux
+Data: Postgres, ClickHouse, RabbitMQ
+Practices: Incident Review • Contract Testing • Technical Writing
+
+Fabrikam Logistics Platform
+
+Staff Platform Engineer | March 2021 – August 2025
+
+Warehouse Data Platform
+
+   •   Rebuilt the nightly inventory reconciliation job as a streaming service in Go,
+       so a pallet scanned on the dock showed up on store dashboards within seconds.
+   •   Introduced a schema registry and contract tests for forty producer teams, so a
+       breaking field change failed in code review instead of at three in the morning.
+  •   Designed a sharded job scheduler with lease-based ownership that let route planning
+      workers fail over between data centers without dropping queued work.
+  •   Wrote the on-call handbook and a weekly failure review that halved repeat pages
+      over two quarters.
+
+Developer Tooling
+
+  •   Built an internal command-line tool that creates a new service with logging,
+      metrics and deployment manifests already wired in.
+  •   Moved build caching to a shared remote store, bringing typical pull request
+      checks from twenty minutes to under six.
+LANTERNWORKS
+Founding Engineer and Technical Advisor | May 2023 – Present
+
+Product Engineering
+   •   Started a volunteer scheduling app for community gardens with two friends.
+   •   Wrote a TypeScript and Postgres backend that matches volunteers to garden shifts,
+       sends reminders, and keeps a history of every plot
+
+Operations
+
+   •   Set up error tracking, nightly backups and a simple status page on a single
+       low-cost virtual machine.
+   •   Interviewed garden coordinators every month and turned their requests into a
+       short public roadmap.
+TAILSPIN
+Backend Engineer II | September 2016 – February 2021
+
+Freight Booking Services
+   •   Maintained the Java booking service that priced and confirmed truckload orders
+       for regional carriers.
+   •   Wrote Kubernetes operators that restarted stuck pricing workers and posted each
+       restart to the team channel.
+
+Database Migration
+   •   Moved the booking database from a single primary to a replicated cluster in
+       stages, keeping carriers able to book throughout each cutover
+Testing & Release
+   •   Added contract tests and staged rollouts to the release process for the booking
+       and invoicing services
+
+
+
+
+EDUCATION
+Bachelor of Science in Information Systems
+Example State University
+
+
+
+
+CERTIFICATIONS
+HashiCorp Certified: Terraform Associate
+Linux Foundation Certified System Administrator
+

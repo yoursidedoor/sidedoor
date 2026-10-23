@@ -1,0 +1,7 @@
+{# [Check again] (E8.T2): one heartbeat; htmx shows the result in place, the button is disabled while it runs. #}
+<form method="post" action="/license/check" hx-post="/license/check" hx-target="find .license-check-result" hx-swap="innerHTML" hx-disabled-elt="find button" class="license-check">
+  <input type="hidden" name="next" value="{{ check_next or '/' }}">
+  <button class="button" type="submit">{{ check_label or 'Check again' }}</button>
+  <span class="htmx-indicator muted">Checking…</span>
+  <span class="license-check-result"></span>
+</form>

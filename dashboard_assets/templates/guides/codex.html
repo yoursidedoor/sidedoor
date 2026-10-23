@@ -1,0 +1,17 @@
+<h3>Codex and a ChatGPT plan</h3>
+<ol>
+  <li>You need a ChatGPT account on a paid plan: Plus, Pro, Business, Edu or Enterprise. (Free and Go include Codex only in the desktop app, not the Terminal version Sidedoor uses.) Buy or upgrade at <a href="https://chatgpt.com/pricing" target="_blank" rel="noopener noreferrer">chatgpt.com/pricing</a>.</li>
+  <li>Install Codex. On a Mac or Linux, open Terminal and paste:
+    <pre class="copy">curl -fsSL https://chatgpt.com/codex/install.sh | sh</pre>
+    On Windows, open PowerShell and paste:
+    <pre class="copy">powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"</pre>
+    Press Return (Enter on Windows). The same command updates Codex later.</li>
+  <li>At the end the installer asks "Start Codex now?". Type <code>y</code> and press Return (pressing Return alone means No). That starts Codex and its sign-in. Choose <strong>Sign in with ChatGPT</strong>; a browser window opens; sign in with your ChatGPT account. If you answered No, or whenever you later type a <code>codex</code> command, open a <strong>new</strong> Terminal (or PowerShell) window first: on a Mac or Linux the installer puts Codex in <code>~/.local/bin</code> and only adds it for new windows, so in the same window <code>codex</code> gives "command not found". In the new window type <code>codex</code> and press Return.</li>
+  <li>Choose Sign in with ChatGPT. Sidedoor needs this sign-in, and it means you never handle an API key. If Codex is already signed in with an API key, switch it (in a new Terminal window):
+    <ol type="a">
+      <li>Type <code>codex logout</code> and press Return.</li>
+      <li>Type <code>codex login</code> and press Return. A browser window opens; sign in with your ChatGPT account.</li>
+    </ol></li>
+  <li>Back in Sidedoor, click Check in step 6.</li>
+</ol>
+<p class="muted">What is Terminal? On a Mac: Applications &gt; Utilities &gt; Terminal. What is PowerShell? On Windows: open the Start menu, type PowerShell and press Enter.</p>

@@ -1,0 +1,24 @@
+{# One answer kept from Approvals (setup_steps.owner_answers): `key`, `answer` (None once removed), `notice`. #}
+<div class="kept-answer" id="kept-{{ key|replace(':', '-') }}"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if notice %}<p class="note note-info" role="status">{{ notice }}</p>{% endif %}
+  {% if answer %}
+  <p class="muted">{{ answer.source.split(": ", 1)[1] if ": " in answer.source else "An answer you gave" }}</p>
+  {% if status is defined and status.get(key) %}<p class="note note-info">Not used: {{ status[key] }}</p>{% endif %}
+  {% if over is defined and key in over %}{% set setup = over[key] %}
+  <p class="note note-warning">Used instead of your answer in Profile and search ({{ "Yes" if setup is sameas true else "No" if setup is sameas false else setup }}).</p>
+  {% endif %}
+  <form method="post" action="/settings/answers/change" hx-post="/settings/answers/change" hx-target="closest .kept-answer" hx-swap="outerHTML">
+    <input type="hidden" name="key" value="{{ key }}">
+    {% if answer.value is sameas true or answer.value is sameas false %}
+    <select name="value" aria-label="Answer"><option{% if answer.value %} selected{% endif %}>Yes</option><option{% if not answer.value %} selected{% endif %}>No</option></select>
+    {% else %}
+    <input name="value" value="{{ answer.value }}" maxlength="4000" aria-label="Answer">
+    {% endif %}
+    <button class="button" type="submit">Save</button>
+  </form>
+  <form method="post" action="/settings/answers/remove" hx-post="/settings/answers/remove" hx-target="closest .kept-answer" hx-swap="outerHTML">
+    <input type="hidden" name="key" value="{{ key }}">
+    <button class="button button-quiet" type="submit">Remove</button>
+  </form>
+  {% endif %}
+</div>

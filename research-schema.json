@@ -1,0 +1,418 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "inability",
+    "research_status",
+    "summary",
+    "blockers",
+    "action_blockers",
+    "scope_violation",
+    "company_findings",
+    "opportunities",
+    "drafts"
+  ],
+  "properties": {
+    "inability": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "error_class",
+            "diagnostic",
+            "attempted_methods",
+            "required_input",
+            "progress"
+          ],
+          "properties": {
+            "error_class": {
+              "type": "string"
+            },
+            "diagnostic": {
+              "type": "string"
+            },
+            "attempted_methods": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "required_input": {
+              "type": "string"
+            },
+            "progress": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "research_status": {
+      "type": "string",
+      "enum": [
+        "COMPLETE",
+        "PARTIAL",
+        "FAILED"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "action_blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "scope_violation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unknown",
+        "companies"
+      ],
+      "properties": {
+        "unknown": {
+          "type": "boolean"
+        },
+        "companies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "company_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "company",
+          "status",
+          "source",
+          "observed_at",
+          "excerpt",
+          "verified",
+          "kind"
+        ],
+        "properties": {
+          "company": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "NO_OPEN_ROLES",
+              "NO_ELIGIBLE_ROLES",
+              "UNRESOLVED"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "excerpt": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "official",
+              "employer_mirror",
+              "public",
+              "unknown"
+            ]
+          }
+        }
+      }
+    },
+    "opportunities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "company",
+          "role",
+          "url",
+          "rationale",
+          "requisition_id",
+          "evidence",
+          "people",
+          "role_fit",
+          "policy_fit",
+          "in_user_home_area"
+        ],
+        "properties": {
+          "company": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "requisition_id": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/evidence"
+            }
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "recipient",
+                "profile",
+                "evidence",
+                "employer_matches_target"
+              ],
+              "properties": {
+                "recipient": {
+                  "type": "string"
+                },
+                "profile": {
+                  "type": "string"
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/evidence"
+                  }
+                },
+                "employer_matches_target": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "role_fit": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "fit",
+              "reason"
+            ],
+            "properties": {
+              "fit": {
+                "type": "string",
+                "enum": [
+                  "STRONG",
+                  "PARTIAL",
+                  "NONE"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "in_user_home_area": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "policy_fit": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "funding_stage",
+              "location"
+            ],
+            "properties": {
+              "funding_stage": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "in_scope",
+                  "reason"
+                ],
+                "properties": {
+                  "in_scope": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              },
+              "location": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "in_scope",
+                  "reason"
+                ],
+                "properties": {
+                  "in_scope": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "drafts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recipient",
+          "company",
+          "profile",
+          "message",
+          "source_url"
+        ],
+        "properties": {
+          "recipient": {
+            "type": "string"
+          },
+          "company": {
+            "type": "string"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "value",
+        "source",
+        "observed_at",
+        "effective_at",
+        "excerpt",
+        "verified",
+        "kind"
+      ],
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "minimum",
+                "maximum",
+                "currency",
+                "period"
+              ],
+              "properties": {
+                "minimum": {
+                  "type": "number"
+                },
+                "maximum": {
+                  "type": "number"
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "period": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "effective_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "excerpt": {
+          "type": "string"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "official",
+            "employer_mirror",
+            "public",
+            "candidate_specific",
+            "historical",
+            "unknown"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
+  <title>{{ title }} · Your Sidedoor</title>
+  <link rel="icon" type="image/png" href="/brand/yoursidedoor-icon-512.png">
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="header">
+    <a class="logo" href="/"><img src="/brand/yoursidedoor-logo.png" alt="Your Sidedoor" width="167" height="40"></a>
+    <nav class="tabs" aria-label="Pages">
+      {% for key, label, path in tabs %}
+      <a class="tab{% if key == active %} active{% endif %}" href="{{ path }}"{% if key == active %} aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    {% include "chips.html" %}
+  </header>
+  {% include "banners.html" %}
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -1,0 +1,115 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "output_version",
+    "source_sha256",
+    "decision",
+    "reason",
+    "invitation",
+    "first_message",
+    "proof_point",
+    "question",
+    "facts"
+  ],
+  "properties": {
+    "output_version": {
+      "type": "string"
+    },
+    "source_sha256": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "COMPOSED",
+        "INSUFFICIENT_FACTS"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "invitation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "first_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "proof_point": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "question": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "note_span",
+          "source_kind",
+          "source_ref",
+          "source_excerpt"
+        ],
+        "properties": {
+          "note_span": {
+            "type": "string"
+          },
+          "source_kind": {
+            "type": "string",
+            "enum": [
+              "resume",
+              "claim",
+              "role_fact",
+              "recipient_fact",
+              "candidate_fact",
+              "posting"
+            ]
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_excerpt": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="title">Checks</h1>
+<p class="muted">Every part Sidedoor needs, checked on this computer. No key or token is shown. To ask for help, copy the report into an email to support@yoursidedoor.com.</p>
+<ul class="fail-list doctor-list">
+  {% for c in checks %}
+  <li class="card doctor-item doctor-{{ c.status | lower }}">
+    <p><strong>{{ c.status }}</strong> · {{ c.name }}: {{ c.line }}{% if c.todo %} <span class="fail-todo">{{ c.todo }}</span>{% endif %}</p>
+  </li>
+  {% endfor %}
+</ul>
+<h2>Report</h2>
+<pre class="log-lines" id="doctor-report">{{ report }}</pre>
+<p>
+  <button class="button" type="button" id="doctor-copy" data-target="doctor-report">Copy report</button>
+  <span class="muted" id="doctor-copied" role="status"></span>
+  <a class="button button-quiet" href="/failures/doctor">Run again</a>
+  <a class="button button-quiet" href="/failures#checks">Back to Failures</a>
+</p>
+<script src="/static/doctor.js" defer></script>
+{% endblock %}

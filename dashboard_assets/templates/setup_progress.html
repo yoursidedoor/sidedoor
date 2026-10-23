@@ -1,0 +1,5 @@
+<div class="progress" id="setup-progress"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% set done = progress.done | dictsort | selectattr(1) | list | length %}
+  <progress max="11" value="{{ done }}">{{ done }} of 11</progress>
+  <span class="muted">{% if progress.left %}{{ progress.left }} of 9 required steps left{% else %}All required steps are done{% endif %}</span>
+</div>

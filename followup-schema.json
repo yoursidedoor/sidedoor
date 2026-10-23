@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["output_version", "source_sha256", "decision", "message", "reason", "next_action"],
+  "properties": {
+    "output_version": {"type": "string", "const": "followup-composition-v1"},
+    "source_sha256": {"type": "string"},
+    "decision": {"type": "string", "enum": ["COMPOSE", "HOLD"]},
+    "message": {"type": ["string", "null"], "maxLength": 2000},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 700},
+    "next_action": {"type": "string", "minLength": 1, "maxLength": 700}
+  }
+}

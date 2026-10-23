@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% macro start_button(at, path="/start", label="Start") %}
+  <form method="post" action="{{ path }}" hx-post="{{ path }}" hx-target="body" class="start-form">
+    <input type="hidden" name="at" value="{{ at }}">
+    <button class="button{% if at == 'card' %} button-highlight{% endif %}" type="submit">{{ label }}</button>
+  </form>
+  {% if message and message_at == at %}<p class="note note-info start-result" role="status">{{ message }}</p>{% endif %}
+{% endmacro %}
+{% macro run_rows(v, job) %}
+  {# Last run / Next run, as the Research card shows them (overview_page.job_runs). #}
+  {% if v.runs == v.unavailable %}
+  <dt>Last run</dt><dd><span class="muted">Not available</span></dd>
+  {% else %}{% set r = v.runs[job] %}
+  <dt>Last run</dt>
+  <dd>{% if r.last and v.when(r.last.at) %}{{ v.when(r.last.at) }} <span class="muted">({{ r.last.words }})</span>{% else %}Not run yet{% endif %}</dd>
+  <dt>Next run</dt>
+  <dd>{% if r.next.at %}{{ v.when(r.next.at) }}{% else %}{{ r.next.label }}{% endif %}</dd>
+  {% endif %}
+{% endmacro %}
+{% block content %}
+<h1 class="title gradient-text">Overview</h1>
+{% if paywall %}
+{# E8.T3: the paywall (E6.T0 section 11, Expired). [Renew] opens the checkout like [Buy a license],
+   with guide 4.5 beside it; banner 1 above shows "Bought a new key? Paste it here" (always while
+   Expired, PW3), leading to [Change key]. [Pause] stays available (section 5, PW1). #}
+<div class="setup-layout">
+  <section class="card paywall" aria-labelledby="paywall-title">
+    <h2 id="paywall-title">Sidedoor is paused</h2>
+    <p>{{ paywall.text }}</p>
+    <p class="muted">Sent, Applications and logs stay readable. Renewing is a new checkout that issues a new key.</p>
+    <p><a class="button button-highlight" id="paywall-renew" href="{{ paywall.action.href }}" target="_blank" rel="noopener noreferrer">{{ paywall.action.label }}</a></p>
+    <span hx-get="/setup/guide/license" hx-trigger="click from:#paywall-renew" hx-target="#guide-panel"></span>
+    {% if paywall_pause and paywall_pause.user_paused_since %}
+    <p class="muted paywall-paused">Paused by you since {{ paywall_pause.user_paused_since }}.</p>
+    {% else %}
+    {{ start_button("card", "/pause", "Pause") }}
+    {% endif %}
+    <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
+  </section>
+  <aside class="guide-panel card" id="guide-panel" aria-live="polite"><p class="muted">The "Show me how" guide opens here.</p></aside>
+</div>
+{% elif not finished %}
+<div class="card empty">
+  <p>Finish setup first. Overview shows what Sidedoor did once it is running.</p>
+  <a class="button" href="/setup">Continue setup</a>
+</div>
+{% else %}
+{% if not running %}
+<div class="card not-running">
+  <h2>Sidedoor is not running</h2>
+  <p class="muted">Research, outreach and applications run only while Sidedoor is running.</p>
+  {{ start_button("card") }}
+</div>
+{% elif message and message_at == "card" %}
+<p class="note note-success start-result" role="status">{{ message }}</p>
+{% endif %}
+{% set v = view %}
+{% set na = v.unavailable %}
+{% if v.unreadable %}<p class="note note-warning overview-unreadable" role="status">Sidedoor couldn't read its records.</p>{% endif %}
+<div class="overview-grid">
+  <section class="card overview-today" aria-labelledby="today-title">
+    <h2 id="today-title">Today <span class="muted overview-since">since {{ v.day_start }}</span></h2>
+    <div class="overview-columns">
+      <div>
+        <h3>Research</h3>
+        {% if v.research == na %}<p class="muted">Not available</p>{% else %}
+        <dl class="overview-stats">
+          <dt>Last run</dt>
+          <dd>{% if v.research.last %}{{ v.when(v.research.last.at) }} <span class="muted">({{ v.research.last.words }})</span>{% else %}Not run yet{% endif %}</dd>
+          <dt>Next run</dt>
+          <dd>{% if v.research.next.at %}{{ v.when(v.research.next.at) }}{% else %}{{ v.research.next.label }}{% endif %}</dd>
+          {% for label, count in (("Companies found", v.research.companies), ("Roles found", v.research.roles), ("Contacts found", v.research.contacts)) %}
+          <dt>{{ label }}</dt>
+          <dd{% if count is not none %} class="overview-number"{% endif %}>{% if count is none %}<span class="muted">Not run yet</span>{% else %}{{ count }}{% endif %}</dd>
+          {% endfor %}
+        </dl>
+        {% endif %}
+      </div>
+      <div>
+        <h3>Outreach</h3>
+        {% if v.outreach == na %}<dl class="overview-stats">{{ run_rows(v, "outreach") }}</dl><p class="muted">Not available</p>{% else %}
+        {# Replies received: the people Networking & Referrals lists who wrote today (its Replied today filter). #}
+        <dl class="overview-stats">
+          {{ run_rows(v, "outreach") }}
+          <dt>Invitations sent</dt>
+          <dd><a class="overview-number" href="/sent">{{ v.outreach.invitations }}</a> <span class="muted">of {{ v.outreach.cap }} a day</span>
+            {% if v.outreach.waiting %}<br><a href="/sent?show=sending#conversations">{{ v.outreach.waiting }} waiting for confirmation</a>{% endif %}</dd>
+          <dt>Messages sent</dt>
+          <dd><a class="overview-number" href="/sent">{{ v.outreach.messages }}</a></dd>
+          <dt>Replies received</dt>
+          <dd><a class="overview-number" href="/sent?show=replied_today#conversations">{{ v.outreach.replies }}</a></dd>
+        </dl>
+        {% endif %}
+      </div>
+      <div>
+        <h3>Applications</h3>
+        <dl class="overview-stats">
+          {{ run_rows(v, "applications") }}
+          <dt>Submitted</dt>
+          <dd>{% if v.submitted == na %}<span class="muted">Not available</span>{% else %}<a class="overview-number" href="/applications?show=submitted_today">{{ v.submitted }}</a>{% endif %}</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <section class="card overview-now" aria-labelledby="now-title">
+    <h2 id="now-title">Right now <span class="muted overview-since">applications</span></h2>
+    {% if v.right_now == na %}<p class="muted">Not available</p>{% else %}
+    <dl class="overview-stats">
+      <dt>Waiting for confirmation</dt>
+      <dd><a class="overview-number" href="/applications?show=confirming">{{ v.right_now.confirming }}</a></dd>
+      <dt>Blocked, needs you</dt>
+      <dd><a class="overview-number" href="/applications?show=needs_you">{{ v.right_now.blocked }}</a></dd>
+      <dt>Waiting to retry</dt>
+      <dd><a class="overview-number" href="/applications?show=retrying">{{ v.right_now.retrying }}</a></dd>
+    </dl>
+    {% endif %}
+  </section>
+
+  <section class="card overview-needs" aria-labelledby="needs-title">
+    <h2 id="needs-title">Needs you</h2>
+    {% if v.needs == na %}
+    <p class="muted">Not available</p>
+    {% elif v.needs.questions or v.needs.failures or v.needs.messages or v.needs.notes %}
+    <ul class="overview-list">
+      {% if v.needs.messages %}<li><a href="/approvals#messages"><strong>{{ v.needs.messages }}</strong> message{{ "s" if v.needs.messages != 1 }} waiting for you</a></li>{% endif %}
+      {% if v.needs.questions %}<li><a href="/approvals#questions"><strong>{{ v.needs.questions }}</strong> question{{ "s" if v.needs.questions != 1 }} for you</a></li>{% endif %}
+      {% if v.needs.notes %}<li><a href="/approvals#notes"><strong>{{ v.needs.notes }}</strong> note{{ "s" if v.needs.notes != 1 }} for you</a></li>{% endif %}
+      {% if v.needs.failures %}<li><a href="/failures#needs-you"><strong>{{ v.needs.failures }}</strong> application{{ "s" if v.needs.failures != 1 }} waiting on you</a></li>{% endif %}
+    </ul>
+    {% else %}
+    <p class="muted">Nothing needs you right now.</p>
+    {% endif %}
+  </section>
+
+  <section class="card overview-compute" aria-labelledby="compute-title">
+    <h2 id="compute-title">Compute budget</h2>
+    {% if v.compute.used == na %}<p class="muted">Not available</p>{% else %}
+    <p><strong>{{ v.duration(v.compute.used) }}</strong> <span class="muted">of {{ v.duration(v.compute.allowed) }} used today{% if v.compute.in_flight and v.compute.in_flight != na %}, includes {{ v.duration(v.compute.in_flight) }} booked by work still running{% endif %}</span></p>
+    <progress max="{{ v.compute.allowed }}" value="{{ [v.compute.used, v.compute.allowed] | min }}" aria-label="Compute used today"></progress>
+    {% endif %}
+    <p class="muted">Resets {{ v.when(v.compute.resets) }}.</p>
+  </section>
+
+  <section class="card overview-health" aria-labelledby="health-title">
+    <h2 id="health-title">Health</h2>
+    <ul class="overview-list">
+      {% for item in v.health %}
+      <li class="health-item health-{{ item.tone }}">
+        <span class="health-dot" aria-hidden="true"></span>
+        <span class="health-body">
+          <strong>{{ item.name }}</strong>
+          <span class="health-text">{{ item.text }}</span>
+          {% for note in item.notes or [] %}<span class="health-note">{% if note.href %}<a href="{{ note.href }}">{{ note.text }}</a>{% else %}{{ note.text }}{% endif %}{% if note.detail %} <details class="health-detail"><summary>Details</summary><code>{{ note.detail }}</code></details>{% endif %}</span>{% endfor %}
+          {% if item.timed %}<span class="muted health-time">{% if item.at %}Last good check {{ v.when(item.at) }}{% elif item.checked %}Checked {{ v.when(item.checked) }}{% else %}Not checked yet{% endif %}</span>{% endif %}
+        </span>
+        {% if item.fix %}
+          {% if item.fix.post == "/license/check" %}
+          <div class="health-fix">{% with check_next="/", check_label=item.fix.label %}{% include "license_check.html" %}{% endwith %}</div>
+          {% elif item.fix.post %}
+          <div class="health-fix">{{ start_button("health", item.fix.post, item.fix.label) }}</div>
+          {% else %}
+          <a class="button health-fix" href="{{ item.fix.href }}"{% if item.fix.href.startswith("http") %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ item.fix.label }}</a>
+          {% endif %}
+          {% if item.also %}<div class="health-fix">{{ start_button("health", item.also.post, item.also.label) }}</div>{% endif %}
+        {% elif message and message_at == "health" and item.name == "Scheduler" %}
+          <p class="note note-success start-result" role="status">{{ message }}</p>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>
+{% endif %}
+{% endblock %}

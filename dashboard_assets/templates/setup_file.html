@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="title">Setup file</h1>
+<div class="card">
+  {% if result and result.reset %}
+  <p class="note note-success" role="status">Done. Sidedoor wrote a fresh setup file and kept the old one as
+  {{ result.kept_as }}.</p>
+  {% if result.found %}<p>Found again from your other files: {{ result.found | join(", ") }}.</p>{% endif %}
+  {% if result.email_kept %}<p>Your email stays locked to {{ result.email_kept }}, the email in your profile: your
+  Setup was finished, so the email check had passed. Sidedoor did not run the check again.</p>{% endif %}
+  {% if result.recheck %}<p>Check these again in Settings: {{ result.recheck | join(", ") }}.</p>{% endif %}
+  <p>Your mode is now {{ mode.label }}. You can change it in <a href="/settings#mode">Settings</a>.</p>
+  {% elif broken %}
+  <p class="note note-error" role="alert">{{ message }}</p>
+  {% include "setup_file_reset.html" %}
+  {% else %}
+  <p>Your setup file reads fine. Nothing to reset.</p>
+  {% endif %}
+  <p><a href="/settings">Back to Settings</a></p>
+</div>
+{% endblock %}

@@ -1,0 +1,361 @@
+{
+  "source": "Example profile for the fictional candidate Alex Example (see tests/fixtures/resume). Replace every value with your own facts and preferences; the setup wizard writes this file.",
+  "minimum_base_salary_usd": 180000,
+  "desired_base_salary_usd": [
+    180000,
+    250000
+  ],
+  "salary_relaxation": {
+    "note": "How strictly salary is applied. An unpublished, unknown, unreadable, non-annual-base or unconvertible figure never refuses a role and is recorded instead; the only refusal needs a dated, sourced, verified annual base band, in USD or converted by dated FX evidence the read supplied. Read by applications.salary_relaxation.",
+    "tolerance_below_minimum": 0.25,
+    "tolerance_below_minimum_note": "How far below minimum_base_salary_usd a knowable figure may sit and still be applied to, as a fraction. The effective floor is minimum_base_salary_usd * (1 - tolerance_below_minimum), compared against the top of the posting's stated band. 0.0 restores a hard floor. A negative value, a value of 1.0 or more, and a non-numeric value fall back to 0.25.",
+    "currency_note": "This setting changes only the floor. A EUR, GBP or otherwise unconvertible amount is never gated on at any tolerance.",
+    "source": "Example user's preference: salary informs rather than terminates, with a 25% tolerance."
+  },
+  "funding_stages": [
+    "Seed",
+    "Series A",
+    "Series B",
+    "Series C",
+    "Series D",
+    "Series E"
+  ],
+  "industries": [
+    "FinTech and Finance",
+    "Energy",
+    "Defense",
+    "AI",
+    "Cybersecurity",
+    "Healthcare",
+    "BioTech",
+    "Telecom and Communications"
+  ],
+  "levels": [
+    "Senior Software Engineer",
+    "Staff Software Engineer",
+    "SDE III"
+  ],
+  "minimum_years_experience": 4,
+  "location_priority": [
+    "Springfield, IL hybrid/onsite",
+    "US remote",
+    "US onsite/hybrid anywhere except Washington state and San Francisco",
+    "Europe remote: no EU work authorization held; employer sponsorship required and welcome; continue targeting",
+    "Europe onsite/hybrid: willing to relocate; no EU/UK work authorization held; employer sponsorship required"
+  ],
+  "onsite_location_exclusions": {
+    "note": "Example user's preference: onsite/hybrid excluded in the whole of Washington state and in San Francisco. Applies to onsite and hybrid roles only; US remote is unaffected anywhere. Read by applications.excluded_onsite_location. San Francisco is recorded at city level, so Oakland, San Jose, Palo Alto and Mountain View remain acceptable.",
+    "work_modes": [
+      "onsite",
+      "hybrid"
+    ],
+    "states": [
+      "WA"
+    ],
+    "state_names": [
+      "Washington",
+      "Washington State",
+      "State of Washington"
+    ],
+    "cities": [
+      "San Francisco"
+    ],
+    "state_cities": [
+      "Seattle",
+      "Bellevue",
+      "Redmond",
+      "Kirkland",
+      "Tacoma",
+      "Everett",
+      "Spokane",
+      "Olympia",
+      "Renton",
+      "Kent",
+      "Auburn",
+      "Federal Way",
+      "Sammamish",
+      "Issaquah",
+      "Bothell",
+      "Shoreline",
+      "Puyallup",
+      "Bremerton",
+      "Bellingham",
+      "Yakima",
+      "Kennewick",
+      "Richland",
+      "Pasco",
+      "Marysville",
+      "Lakewood",
+      "Edmonds",
+      "Lynnwood",
+      "Wenatchee",
+      "Pullman",
+      "Longview",
+      "Mount Vernon",
+      "Walla Walla",
+      "Redmond Ridge",
+      "Woodinville",
+      "Mercer Island",
+      "Tukwila",
+      "SeaTac",
+      "Bainbridge Island",
+      "Snoqualmie",
+      "Duvall",
+      "Monroe",
+      "Mukilteo"
+    ],
+    "state_cities_note": "Used only when a role records no state. The dedicated facts.state field is exact and is preferred; this list is the best available approximation without it. Vancouver is deliberately absent because Vancouver, British Columbia is not in Washington state and the bare city name cannot be told apart from Vancouver, Washington without a state. A Washington city outside this list whose role records no state is the residual gap.",
+    "state_names_note": "Matched only against a dedicated state or region field, never against a city string: \"Washington\" is also the name of a city (Washington, DC must never be excluded). The abbreviation WA is unambiguous and is matched anywhere."
+  },
+  "countries": [
+    "US",
+    "AT",
+    "BE",
+    "BG",
+    "CH",
+    "CY",
+    "CZ",
+    "DE",
+    "DK",
+    "EE",
+    "ES",
+    "FI",
+    "FR",
+    "GB",
+    "GR",
+    "HR",
+    "HU",
+    "IE",
+    "IS",
+    "IT",
+    "LI",
+    "LT",
+    "LU",
+    "LV",
+    "MT",
+    "NL",
+    "NO",
+    "PL",
+    "PT",
+    "RO",
+    "SE",
+    "SI",
+    "SK"
+  ],
+  "target_specializations": [
+    "backend",
+    "distributed systems",
+    "infrastructure",
+    "platform",
+    "data engineering"
+  ],
+  "resume": {
+    "path": "tests/fixtures/resume/alex-example-resume.pdf",
+    "sha256": "a5e98aa094e1d7f307b17691a02b7c57403543ab472573549b9165a4d6c72b39"
+  },
+  "resume_raw": {
+    "path": "tests/fixtures/resume/alex-example-resume.pdf",
+    "sha256": "a5e98aa094e1d7f307b17691a02b7c57403543ab472573549b9165a4d6c72b39",
+    "format": "pdf",
+    "text_path": "tests/fixtures/resume/alex-example-resume.txt",
+    "text_sha256": "4dc19d3e69ea7638916e3ae1a8c5ad77703a35f185013fba64895c85b126eb48",
+    "page_count": 5,
+    "extraction": "pdftotext -layout -enc UTF-8 (fixture)"
+  },
+  "answers": {
+    "current_location": {
+      "value": "Springfield, Illinois, USA",
+      "semantic": "current_location",
+      "source": "Example user's current location: Springfield, Illinois, USA"
+    },
+    "current_city": {
+      "value": "Springfield",
+      "semantic": "current_city",
+      "source": "Example user's current location: Springfield, Illinois, USA"
+    },
+    "current_state": {
+      "value": "Illinois",
+      "semantic": "current_state_or_region",
+      "source": "Example user's current location: Springfield, Illinois, USA"
+    },
+    "current_country": {
+      "value": "United States",
+      "semantic": "current_country",
+      "source": "Example user's current location: Springfield, Illinois, USA"
+    },
+    "full_name": {
+      "value": "Alex Example",
+      "semantic": "legal_or_resume_full_name",
+      "source": "designated resume"
+    },
+    "given_name": {
+      "value": "Alex",
+      "semantic": "given_name",
+      "source": "Example user's statement: first name Alex, last name Example; recorded separately so forms with split name fields resolve."
+    },
+    "family_name": {
+      "value": "Example",
+      "semantic": "family_name",
+      "source": "Example user's statement: first name Alex, last name Example; recorded separately so forms with split name fields resolve."
+    },
+    "email": {
+      "value": "alex.example@example.com",
+      "semantic": "contact_email",
+      "source": "designated resume"
+    },
+    "phone": {
+      "value": "+1-555-010-0100",
+      "semantic": "contact_phone",
+      "source": "designated resume"
+    },
+    "linkedin": {
+      "value": "https://www.linkedin.com/in/alex-example/",
+      "semantic": "linkedin_profile",
+      "source": "designated resume"
+    },
+    "github": {
+      "value": "https://www.linkedin.com/in/alex-example/",
+      "semantic": "github_profile",
+      "source": "Example user's preference: when an application asks for a GitHub link, give the LinkedIn profile URL (no GitHub profile to give)."
+    },
+    "us_work_authorized": {
+      "value": true,
+      "semantic": "currently_authorized_to_work_in_us",
+      "source": "Example user's statement: US permanent resident / Green Card"
+    },
+    "us_permanent_resident": {
+      "value": true,
+      "semantic": "us_lawful_permanent_resident",
+      "source": "Example user's statement: a US lawful permanent resident (green card holder), not a US citizen."
+    },
+    "work_authorization_by_jurisdiction": {
+      "value": {
+        "*": "NOT_AUTHORIZED",
+        "US": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED",
+        "EU": "NOT_AUTHORIZED",
+        "ES": "NOT_AUTHORIZED",
+        "FR": "NOT_AUTHORIZED",
+        "DE": "NOT_AUTHORIZED",
+        "IE": "NOT_AUTHORIZED",
+        "NL": "NOT_AUTHORIZED",
+        "GB": "NOT_AUTHORIZED",
+        "CH": "NOT_AUTHORIZED",
+        "NO": "NOT_AUTHORIZED",
+        "CA": "NOT_AUTHORIZED"
+      },
+      "semantic": "work_authorization_by_jurisdiction",
+      "source": "Example user's statement: holds a US work permit; holds no EU citizenship and no EU work permit. The \"*\" entry is a default-deny: any jurisdiction not listed as explicitly authorized is NOT_AUTHORIZED. GB is listed separately because the United Kingdom is not in the EU."
+    },
+    "eu_work_authorized": {
+      "value": false,
+      "semantic": "currently_authorized_to_work_in_eu",
+      "source": "Example user's statement: no EU citizenship and no EU work permit"
+    },
+    "uk_work_authorized": {
+      "value": false,
+      "semantic": "currently_authorized_to_work_in_uk",
+      "source": "Example user's statement: no UK right to work. Recorded separately so a UK question is never answered from the EU entry."
+    },
+    "requires_visa_sponsorship_us": {
+      "value": false,
+      "semantic": "requires_visa_sponsorship_now_or_future_in_us",
+      "source": "Example user's statement: US permanent resident / Green Card, the same recorded status that sources us_work_authorized. Scope is the United States only."
+    },
+    "requires_visa_sponsorship_outside_us": {
+      "value": true,
+      "semantic": "requires_visa_sponsorship_now_or_future_outside_us",
+      "source": "Example user's statement: no EU citizenship and no EU work permit; an employer outside the US would need to sponsor"
+    },
+    "open_to_visa_sponsorship": {
+      "value": true,
+      "semantic": "open_to_employer_visa_sponsorship",
+      "source": "Example user's preference: open to employer visa sponsorship for roles outside the US. A willingness to be sponsored, never an input to whether authorization is held."
+    },
+    "remote_work_from_us_for_foreign_employer": {
+      "value": true,
+      "semantic": "willing_to_work_remotely_from_country_of_residence_for_foreign_employer",
+      "source": "Example user's preference: open to working remotely from the United States for a non-US employer, holding a US work permit"
+    },
+    "working_timezone": {
+      "value": "US Central Time (America/Chicago)",
+      "semantic": "working_timezone",
+      "source": "Example user's statement: works from Central Time, Springfield, Illinois. Recorded as the IANA zone. This states a zone, not a commitment to specific working hours."
+    },
+    "preferred_work_countries_outside_us": {
+      "value": [
+        "Spain",
+        "France",
+        "Germany",
+        "United Kingdom"
+      ],
+      "semantic": "preferred_countries_outside_us_in_ranked_order",
+      "source": "Example user's preference: if asked to choose a European country to work from, Spain, France, Germany or the UK, in that order. The United Kingdom is not in the EU and must never satisfy an EU-authorization question."
+    },
+    "resume": {
+      "value": "tests/fixtures/resume/alex-example-resume.pdf",
+      "semantic": "resume",
+      "source": "Designated resume (resume.path / resume.sha256). A pointer, not the attachment: applications.process re-hashes the file against resume.sha256 and passes it to the adapter. If resume.path changes, this value must change with it."
+    },
+    "certificate_document": {
+      "value": "tests/fixtures/resume/alex-example-resume.pdf",
+      "semantic": "certificate_document",
+      "source": "Example user's preference: when a job asks for a certificate or supporting-document upload, supply the designated resume."
+    },
+    "willing_to_relocate": {
+      "value": true,
+      "semantic": "willing_to_relocate",
+      "source": "Example user's preference: willing to relocate to Spain, France, Germany or the United Kingdom for a role that requires presence there. Willingness to move is not a right to work."
+    },
+    "relocation_destinations": {
+      "value": [
+        "Spain",
+        "France",
+        "Germany",
+        "United Kingdom"
+      ],
+      "semantic": "relocation_destinations_in_ranked_order",
+      "source": "Example user's preference: ranked order of countries for a role requiring presence in Europe. The United Kingdom is listed separately from the EU."
+    },
+    "work_location_declaration_rule": {
+      "value": {
+        "role_requires_presence_in_europe": {
+          "country_of_work": "the European country the role requires, chosen from relocation_destinations in ranked order",
+          "owner_will_relocate": true,
+          "work_authorization_held_there": false,
+          "employer_sponsorship_required": true
+        },
+        "otherwise": {
+          "country_of_work": "United States",
+          "location": "Springfield, Illinois, USA",
+          "matches_recorded_answer": "current_location"
+        }
+      },
+      "semantic": "work_location_declaration_rule",
+      "source": "Example user's rule: if a role requires presence in Europe, the user relocates to a country from relocation_destinations, with authorization there absent and sponsorship required; otherwise the work is performed from the recorded current_location. Recorded as a rule (semantic ending in _rule) so it is never submitted verbatim as an answer."
+    },
+    "gender_self_identification": {
+      "value": "Male",
+      "semantic": "gender_self_identification",
+      "source": "Example user's voluntary self-identification. It answers a gender question and nothing else; the answering AI receives it to choose the matching option."
+    },
+    "notice_period": {
+      "value": "2 weeks",
+      "semantic": "notice_period",
+      "source": "Example user's statement: two weeks' notice owed to the current employer. Not an earliest start date."
+    },
+    "earliest_start_date_rule": {
+      "value": {
+        "basis": "application_date",
+        "offset_days": 28,
+        "description": "4 weeks from the date of the job application"
+      },
+      "semantic": "earliest_start_date_rule",
+      "source": "Example user's rule: can start 4 weeks from the date of the job application. Recorded as a rule and never as a date; applications.earliest_start_date computes the actual date per job."
+    },
+    "application_source": {
+      "semantic": "application_source",
+      "source": "Example user's generic answer to \"How did you hear about us?\". Never used to assert a referral.",
+      "value": "Other / Online search"
+    }
+  }
+}

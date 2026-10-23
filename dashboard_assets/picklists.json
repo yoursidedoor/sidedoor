@@ -1,0 +1,2168 @@
+{
+ "_note": "Setup pick lists (E6.T0 step 3 and step 8). Content, not code: edit freely; labels are what the user picks.",
+ "locations": {
+  "options": [
+   {
+    "label": "Amsterdam, North Holland, Netherlands",
+    "city": "Amsterdam",
+    "region": "North Holland",
+    "country": "Netherlands"
+   },
+   {
+    "label": "Arlington, Virginia, United States",
+    "city": "Arlington",
+    "region": "Virginia",
+    "country": "United States"
+   },
+   {
+    "label": "Atlanta, Georgia, United States",
+    "city": "Atlanta",
+    "region": "Georgia",
+    "country": "United States"
+   },
+   {
+    "label": "Austin, Texas, United States",
+    "city": "Austin",
+    "region": "Texas",
+    "country": "United States"
+   },
+   {
+    "label": "Baltimore, Maryland, United States",
+    "city": "Baltimore",
+    "region": "Maryland",
+    "country": "United States"
+   },
+   {
+    "label": "Bangalore, Karnataka, India",
+    "city": "Bangalore",
+    "region": "Karnataka",
+    "country": "India"
+   },
+   {
+    "label": "Barcelona, Catalonia, Spain",
+    "city": "Barcelona",
+    "region": "Catalonia",
+    "country": "Spain"
+   },
+   {
+    "label": "Berlin, Germany",
+    "city": "Berlin",
+    "region": "Berlin",
+    "country": "Germany"
+   },
+   {
+    "label": "Boston, Massachusetts, United States",
+    "city": "Boston",
+    "region": "Massachusetts",
+    "country": "United States"
+   },
+   {
+    "label": "Brussels, Belgium",
+    "city": "Brussels",
+    "region": "Brussels",
+    "country": "Belgium"
+   },
+   {
+    "label": "Charlotte, North Carolina, United States",
+    "city": "Charlotte",
+    "region": "North Carolina",
+    "country": "United States"
+   },
+   {
+    "label": "Chicago, Illinois, United States",
+    "city": "Chicago",
+    "region": "Illinois",
+    "country": "United States"
+   },
+   {
+    "label": "Columbus, Ohio, United States",
+    "city": "Columbus",
+    "region": "Ohio",
+    "country": "United States"
+   },
+   {
+    "label": "Copenhagen, Capital Region, Denmark",
+    "city": "Copenhagen",
+    "region": "Capital Region",
+    "country": "Denmark"
+   },
+   {
+    "label": "Dallas, Texas, United States",
+    "city": "Dallas",
+    "region": "Texas",
+    "country": "United States"
+   },
+   {
+    "label": "Denver, Colorado, United States",
+    "city": "Denver",
+    "region": "Colorado",
+    "country": "United States"
+   },
+   {
+    "label": "Detroit, Michigan, United States",
+    "city": "Detroit",
+    "region": "Michigan",
+    "country": "United States"
+   },
+   {
+    "label": "Dublin, Leinster, Ireland",
+    "city": "Dublin",
+    "region": "Leinster",
+    "country": "Ireland"
+   },
+   {
+    "label": "Edinburgh, Scotland, United Kingdom",
+    "city": "Edinburgh",
+    "region": "Scotland",
+    "country": "United Kingdom"
+   },
+   {
+    "label": "Hamburg, Germany",
+    "city": "Hamburg",
+    "region": "Hamburg",
+    "country": "Germany"
+   },
+   {
+    "label": "Helsinki, Uusimaa, Finland",
+    "city": "Helsinki",
+    "region": "Uusimaa",
+    "country": "Finland"
+   },
+   {
+    "label": "Houston, Texas, United States",
+    "city": "Houston",
+    "region": "Texas",
+    "country": "United States"
+   },
+   {
+    "label": "Lagos, Nigeria",
+    "city": "Lagos",
+    "region": "Lagos",
+    "country": "Nigeria"
+   },
+   {
+    "label": "Lisbon, Portugal",
+    "city": "Lisbon",
+    "region": "Lisbon",
+    "country": "Portugal"
+   },
+   {
+    "label": "London, England, United Kingdom",
+    "city": "London",
+    "region": "England",
+    "country": "United Kingdom"
+   },
+   {
+    "label": "Los Angeles, California, United States",
+    "city": "Los Angeles",
+    "region": "California",
+    "country": "United States"
+   },
+   {
+    "label": "Madrid, Community of Madrid, Spain",
+    "city": "Madrid",
+    "region": "Community of Madrid",
+    "country": "Spain"
+   },
+   {
+    "label": "Manchester, England, United Kingdom",
+    "city": "Manchester",
+    "region": "England",
+    "country": "United Kingdom"
+   },
+   {
+    "label": "Miami, Florida, United States",
+    "city": "Miami",
+    "region": "Florida",
+    "country": "United States"
+   },
+   {
+    "label": "Milan, Lombardy, Italy",
+    "city": "Milan",
+    "region": "Lombardy",
+    "country": "Italy"
+   },
+   {
+    "label": "Minneapolis, Minnesota, United States",
+    "city": "Minneapolis",
+    "region": "Minnesota",
+    "country": "United States"
+   },
+   {
+    "label": "Montreal, Quebec, Canada",
+    "city": "Montreal",
+    "region": "Quebec",
+    "country": "Canada"
+   },
+   {
+    "label": "Munich, Bavaria, Germany",
+    "city": "Munich",
+    "region": "Bavaria",
+    "country": "Germany"
+   },
+   {
+    "label": "Nashville, Tennessee, United States",
+    "city": "Nashville",
+    "region": "Tennessee",
+    "country": "United States"
+   },
+   {
+    "label": "New York, United States",
+    "city": "New York",
+    "region": "New York",
+    "country": "United States"
+   },
+   {
+    "label": "Oslo, Norway",
+    "city": "Oslo",
+    "region": "Oslo",
+    "country": "Norway"
+   },
+   {
+    "label": "Paris, Île-de-France, France",
+    "city": "Paris",
+    "region": "Île-de-France",
+    "country": "France"
+   },
+   {
+    "label": "Philadelphia, Pennsylvania, United States",
+    "city": "Philadelphia",
+    "region": "Pennsylvania",
+    "country": "United States"
+   },
+   {
+    "label": "Phoenix, Arizona, United States",
+    "city": "Phoenix",
+    "region": "Arizona",
+    "country": "United States"
+   },
+   {
+    "label": "Pittsburgh, Pennsylvania, United States",
+    "city": "Pittsburgh",
+    "region": "Pennsylvania",
+    "country": "United States"
+   },
+   {
+    "label": "Portland, Oregon, United States",
+    "city": "Portland",
+    "region": "Oregon",
+    "country": "United States"
+   },
+   {
+    "label": "Prague, Czechia",
+    "city": "Prague",
+    "region": "Prague",
+    "country": "Czechia"
+   },
+   {
+    "label": "Raleigh, North Carolina, United States",
+    "city": "Raleigh",
+    "region": "North Carolina",
+    "country": "United States"
+   },
+   {
+    "label": "Rome, Lazio, Italy",
+    "city": "Rome",
+    "region": "Lazio",
+    "country": "Italy"
+   },
+   {
+    "label": "Salt Lake City, Utah, United States",
+    "city": "Salt Lake City",
+    "region": "Utah",
+    "country": "United States"
+   },
+   {
+    "label": "San Diego, California, United States",
+    "city": "San Diego",
+    "region": "California",
+    "country": "United States"
+   },
+   {
+    "label": "San Francisco, California, United States",
+    "city": "San Francisco",
+    "region": "California",
+    "country": "United States"
+   },
+   {
+    "label": "San Jose, California, United States",
+    "city": "San Jose",
+    "region": "California",
+    "country": "United States"
+   },
+   {
+    "label": "Seattle, Washington, United States",
+    "city": "Seattle",
+    "region": "Washington",
+    "country": "United States"
+   },
+   {
+    "label": "Singapore, Singapore",
+    "city": "Singapore",
+    "region": "Singapore",
+    "country": "Singapore"
+   },
+   {
+    "label": "Springfield, Illinois, United States",
+    "city": "Springfield",
+    "region": "Illinois",
+    "country": "United States"
+   },
+   {
+    "label": "Stockholm, Sweden",
+    "city": "Stockholm",
+    "region": "Stockholm",
+    "country": "Sweden"
+   },
+   {
+    "label": "Sydney, New South Wales, Australia",
+    "city": "Sydney",
+    "region": "New South Wales",
+    "country": "Australia"
+   },
+   {
+    "label": "Tel Aviv, Israel",
+    "city": "Tel Aviv",
+    "region": "Tel Aviv",
+    "country": "Israel"
+   },
+   {
+    "label": "Toronto, Ontario, Canada",
+    "city": "Toronto",
+    "region": "Ontario",
+    "country": "Canada"
+   },
+   {
+    "label": "Vancouver, British Columbia, Canada",
+    "city": "Vancouver",
+    "region": "British Columbia",
+    "country": "Canada"
+   },
+   {
+    "label": "Vienna, Austria",
+    "city": "Vienna",
+    "region": "Vienna",
+    "country": "Austria"
+   },
+   {
+    "label": "Warsaw, Masovia, Poland",
+    "city": "Warsaw",
+    "region": "Masovia",
+    "country": "Poland"
+   },
+   {
+    "label": "Washington, DC, United States",
+    "city": "Washington",
+    "region": "DC",
+    "country": "United States"
+   },
+   {
+    "label": "Zurich, Switzerland",
+    "city": "Zurich",
+    "region": "Zurich",
+    "country": "Switzerland"
+   }
+  ]
+ },
+ "roles": {
+  "options": [
+   "Account Management",
+   "Accounting",
+   "Android Engineering",
+   "Audit",
+   "Backend Engineering",
+   "Blockchain Engineering",
+   "Bookkeeping",
+   "Brand",
+   "Business Analysis",
+   "Business Intelligence",
+   "Chemical Engineering",
+   "Chief of Staff",
+   "Civil Engineering",
+   "Clinical Research",
+   "Cloud Engineering",
+   "Communications / PR",
+   "Compliance",
+   "Construction Management",
+   "Content Marketing",
+   "Copywriting",
+   "Culinary / Chef",
+   "Customer Success",
+   "Customer Support",
+   "Data Analysis",
+   "Data Engineering",
+   "Data Science",
+   "DevOps / SRE",
+   "Distributed Systems",
+   "Electrical Engineering",
+   "Electrical Trades",
+   "Embedded / Firmware",
+   "Engineering Management",
+   "Event Planning",
+   "Executive Assistance",
+   "Finance / Financial Analysis",
+   "Frontend Engineering",
+   "Full Stack Engineering",
+   "Game Development",
+   "Grant Writing",
+   "Graphic Design",
+   "Growth Marketing",
+   "Healthcare Administration",
+   "Higher Education Teaching",
+   "Hospitality / Hotel Management",
+   "Human Resources",
+   "Infrastructure / Platform",
+   "Instructional Design",
+   "Investment Analysis",
+   "iOS Engineering",
+   "Journalism",
+   "Legal / Law",
+   "Logistics",
+   "Machine Learning / AI",
+   "Maintenance",
+   "Manufacturing",
+   "Marketing",
+   "Mechanical Engineering",
+   "Medical Assisting",
+   "Medicine / Physician",
+   "Mobile Engineering",
+   "Nursing",
+   "Office Administration",
+   "Operations",
+   "Paralegal",
+   "People Partnering",
+   "Pharmacy",
+   "Photography",
+   "Physical Therapy",
+   "Policy",
+   "Product Design",
+   "Product Management",
+   "Product Marketing",
+   "Program Coordination",
+   "Program Management",
+   "Project Management",
+   "QA / Test Engineering",
+   "Recruiting",
+   "Research Engineering",
+   "Restaurant Management",
+   "Retail",
+   "Robotics",
+   "Sales",
+   "Sales Development",
+   "School Administration",
+   "Security Engineering",
+   "Social Media",
+   "Social Work",
+   "Software Engineering",
+   "Solutions Consulting",
+   "Solutions Engineering",
+   "Store Management",
+   "Strategy",
+   "Supply Chain",
+   "Talent Acquisition",
+   "Teaching",
+   "Tutoring",
+   "UX Design",
+   "UX Research",
+   "Video Production",
+   "Warehouse Operations",
+   "Writing / Editing"
+  ],
+  "_note": "The kind of work, no seniority words (owner, 2026-10-21)."
+ },
+ "levels": {
+  "options": [
+   "Intern",
+   "Entry-level / Junior",
+   "Associate",
+   "Mid-level",
+   "Senior",
+   "Lead",
+   "Staff / Principal",
+   "Distinguished / Fellow",
+   "Manager",
+   "Senior Manager",
+   "Director",
+   "Senior Director",
+   "Vice President",
+   "Head of",
+   "C-level (CEO, CFO, CTO …)"
+  ],
+  "_note": "A general ladder, multi-pick, in ladder order (owner, 2026-10-21)."
+ },
+ "industries": {
+  "options": [
+   "Accounting",
+   "Aerospace and Defense",
+   "Agriculture",
+   "AI",
+   "Airlines and Aviation",
+   "Arts",
+   "Automotive",
+   "Banking",
+   "Beauty and Cosmetics",
+   "Biotechnology",
+   "Chemicals",
+   "Construction",
+   "Consulting",
+   "Consumer Goods",
+   "Crypto and Web3",
+   "Cybersecurity",
+   "E-commerce",
+   "Education",
+   "Entertainment",
+   "Environmental Services",
+   "Farming",
+   "Fashion and Apparel",
+   "FinTech",
+   "Food and Beverage",
+   "Gaming",
+   "Government and Public Administration",
+   "Hardware and Semiconductors",
+   "Higher Education",
+   "Hospitality and Hotels",
+   "Hospitals and Health Care",
+   "Insurance",
+   "Investment Management",
+   "IT Services",
+   "Legal",
+   "Logistics and Supply Chain",
+   "Manufacturing",
+   "Maritime",
+   "Marketing and Advertising",
+   "Media and Publishing",
+   "Medical Devices",
+   "Mental Health",
+   "Military",
+   "Mining and Metals",
+   "Nonprofit",
+   "Oil and Gas",
+   "Pharmaceuticals",
+   "Public Relations",
+   "Real Estate",
+   "Renewable Energy and Climate",
+   "Restaurants",
+   "Retail",
+   "Software",
+   "Sports and Fitness",
+   "Staffing and Recruiting",
+   "Telecommunications",
+   "Transportation and Trucking",
+   "Travel and Tourism",
+   "Utilities",
+   "Venture Capital and Private Equity",
+   "Veterinary"
+  ]
+ },
+ "countries": {
+  "options": [
+   {
+    "label": "Argentina",
+    "code": "AR"
+   },
+   {
+    "label": "Australia",
+    "code": "AU"
+   },
+   {
+    "label": "Austria",
+    "code": "AT"
+   },
+   {
+    "label": "Belgium",
+    "code": "BE"
+   },
+   {
+    "label": "Brazil",
+    "code": "BR"
+   },
+   {
+    "label": "Bulgaria",
+    "code": "BG"
+   },
+   {
+    "label": "Canada",
+    "code": "CA"
+   },
+   {
+    "label": "Chile",
+    "code": "CL"
+   },
+   {
+    "label": "China",
+    "code": "CN"
+   },
+   {
+    "label": "Colombia",
+    "code": "CO"
+   },
+   {
+    "label": "Croatia",
+    "code": "HR"
+   },
+   {
+    "label": "Cyprus",
+    "code": "CY"
+   },
+   {
+    "label": "Czechia",
+    "code": "CZ"
+   },
+   {
+    "label": "Denmark",
+    "code": "DK"
+   },
+   {
+    "label": "Egypt",
+    "code": "EG"
+   },
+   {
+    "label": "Estonia",
+    "code": "EE"
+   },
+   {
+    "label": "Finland",
+    "code": "FI"
+   },
+   {
+    "label": "France",
+    "code": "FR"
+   },
+   {
+    "label": "Germany",
+    "code": "DE"
+   },
+   {
+    "label": "Greece",
+    "code": "GR"
+   },
+   {
+    "label": "Hong Kong",
+    "code": "HK"
+   },
+   {
+    "label": "Hungary",
+    "code": "HU"
+   },
+   {
+    "label": "Iceland",
+    "code": "IS"
+   },
+   {
+    "label": "India",
+    "code": "IN"
+   },
+   {
+    "label": "Indonesia",
+    "code": "ID"
+   },
+   {
+    "label": "Ireland",
+    "code": "IE"
+   },
+   {
+    "label": "Israel",
+    "code": "IL"
+   },
+   {
+    "label": "Italy",
+    "code": "IT"
+   },
+   {
+    "label": "Japan",
+    "code": "JP"
+   },
+   {
+    "label": "Kenya",
+    "code": "KE"
+   },
+   {
+    "label": "Latvia",
+    "code": "LV"
+   },
+   {
+    "label": "Liechtenstein",
+    "code": "LI"
+   },
+   {
+    "label": "Lithuania",
+    "code": "LT"
+   },
+   {
+    "label": "Luxembourg",
+    "code": "LU"
+   },
+   {
+    "label": "Malaysia",
+    "code": "MY"
+   },
+   {
+    "label": "Malta",
+    "code": "MT"
+   },
+   {
+    "label": "Mexico",
+    "code": "MX"
+   },
+   {
+    "label": "Netherlands",
+    "code": "NL"
+   },
+   {
+    "label": "New Zealand",
+    "code": "NZ"
+   },
+   {
+    "label": "Nigeria",
+    "code": "NG"
+   },
+   {
+    "label": "Norway",
+    "code": "NO"
+   },
+   {
+    "label": "Pakistan",
+    "code": "PK"
+   },
+   {
+    "label": "Peru",
+    "code": "PE"
+   },
+   {
+    "label": "Philippines",
+    "code": "PH"
+   },
+   {
+    "label": "Poland",
+    "code": "PL"
+   },
+   {
+    "label": "Portugal",
+    "code": "PT"
+   },
+   {
+    "label": "Romania",
+    "code": "RO"
+   },
+   {
+    "label": "Saudi Arabia",
+    "code": "SA"
+   },
+   {
+    "label": "Serbia",
+    "code": "RS"
+   },
+   {
+    "label": "Singapore",
+    "code": "SG"
+   },
+   {
+    "label": "Slovakia",
+    "code": "SK"
+   },
+   {
+    "label": "Slovenia",
+    "code": "SI"
+   },
+   {
+    "label": "South Africa",
+    "code": "ZA"
+   },
+   {
+    "label": "South Korea",
+    "code": "KR"
+   },
+   {
+    "label": "Spain",
+    "code": "ES"
+   },
+   {
+    "label": "Sweden",
+    "code": "SE"
+   },
+   {
+    "label": "Switzerland",
+    "code": "CH"
+   },
+   {
+    "label": "Taiwan",
+    "code": "TW"
+   },
+   {
+    "label": "Thailand",
+    "code": "TH"
+   },
+   {
+    "label": "Turkey",
+    "code": "TR"
+   },
+   {
+    "label": "Ukraine",
+    "code": "UA"
+   },
+   {
+    "label": "United Arab Emirates",
+    "code": "AE"
+   },
+   {
+    "label": "United Kingdom",
+    "code": "GB"
+   },
+   {
+    "label": "United States",
+    "code": "US"
+   },
+   {
+    "label": "Vietnam",
+    "code": "VN"
+   }
+  ]
+ },
+ "salaries": {
+  "options": [
+   {
+    "label": "$40,000",
+    "usd": 40000
+   },
+   {
+    "label": "$50,000",
+    "usd": 50000
+   },
+   {
+    "label": "$60,000",
+    "usd": 60000
+   },
+   {
+    "label": "$70,000",
+    "usd": 70000
+   },
+   {
+    "label": "$80,000",
+    "usd": 80000
+   },
+   {
+    "label": "$90,000",
+    "usd": 90000
+   },
+   {
+    "label": "$100,000",
+    "usd": 100000
+   },
+   {
+    "label": "$110,000",
+    "usd": 110000
+   },
+   {
+    "label": "$120,000",
+    "usd": 120000
+   },
+   {
+    "label": "$130,000",
+    "usd": 130000
+   },
+   {
+    "label": "$140,000",
+    "usd": 140000
+   },
+   {
+    "label": "$150,000",
+    "usd": 150000
+   },
+   {
+    "label": "$160,000",
+    "usd": 160000
+   },
+   {
+    "label": "$170,000",
+    "usd": 170000
+   },
+   {
+    "label": "$180,000",
+    "usd": 180000
+   },
+   {
+    "label": "$190,000",
+    "usd": 190000
+   },
+   {
+    "label": "$200,000",
+    "usd": 200000
+   },
+   {
+    "label": "$210,000",
+    "usd": 210000
+   },
+   {
+    "label": "$220,000",
+    "usd": 220000
+   },
+   {
+    "label": "$230,000",
+    "usd": 230000
+   },
+   {
+    "label": "$240,000",
+    "usd": 240000
+   },
+   {
+    "label": "$250,000",
+    "usd": 250000
+   },
+   {
+    "label": "$260,000",
+    "usd": 260000
+   },
+   {
+    "label": "$270,000",
+    "usd": 270000
+   },
+   {
+    "label": "$280,000",
+    "usd": 280000
+   },
+   {
+    "label": "$290,000",
+    "usd": 290000
+   },
+   {
+    "label": "$300,000",
+    "usd": 300000
+   },
+   {
+    "label": "$310,000",
+    "usd": 310000
+   },
+   {
+    "label": "$320,000",
+    "usd": 320000
+   },
+   {
+    "label": "$330,000",
+    "usd": 330000
+   },
+   {
+    "label": "$340,000",
+    "usd": 340000
+   },
+   {
+    "label": "$350,000",
+    "usd": 350000
+   },
+   {
+    "label": "$360,000",
+    "usd": 360000
+   },
+   {
+    "label": "$370,000",
+    "usd": 370000
+   },
+   {
+    "label": "$380,000",
+    "usd": 380000
+   },
+   {
+    "label": "$390,000",
+    "usd": 390000
+   },
+   {
+    "label": "$400,000",
+    "usd": 400000
+   },
+   {
+    "label": "$410,000",
+    "usd": 410000
+   },
+   {
+    "label": "$420,000",
+    "usd": 420000
+   },
+   {
+    "label": "$430,000",
+    "usd": 430000
+   },
+   {
+    "label": "$440,000",
+    "usd": 440000
+   },
+   {
+    "label": "$450,000",
+    "usd": 450000
+   },
+   {
+    "label": "$460,000",
+    "usd": 460000
+   },
+   {
+    "label": "$470,000",
+    "usd": 470000
+   },
+   {
+    "label": "$480,000",
+    "usd": 480000
+   },
+   {
+    "label": "$490,000",
+    "usd": 490000
+   },
+   {
+    "label": "$500,000",
+    "usd": 500000
+   }
+  ]
+ },
+ "work_modes": {
+  "options": [
+   "Remote",
+   "Hybrid",
+   "Onsite"
+  ]
+ },
+ "places": {
+  "options": [
+   "Amsterdam, North Holland, Netherlands",
+   "Anywhere in Canada",
+   "Anywhere in Europe",
+   "Anywhere in United Kingdom",
+   "Anywhere in United States",
+   "Arlington, Virginia, United States",
+   "Atlanta, Georgia, United States",
+   "Austin, Texas, United States",
+   "Baltimore, Maryland, United States",
+   "Bangalore, Karnataka, India",
+   "Barcelona, Catalonia, Spain",
+   "Berlin, Germany",
+   "Boston, Massachusetts, United States",
+   "Brussels, Belgium",
+   "Charlotte, North Carolina, United States",
+   "Chicago, Illinois, United States",
+   "Columbus, Ohio, United States",
+   "Copenhagen, Capital Region, Denmark",
+   "Dallas, Texas, United States",
+   "Denver, Colorado, United States",
+   "Detroit, Michigan, United States",
+   "Dublin, Leinster, Ireland",
+   "Edinburgh, Scotland, United Kingdom",
+   "Hamburg, Germany",
+   "Helsinki, Uusimaa, Finland",
+   "Houston, Texas, United States",
+   "Lagos, Nigeria",
+   "Lisbon, Portugal",
+   "London, England, United Kingdom",
+   "Los Angeles, California, United States",
+   "Madrid, Community of Madrid, Spain",
+   "Manchester, England, United Kingdom",
+   "Miami, Florida, United States",
+   "Milan, Lombardy, Italy",
+   "Minneapolis, Minnesota, United States",
+   "Montreal, Quebec, Canada",
+   "Munich, Bavaria, Germany",
+   "Nashville, Tennessee, United States",
+   "New York, United States",
+   "Oslo, Norway",
+   "Paris, Île-de-France, France",
+   "Philadelphia, Pennsylvania, United States",
+   "Phoenix, Arizona, United States",
+   "Pittsburgh, Pennsylvania, United States",
+   "Portland, Oregon, United States",
+   "Prague, Czechia",
+   "Raleigh, North Carolina, United States",
+   "Rome, Lazio, Italy",
+   "Salt Lake City, Utah, United States",
+   "San Diego, California, United States",
+   "San Francisco, California, United States",
+   "San Jose, California, United States",
+   "Seattle, Washington, United States",
+   "Singapore, Singapore",
+   "Springfield, Illinois, United States",
+   "Stockholm, Sweden",
+   "Sydney, New South Wales, Australia",
+   "Tel Aviv, Israel",
+   "Toronto, Ontario, Canada",
+   "Vancouver, British Columbia, Canada",
+   "Vienna, Austria",
+   "Warsaw, Masovia, Poland",
+   "Washington, DC, United States",
+   "Zurich, Switzerland"
+  ]
+ },
+ "work_authorization": {
+  "options": [
+   {
+    "label": "Argentina: allowed to work, no sponsorship needed",
+    "code": "AR",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Argentina: allowed to work now, will need sponsorship",
+    "code": "AR",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Argentina: not allowed to work, needs sponsorship",
+    "code": "AR",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Australia: allowed to work, no sponsorship needed",
+    "code": "AU",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Australia: allowed to work now, will need sponsorship",
+    "code": "AU",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Australia: not allowed to work, needs sponsorship",
+    "code": "AU",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Austria: allowed to work, no sponsorship needed",
+    "code": "AT",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Austria: allowed to work now, will need sponsorship",
+    "code": "AT",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Austria: not allowed to work, needs sponsorship",
+    "code": "AT",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Belgium: allowed to work, no sponsorship needed",
+    "code": "BE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Belgium: allowed to work now, will need sponsorship",
+    "code": "BE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Belgium: not allowed to work, needs sponsorship",
+    "code": "BE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Brazil: allowed to work, no sponsorship needed",
+    "code": "BR",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Brazil: allowed to work now, will need sponsorship",
+    "code": "BR",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Brazil: not allowed to work, needs sponsorship",
+    "code": "BR",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Bulgaria: allowed to work, no sponsorship needed",
+    "code": "BG",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Bulgaria: allowed to work now, will need sponsorship",
+    "code": "BG",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Bulgaria: not allowed to work, needs sponsorship",
+    "code": "BG",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Canada: allowed to work, no sponsorship needed",
+    "code": "CA",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Canada: allowed to work now, will need sponsorship",
+    "code": "CA",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Canada: not allowed to work, needs sponsorship",
+    "code": "CA",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Chile: allowed to work, no sponsorship needed",
+    "code": "CL",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Chile: allowed to work now, will need sponsorship",
+    "code": "CL",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Chile: not allowed to work, needs sponsorship",
+    "code": "CL",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "China: allowed to work, no sponsorship needed",
+    "code": "CN",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "China: allowed to work now, will need sponsorship",
+    "code": "CN",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "China: not allowed to work, needs sponsorship",
+    "code": "CN",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Colombia: allowed to work, no sponsorship needed",
+    "code": "CO",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Colombia: allowed to work now, will need sponsorship",
+    "code": "CO",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Colombia: not allowed to work, needs sponsorship",
+    "code": "CO",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Croatia: allowed to work, no sponsorship needed",
+    "code": "HR",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Croatia: allowed to work now, will need sponsorship",
+    "code": "HR",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Croatia: not allowed to work, needs sponsorship",
+    "code": "HR",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Cyprus: allowed to work, no sponsorship needed",
+    "code": "CY",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Cyprus: allowed to work now, will need sponsorship",
+    "code": "CY",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Cyprus: not allowed to work, needs sponsorship",
+    "code": "CY",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Czechia: allowed to work, no sponsorship needed",
+    "code": "CZ",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Czechia: allowed to work now, will need sponsorship",
+    "code": "CZ",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Czechia: not allowed to work, needs sponsorship",
+    "code": "CZ",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Denmark: allowed to work, no sponsorship needed",
+    "code": "DK",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Denmark: allowed to work now, will need sponsorship",
+    "code": "DK",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Denmark: not allowed to work, needs sponsorship",
+    "code": "DK",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Egypt: allowed to work, no sponsorship needed",
+    "code": "EG",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Egypt: allowed to work now, will need sponsorship",
+    "code": "EG",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Egypt: not allowed to work, needs sponsorship",
+    "code": "EG",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Estonia: allowed to work, no sponsorship needed",
+    "code": "EE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Estonia: allowed to work now, will need sponsorship",
+    "code": "EE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Estonia: not allowed to work, needs sponsorship",
+    "code": "EE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "EU - Any member country: allowed to work, no sponsorship needed",
+    "code": "EU",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "EU - Any member country: allowed to work now, will need sponsorship",
+    "code": "EU",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "EU - Any member country: not allowed to work, needs sponsorship",
+    "code": "EU",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Finland: allowed to work, no sponsorship needed",
+    "code": "FI",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Finland: allowed to work now, will need sponsorship",
+    "code": "FI",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Finland: not allowed to work, needs sponsorship",
+    "code": "FI",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "France: allowed to work, no sponsorship needed",
+    "code": "FR",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "France: allowed to work now, will need sponsorship",
+    "code": "FR",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "France: not allowed to work, needs sponsorship",
+    "code": "FR",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Germany: allowed to work, no sponsorship needed",
+    "code": "DE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Germany: allowed to work now, will need sponsorship",
+    "code": "DE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Germany: not allowed to work, needs sponsorship",
+    "code": "DE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Greece: allowed to work, no sponsorship needed",
+    "code": "GR",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Greece: allowed to work now, will need sponsorship",
+    "code": "GR",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Greece: not allowed to work, needs sponsorship",
+    "code": "GR",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Hong Kong: allowed to work, no sponsorship needed",
+    "code": "HK",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Hong Kong: allowed to work now, will need sponsorship",
+    "code": "HK",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Hong Kong: not allowed to work, needs sponsorship",
+    "code": "HK",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Hungary: allowed to work, no sponsorship needed",
+    "code": "HU",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Hungary: allowed to work now, will need sponsorship",
+    "code": "HU",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Hungary: not allowed to work, needs sponsorship",
+    "code": "HU",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Iceland: allowed to work, no sponsorship needed",
+    "code": "IS",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Iceland: allowed to work now, will need sponsorship",
+    "code": "IS",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Iceland: not allowed to work, needs sponsorship",
+    "code": "IS",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "India: allowed to work, no sponsorship needed",
+    "code": "IN",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "India: allowed to work now, will need sponsorship",
+    "code": "IN",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "India: not allowed to work, needs sponsorship",
+    "code": "IN",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Indonesia: allowed to work, no sponsorship needed",
+    "code": "ID",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Indonesia: allowed to work now, will need sponsorship",
+    "code": "ID",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Indonesia: not allowed to work, needs sponsorship",
+    "code": "ID",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Ireland: allowed to work, no sponsorship needed",
+    "code": "IE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Ireland: allowed to work now, will need sponsorship",
+    "code": "IE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Ireland: not allowed to work, needs sponsorship",
+    "code": "IE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Israel: allowed to work, no sponsorship needed",
+    "code": "IL",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Israel: allowed to work now, will need sponsorship",
+    "code": "IL",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Israel: not allowed to work, needs sponsorship",
+    "code": "IL",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Italy: allowed to work, no sponsorship needed",
+    "code": "IT",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Italy: allowed to work now, will need sponsorship",
+    "code": "IT",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Italy: not allowed to work, needs sponsorship",
+    "code": "IT",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Japan: allowed to work, no sponsorship needed",
+    "code": "JP",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Japan: allowed to work now, will need sponsorship",
+    "code": "JP",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Japan: not allowed to work, needs sponsorship",
+    "code": "JP",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Kenya: allowed to work, no sponsorship needed",
+    "code": "KE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Kenya: allowed to work now, will need sponsorship",
+    "code": "KE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Kenya: not allowed to work, needs sponsorship",
+    "code": "KE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Latvia: allowed to work, no sponsorship needed",
+    "code": "LV",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Latvia: allowed to work now, will need sponsorship",
+    "code": "LV",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Latvia: not allowed to work, needs sponsorship",
+    "code": "LV",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Liechtenstein: allowed to work, no sponsorship needed",
+    "code": "LI",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Liechtenstein: allowed to work now, will need sponsorship",
+    "code": "LI",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Liechtenstein: not allowed to work, needs sponsorship",
+    "code": "LI",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Lithuania: allowed to work, no sponsorship needed",
+    "code": "LT",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Lithuania: allowed to work now, will need sponsorship",
+    "code": "LT",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Lithuania: not allowed to work, needs sponsorship",
+    "code": "LT",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Luxembourg: allowed to work, no sponsorship needed",
+    "code": "LU",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Luxembourg: allowed to work now, will need sponsorship",
+    "code": "LU",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Luxembourg: not allowed to work, needs sponsorship",
+    "code": "LU",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Malaysia: allowed to work, no sponsorship needed",
+    "code": "MY",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Malaysia: allowed to work now, will need sponsorship",
+    "code": "MY",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Malaysia: not allowed to work, needs sponsorship",
+    "code": "MY",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Malta: allowed to work, no sponsorship needed",
+    "code": "MT",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Malta: allowed to work now, will need sponsorship",
+    "code": "MT",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Malta: not allowed to work, needs sponsorship",
+    "code": "MT",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Mexico: allowed to work, no sponsorship needed",
+    "code": "MX",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Mexico: allowed to work now, will need sponsorship",
+    "code": "MX",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Mexico: not allowed to work, needs sponsorship",
+    "code": "MX",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Netherlands: allowed to work, no sponsorship needed",
+    "code": "NL",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Netherlands: allowed to work now, will need sponsorship",
+    "code": "NL",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Netherlands: not allowed to work, needs sponsorship",
+    "code": "NL",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "New Zealand: allowed to work, no sponsorship needed",
+    "code": "NZ",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "New Zealand: allowed to work now, will need sponsorship",
+    "code": "NZ",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "New Zealand: not allowed to work, needs sponsorship",
+    "code": "NZ",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Nigeria: allowed to work, no sponsorship needed",
+    "code": "NG",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Nigeria: allowed to work now, will need sponsorship",
+    "code": "NG",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Nigeria: not allowed to work, needs sponsorship",
+    "code": "NG",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Norway: allowed to work, no sponsorship needed",
+    "code": "NO",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Norway: allowed to work now, will need sponsorship",
+    "code": "NO",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Norway: not allowed to work, needs sponsorship",
+    "code": "NO",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Pakistan: allowed to work, no sponsorship needed",
+    "code": "PK",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Pakistan: allowed to work now, will need sponsorship",
+    "code": "PK",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Pakistan: not allowed to work, needs sponsorship",
+    "code": "PK",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Peru: allowed to work, no sponsorship needed",
+    "code": "PE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Peru: allowed to work now, will need sponsorship",
+    "code": "PE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Peru: not allowed to work, needs sponsorship",
+    "code": "PE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Philippines: allowed to work, no sponsorship needed",
+    "code": "PH",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Philippines: allowed to work now, will need sponsorship",
+    "code": "PH",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Philippines: not allowed to work, needs sponsorship",
+    "code": "PH",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Poland: allowed to work, no sponsorship needed",
+    "code": "PL",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Poland: allowed to work now, will need sponsorship",
+    "code": "PL",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Poland: not allowed to work, needs sponsorship",
+    "code": "PL",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Portugal: allowed to work, no sponsorship needed",
+    "code": "PT",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Portugal: allowed to work now, will need sponsorship",
+    "code": "PT",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Portugal: not allowed to work, needs sponsorship",
+    "code": "PT",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Romania: allowed to work, no sponsorship needed",
+    "code": "RO",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Romania: allowed to work now, will need sponsorship",
+    "code": "RO",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Romania: not allowed to work, needs sponsorship",
+    "code": "RO",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Saudi Arabia: allowed to work, no sponsorship needed",
+    "code": "SA",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Saudi Arabia: allowed to work now, will need sponsorship",
+    "code": "SA",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Saudi Arabia: not allowed to work, needs sponsorship",
+    "code": "SA",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Serbia: allowed to work, no sponsorship needed",
+    "code": "RS",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Serbia: allowed to work now, will need sponsorship",
+    "code": "RS",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Serbia: not allowed to work, needs sponsorship",
+    "code": "RS",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Singapore: allowed to work, no sponsorship needed",
+    "code": "SG",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Singapore: allowed to work now, will need sponsorship",
+    "code": "SG",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Singapore: not allowed to work, needs sponsorship",
+    "code": "SG",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Slovakia: allowed to work, no sponsorship needed",
+    "code": "SK",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Slovakia: allowed to work now, will need sponsorship",
+    "code": "SK",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Slovakia: not allowed to work, needs sponsorship",
+    "code": "SK",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Slovenia: allowed to work, no sponsorship needed",
+    "code": "SI",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Slovenia: allowed to work now, will need sponsorship",
+    "code": "SI",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Slovenia: not allowed to work, needs sponsorship",
+    "code": "SI",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "South Africa: allowed to work, no sponsorship needed",
+    "code": "ZA",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "South Africa: allowed to work now, will need sponsorship",
+    "code": "ZA",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "South Africa: not allowed to work, needs sponsorship",
+    "code": "ZA",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "South Korea: allowed to work, no sponsorship needed",
+    "code": "KR",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "South Korea: allowed to work now, will need sponsorship",
+    "code": "KR",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "South Korea: not allowed to work, needs sponsorship",
+    "code": "KR",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Spain: allowed to work, no sponsorship needed",
+    "code": "ES",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Spain: allowed to work now, will need sponsorship",
+    "code": "ES",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Spain: not allowed to work, needs sponsorship",
+    "code": "ES",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Sweden: allowed to work, no sponsorship needed",
+    "code": "SE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Sweden: allowed to work now, will need sponsorship",
+    "code": "SE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Sweden: not allowed to work, needs sponsorship",
+    "code": "SE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Switzerland: allowed to work, no sponsorship needed",
+    "code": "CH",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Switzerland: allowed to work now, will need sponsorship",
+    "code": "CH",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Switzerland: not allowed to work, needs sponsorship",
+    "code": "CH",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Taiwan: allowed to work, no sponsorship needed",
+    "code": "TW",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Taiwan: allowed to work now, will need sponsorship",
+    "code": "TW",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Taiwan: not allowed to work, needs sponsorship",
+    "code": "TW",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Thailand: allowed to work, no sponsorship needed",
+    "code": "TH",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Thailand: allowed to work now, will need sponsorship",
+    "code": "TH",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Thailand: not allowed to work, needs sponsorship",
+    "code": "TH",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Turkey: allowed to work, no sponsorship needed",
+    "code": "TR",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Turkey: allowed to work now, will need sponsorship",
+    "code": "TR",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Turkey: not allowed to work, needs sponsorship",
+    "code": "TR",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Ukraine: allowed to work, no sponsorship needed",
+    "code": "UA",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Ukraine: allowed to work now, will need sponsorship",
+    "code": "UA",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Ukraine: not allowed to work, needs sponsorship",
+    "code": "UA",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "United Arab Emirates: allowed to work, no sponsorship needed",
+    "code": "AE",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "United Arab Emirates: allowed to work now, will need sponsorship",
+    "code": "AE",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "United Arab Emirates: not allowed to work, needs sponsorship",
+    "code": "AE",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "United Kingdom: allowed to work, no sponsorship needed",
+    "code": "GB",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "United Kingdom: allowed to work now, will need sponsorship",
+    "code": "GB",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "United Kingdom: not allowed to work, needs sponsorship",
+    "code": "GB",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "United States: allowed to work, no sponsorship needed",
+    "code": "US",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "United States: allowed to work now, will need sponsorship",
+    "code": "US",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "United States: not allowed to work, needs sponsorship",
+    "code": "US",
+    "status": "NOT_AUTHORIZED"
+   },
+   {
+    "label": "Vietnam: allowed to work, no sponsorship needed",
+    "code": "VN",
+    "status": "AUTHORIZED_NO_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Vietnam: allowed to work now, will need sponsorship",
+    "code": "VN",
+    "status": "AUTHORIZED_SPONSORSHIP_REQUIRED"
+   },
+   {
+    "label": "Vietnam: not allowed to work, needs sponsorship",
+    "code": "VN",
+    "status": "NOT_AUTHORIZED"
+   }
+  ]
+ },
+ "webmail": {
+  "options": [
+   {
+    "label": "Gmail",
+    "url": "https://mail.google.com/"
+   },
+   {
+    "label": "Outlook.com",
+    "url": "https://outlook.live.com/mail/"
+   },
+   {
+    "label": "Outlook (work or school)",
+    "url": "https://outlook.office.com/mail/"
+   },
+   {
+    "label": "Yahoo Mail",
+    "url": "https://mail.yahoo.com/"
+   },
+   {
+    "label": "iCloud Mail",
+    "url": "https://www.icloud.com/mail/"
+   },
+   {
+    "label": "Proton Mail",
+    "url": "https://mail.proton.me/"
+   },
+   {
+    "label": "AOL Mail",
+    "url": "https://mail.aol.com/"
+   },
+   {
+    "label": "Zoho Mail",
+    "url": "https://mail.zoho.com/"
+   },
+   {
+    "label": "Fastmail",
+    "url": "https://app.fastmail.com/"
+   }
+  ]
+ },
+ "self_identification": {
+  "gender": [
+   "Prefer not to say",
+   "Woman",
+   "Man",
+   "Non-binary",
+   "Self-describe elsewhere"
+  ],
+  "race": [
+   "Prefer not to say",
+   "American Indian or Alaska Native",
+   "Asian",
+   "Black or African American",
+   "Hispanic or Latino",
+   "Native Hawaiian or Other Pacific Islander",
+   "White",
+   "Two or more races"
+  ],
+  "veteran": [
+   "Prefer not to say",
+   "I am not a protected veteran",
+   "I am a protected veteran"
+  ],
+  "disability": [
+   "Prefer not to say",
+   "No, I do not have a disability",
+   "Yes, I have a disability"
+  ]
+ },
+ "funding_stages": {
+  "_note": "Company stage or type (owner, 2026-10-21). \"Any stage\" is saved as an empty funding_stages list, which the scope prompts read as any stage.",
+  "options": [
+   "Any stage",
+   "Pre-seed",
+   "Seed",
+   "Series A",
+   "Series B",
+   "Series C",
+   "Series D+",
+   "Late stage / Pre-IPO",
+   "Public company",
+   "Private company (bootstrapped / profitable)",
+   "Nonprofit",
+   "Government"
+  ]
+ }
+}

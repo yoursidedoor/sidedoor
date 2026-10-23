@@ -1,0 +1,53 @@
+{# One waiting message (approvals_page.card_of): `item`, its flash `f` ({tone, text, kept, kept_reason, changed}). #}
+{% set m = item %}{% set f = f or {} %}
+{% set text = f.kept if f.kept is string else m.text %}
+{% set over = m.limit and text|length > m.limit %}
+<article class="approval-card" id="{{ m.dom }}">
+  <header class="approval-head">
+    <span class="chip chip-info">{{ m.kind }}</span>
+    {% if m.edited %}<span class="chip chip-muted">Edited by you</span>{% endif %}
+  </header>
+  <h3 class="approval-who">{% if m.linkedin %}<a href="{{ m.linkedin }}" rel="noopener noreferrer" target="_blank">{{ m.recipient }}</a>{% else %}{{ m.recipient }}{% endif %}</h3>
+  <p class="muted">{% if m.title %}{{ m.title }}{% if m.company %}, {% endif %}{% endif %}{{ m.company or "" }}{% if m.held_at %} · waiting since {{ v.when(m.held_at) }}{% endif %}</p>
+  {% if m.why %}<div class="approval-why"><strong>Why this person</strong><ul>{% for line in m.why %}<li>{{ line }}</li>{% endfor %}</ul></div>{% endif %}
+  {% if m.conversation %}
+  <details class="approval-thread" open><summary>The conversation so far</summary>
+    <ol>{% for line in m.conversation %}<li><strong>{{ line.who }}</strong>{% if line.at %} <span class="muted">{{ v.when(line.at) }}</span>{% endif %}<p>{{ line.text }}</p></li>{% endfor %}</ol>
+  </details>
+  {% endif %}
+  <p class="approval-judge"><strong>Send check:</strong> {{ m.judge.verdict }}{% if m.judge.reason %}. <span class="muted">{{ m.judge.reason }}</span>{% endif %}</p>
+  {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
+  {% if m.revisable %}
+  {% if f.kept is string and f.kept != m.text %}
+  <p class="approval-label">The message now reads:</p>
+  <blockquote class="approval-text approval-current">{{ m.text }}</blockquote>
+  {% endif %}
+  <form method="post" action="/approvals/messages/send" hx-post="/approvals/messages/send" hx-target="closest article" hx-swap="outerHTML" class="approval-edit">
+    <input type="hidden" name="action_id" value="{{ m.action_id }}"><input type="hidden" name="payload_hash" value="{{ m.payload_hash }}">
+    <input type="hidden" name="recipient" value="{{ m.recipient }}"><input type="hidden" name="shown_text" value="{{ m.text }}">
+    <label for="text-{{ m.dom }}">{{ "Your edit" if f.kept is string and f.kept != m.text else "Message (edit it here if you like)" }}</label>
+    <textarea id="text-{{ m.dom }}" name="text" rows="6" data-limit="{{ m.limit or '' }}" data-original="{{ m.text }}" data-count="count-{{ m.dom }}" data-approve="send-{{ m.dom }}">{{ text }}</textarea>
+    <p class="approval-count{% if over %} field-error{% endif %}" id="count-{{ m.dom }}" aria-live="polite">{{ text|length }}{% if m.limit %} / {{ m.limit }}{% endif %} characters{% if over %}. LinkedIn allows {{ m.limit }} in a connection note: shorten it by {{ text|length - m.limit }}.{% endif %}</p>
+    <button class="button button-highlight" type="submit" id="send-{{ m.dom }}"{% if over %} disabled{% endif %}>{{ "Approve my edit" if text != m.text else "Approve and send" }}</button>
+    <span class="muted">sends exactly what the box says{% if m.edited %}: your edited text{% endif %}</span>
+  </form>
+  {% else %}
+  <blockquote class="approval-text">{{ m.text }}</blockquote>
+  <p class="approval-count">{{ m.length }}{% if m.limit %} / {{ m.limit }}{% endif %} characters</p>
+  {% if m.stage == "LAUNCH" %}<p class="muted">This invitation is already in a prepared campaign, so it cannot be edited here. Approve it or reject it.</p>{% endif %}
+  <form method="post" action="/approvals/messages/approve" hx-post="/approvals/messages/approve" hx-target="closest article" hx-swap="outerHTML" class="approval-inline">
+    <input type="hidden" name="action_id" value="{{ m.action_id }}"><input type="hidden" name="payload_hash" value="{{ m.payload_hash }}">
+    <input type="hidden" name="recipient" value="{{ m.recipient }}">
+    <button class="button button-highlight" type="submit">Approve and send</button>
+  </form>
+  {% endif %}
+  <details class="approval-reject"{% if f.kept_reason %} open{% endif %}><summary>Reject</summary>
+    <form method="post" action="/approvals/messages/reject" hx-post="/approvals/messages/reject" hx-target="closest article" hx-swap="outerHTML">
+      <input type="hidden" name="action_id" value="{{ m.action_id }}"><input type="hidden" name="payload_hash" value="{{ m.payload_hash }}">
+      <input type="hidden" name="recipient" value="{{ m.recipient }}">
+      <label for="reason-{{ m.dom }}">Why (optional, only for you)</label>
+      <input id="reason-{{ m.dom }}" name="reason" maxlength="1000" value="{{ f.kept_reason or '' }}">
+      <button class="button button-quiet" type="submit">Reject, never send</button>
+    </form>
+  </details>
+</article>

@@ -1,0 +1,14 @@
+<!doctype html>
+<!-- E0.T2 spike fixture: a same-origin frame with a YAML-quoted contact control in a card. -->
+<html lang="en"><head><meta charset="utf-8"><title>Embedded people</title></head><body>
+<ul aria-label="Frame results">
+  <li aria-label="F1"><button style="width:100%;height:60px" data-kind="contact" aria-label="Invite Kim Lee: CTO to connect">Connect</button></li>
+</ul>
+<button data-kind="benign">Frame details</button>
+<script>
+  document.addEventListener('click', (event) => {
+    const el = event.target.closest('[data-kind]');
+    if (el) fetch('/hit?kind=' + el.dataset.kind + '&name=' + encodeURIComponent(el.getAttribute('aria-label') || el.textContent.trim())).catch(() => {});
+  });
+</script>
+</body></html>

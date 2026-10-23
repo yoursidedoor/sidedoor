@@ -1,0 +1,17 @@
+{
+ "request_id": "request-fixt0022",
+ "binding": "synthetic-binding-request-fixt0022",
+ "max_tool_calls": 40,
+ "payload": {
+  "operation": "investigate",
+  "job": {
+   "job_key": "massive dynamic:a0000012",
+   "employer": "massive dynamic",
+   "requisition": "a0000012",
+   "candidate_email": "alex.example@example.com",
+   "payload": "{\"company\": \"Massive Dynamic\", \"role\": \"Software Engineer, Infrastructure\", \"url\": \"https://jobs.ashbyhq.com/massive-dynamic/a0000012\", \"requisition_id\": \"a0000012\"}"
+  },
+  "attempt_id": null
+ },
+ "context": {}
+}

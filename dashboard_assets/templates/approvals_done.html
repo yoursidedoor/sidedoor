@@ -1,0 +1,5 @@
+{# What replaces a card once it is no longer listed (approved, rejected, answered, done, or changed elsewhere). #}
+<article class="approval-card approval-done" id="{{ dom }}">
+  <p class="note note-{{ f.tone }}" role="status">{{ f.text }}</p>
+  {% if f.kept %}<label class="approvals-kept">Your text (not saved; copy it if you need it)<textarea readonly rows="4">{{ f.kept }}</textarea></label>{% endif %}
+</article>

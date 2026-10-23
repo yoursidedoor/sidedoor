@@ -1,0 +1,170 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "packet_sha256",
+    "answers"
+  ],
+  "properties": {
+    "packet_sha256": {
+      "type": "string",
+      "description": "Echo back packet_sha256 from the supplied packet, character for character."
+    },
+    "answers": {
+      "type": "array",
+      "description": "Exactly one entry per question in the packet's questions array, in any order, with no duplicates and no invented questions.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question_key",
+          "question_semantic",
+          "question_class",
+          "status",
+          "answer_type",
+          "value",
+          "jurisdiction",
+          "assertion",
+          "affirmative_value",
+          "negative_value",
+          "attribution",
+          "derivation",
+          "unknown_reason"
+        ],
+        "properties": {
+          "question_key": {
+            "type": "string",
+            "description": "Copy the packet question's question_key exactly. Never invent one."
+          },
+          "question_semantic": {
+            "type": "string",
+            "description": "Copy the packet question's semantic exactly."
+          },
+          "question_class": {
+            "type": "string",
+            "enum": [
+              "IDENTITY_OR_CONTACT",
+              "LOCATION_PREFERENCE",
+              "WORK_MODE_PREFERENCE",
+              "COMPENSATION_EXPECTATION",
+              "AVAILABILITY",
+              "WORK_AUTHORIZATION_HELD",
+              "SPONSORSHIP_REQUIREMENT",
+              "WORK_LOCATION_DECLARATION",
+              "CANDIDATE_HISTORY_FACT",
+              "ROLE_SPECIFIC_FREE_TEXT",
+              "COMPUTED_EXPERIENCE",
+              "DEMOGRAPHIC_VOLUNTARY",
+              "LEGAL_ASSERTION_OR_AGREEMENT",
+              "OTHER"
+            ],
+            "description": "What the question is asking about. Recorded for review; it does not restrict what you may answer or cite. You answer every class yourself, work authorization and sponsorship included."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ANSWERED",
+              "UNKNOWN",
+              "WITHHELD_BY_POLICY"
+            ],
+            "description": "ANSWERED supplies value; it is the status for every class, work authorization and sponsorship included (you read the owner's jurisdiction map yourself). UNKNOWN only when the packet gives you nothing at all to answer from - not when you could answer by reading and judging what it records. WITHHELD_BY_POLICY is never the right answer and is discarded: the owner has delegated demographic, voluntary self-identification and legal certification, agreement and consent questions to you, including background-check authorization and terms of service, so classify those DEMOGRAPHIC_VOLUNTARY or LEGAL_ASSERTION_OR_AGREEMENT, status ANSWERED, and give the consenting value."
+          },
+          "answer_type": {
+            "type": "string",
+            "enum": [
+              "boolean",
+              "choice",
+              "number",
+              "text"
+            ],
+            "description": "Copy the packet question's answer_type."
+          },
+          "value": {
+            "type": [
+              "boolean",
+              "string",
+              "number",
+              "null"
+            ],
+            "description": "Your answer, for every class. For a Yes/No or single-choice control give a real boolean true or false - your own answer to what the question asks - and Python renders that truth onto the employer's own option wording, so never write Yes or No as a string. For a text or number control give the value itself. There is no verbatim-quotation requirement on this field and a boolean is a valid answer to a biographical question: a resume that records an employment history supports a Yes/No about that history even when no sentence in it contains the question's words."
+          },
+          "jurisdiction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional, recorded and not used: for a work authorization or sponsorship question, the jurisdiction you read it as (an ISO 3166-1 alpha-2 code, EU, or PLACE_OF_RESIDENCE); null otherwise."
+          },
+          "assertion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "HOLDS_AUTHORIZATION_IN_JURISDICTION",
+              "AUTHORIZED_AT_PLACE_OF_RESIDENCE",
+              "REQUIRES_SPONSORSHIP_IN_JURISDICTION",
+              "COUNTRY_OF_WORK",
+              "TOTAL_PROFESSIONAL_EXPERIENCE",
+              "EXPERIENCE_WITH_TECHNOLOGY_IN_RESUME",
+              "EXPERIENCE_WITH_ADJACENT_TECHNOLOGY",
+              null
+            ],
+            "description": "Which proposition the question's wording expresses. Optional; recorded, not used."
+          },
+          "affirmative_value": {
+            "type": [
+              "boolean",
+              "string",
+              "number",
+              "null"
+            ],
+            "description": "Ignored. Python reads the affirmative member off the employer's own choices. Present only for compatibility; there is no field in which the model supplies a literal."
+          },
+          "negative_value": {
+            "type": [
+              "boolean",
+              "string",
+              "number",
+              "null"
+            ],
+            "description": "Ignored, exactly as affirmative_value is."
+          },
+          "attribution": {
+            "type": "array",
+            "description": "Where in the packet the answer comes from. Recorded for review, not checked: cite what you actually relied on.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "pointer",
+                "quote"
+              ],
+              "properties": {
+                "pointer": {
+                  "type": "string",
+                  "description": "A JSON Pointer into the supplied packet, e.g. /policy/location_priority/0."
+                },
+                "quote": {
+                  "type": "string",
+                  "description": "The text you relied on at that pointer. Recorded for audit, not checked."
+                }
+              }
+            }
+          },
+          "derivation": {
+            "type": "string",
+            "description": "One sentence explaining how the cited recorded text answers this question. It explains; it is not evidence."
+          },
+          "unknown_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required when status is UNKNOWN or WITHHELD_BY_POLICY: what is missing, or which policy withholds it."
+          }
+        }
+      }
+    }
+  }
+}

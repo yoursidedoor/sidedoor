@@ -1,0 +1,16 @@
+{# Settings > Connections > Your webmail; swapped on its own (E6.T8 T6). A refused save keeps what was posted (T5). #}
+<div class="connection" id="connection-webmail"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <h3>Your webmail</h3>
+  <form class="webmail" method="post" action="/settings/webmail" hx-post="/settings/webmail" hx-target="#connection-webmail" hx-swap="outerHTML">
+    {% if x.email_locked %}
+    {% if x.webmail %}<p>Your webmail: <strong>{{ x.webmail.label }}</strong> ({{ x.webmail.url }})</p>{% endif %}
+    <p class="muted">{{ x.locked_line }}</p>
+    {% else %}
+    {% set failed = x.webmail_record.status == "failed" and x.webmail_posted %}
+    {% if x.webmail %}<p>Your webmail: <strong>{{ x.webmail.label }}</strong> ({{ x.webmail.url }})</p>{% endif %}
+    {% if x.webmail_record.status == "done" and x.webmail_saved_now %}<p class="note note-success" role="status">{{ x.webmail_record.message }}</p>{% endif %}
+    {% with pick = x.pick("webmail", x.webmail_pick if failed else (x.webmail.label if x.webmail else "")), label = "Your webmail (where that mailbox is read)", error = (x.webmail_record.message if failed else None) %}{% include "pick.html" %}{% endwith %}
+    <button class="button" type="submit">Save webmail</button>
+    {% endif %}
+  </form>
+</div>

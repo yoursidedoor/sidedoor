@@ -1,0 +1,30 @@
+{
+ "observed_at": "2026-09-17T10:01:56+00:00",
+ "method": "synthetic test fixture",
+ "resolved": {
+  "job_key": "synthetic workflow co:unresolved:7883097f83140d93c92493f9",
+  "employer": "synthetic workflow co",
+  "role": "Senior Software Engineer, Platform Foundations",
+  "source": "https://careers.synthetic-workflow.example/jobs/0f3c9a1e-5b7d-4c2a-9e81-2d6f4b7a1c30",
+  "requisition": "0f3c9a1e-5b7d-4c2a-9e81-2d6f4b7a1c30",
+  "identity_basis": "official_canonical_posting_id",
+  "verified": true,
+  "independent_read": true,
+  "observed_at": "2026-09-17T10:01:56+00:00",
+  "findings": "Synthetic: the exact role is present at its official canonical posting URL.",
+  "unknowns": [
+   "Candidate-specific base compensation",
+   "Complete application/referral history",
+   "Required form answers"
+  ],
+  "submission_authorized_by_this_record": false
+ },
+ "unresolved": {
+  "job_key": "synthetic grid co:unresolved:000000000000000000000000",
+  "source": "https://www.synthetic-grid.example/careers",
+  "state": "REQUISITION_UNKNOWN",
+  "findings": "Synthetic: the careers page did not expose the queued posting or a canonical requisition.",
+  "absence_proven": false,
+  "next_action": "Inspect the official careers listing; do not replace the role with a different vacancy."
+ }
+}

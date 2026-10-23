@@ -1,0 +1,241 @@
+{% macro override(overrides, field) %}{% for o in overrides.get(field, []) %}{% with notice = None %}{% include "settings_kept_override.html" %}{% endwith %}{% endfor %}{% endmacro %}
+{# One Settings section (E6.T0 spec 10). `section` comes from settings_page.register's view(). #}
+{% set x = section %}
+<section class="card settings-section" id="{{ x.name }}"{% if oob %} hx-swap-oob="true"{% endif %}>
+{% if x.name == "profile" %}
+  {% set f = x.form %}{% set e = x.errors %}
+  <h2>Profile and search</h2>
+  <p class="why">Your contact details, what you are looking for and the answers Sidedoor gives on application forms. Research uses the new values from its next run.</p>
+  {% if x.saved.status == "failed" and x.saved.message %}<p class="note note-error" role="status">{{ x.saved.message }}</p>
+  {% elif x.saved_now %}<p class="note note-success" role="status">{{ x.saved.message }}</p>{% endif %}
+  <form class="profile" method="post" action="/settings/profile" hx-post="/settings/profile" hx-target="#profile" hx-swap="outerHTML">
+    <fieldset>
+      <legend>Contact details</legend>
+      <div class="field{% if e.given_name %} has-error{% endif %}"><label for="s-given-name">First name</label>
+        <input id="s-given-name" name="given_name" value="{{ f.given_name or '' }}" autocomplete="given-name">
+        {% if e.given_name %}<p class="field-error">{{ e.given_name }}</p>{% endif %}{{ override(x.overrides or {}, "given_name") }}</div>
+      <div class="field{% if e.family_name %} has-error{% endif %}"><label for="s-family-name">Last name</label>
+        <input id="s-family-name" name="family_name" value="{{ f.family_name or '' }}" autocomplete="family-name">
+        {% if e.family_name %}<p class="field-error">{{ e.family_name }}</p>{% endif %}{{ override(x.overrides or {}, "family_name") }}</div>
+      <div class="field{% if e.email %} has-error{% endif %}"><label{% if not x.email_locked %} for="s-email"{% endif %}>Application email</label>
+        {% if x.email_locked %}
+        <p class="locked-value" id="s-email"><strong>{{ x.state.locked_email }}</strong></p>
+        <p class="muted">{{ x.locked_line }}</p>
+        {% else %}
+        <input id="s-email" type="email" name="email" value="{{ f.email or '' }}" autocomplete="email">
+        <p class="muted">Use the email you will sign in to in Sidedoor's browser. Sidedoor reads application receipts there.</p>
+        {% endif %}
+        {% if e.email %}<p class="field-error">{{ e.email }}</p>{% endif %}{{ override(x.overrides or {}, "email") }}</div>
+      <div class="field{% if e.phone %} has-error{% endif %}"><label for="s-phone">Phone</label>
+        <input id="s-phone" type="tel" name="phone" value="{{ f.phone or '' }}" autocomplete="tel">
+        {% if e.phone %}<p class="field-error">{{ e.phone }}</p>{% endif %}{{ override(x.overrides or {}, "phone") }}</div>
+      <div class="field{% if e.linkedin %} has-error{% endif %}"><label for="s-linkedin">LinkedIn profile URL</label>
+        <input id="s-linkedin" type="text" inputmode="url" autocomplete="url" name="linkedin" value="{{ f.linkedin or '' }}" placeholder="https://www.linkedin.com/in/your-name/">
+        {% if e.linkedin %}<p class="field-error">{{ e.linkedin }}</p>{% endif %}{{ override(x.overrides or {}, "linkedin") }}</div>
+      {% with pick = x.pick("current_location", f.current_location), label = "Current location", error = e.current_location %}{% include "pick.html" %}{% endwith %}{{ override(x.overrides or {}, "current_location") }}
+    </fieldset>
+    <fieldset>
+      <legend>What you are looking for</legend>
+      {% with pick = x.pick("roles", f.roles), label = "Target roles", error = e.roles %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("levels", f.levels), label = "Levels", error = e.levels %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("industries", f.industries), label = "Industries", error = e.industries %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("countries", f.countries), label = "Countries", error = e.countries %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("funding_stages", f.funding_stages), label = "Company stage or type", error = e.funding_stages %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("minimum_salary", f.minimum_salary), label = "Minimum base salary (USD a year)", error = e.minimum_salary %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("desired_salary", f.desired_salary), label = "Desired base salary (USD a year, optional)", error = e.desired_salary %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("work_modes", f.work_modes), label = "Work modes", error = e.work_modes %}{% include "pick.html" %}{% endwith %}
+      {% with pick = x.pick("places", f.places), label = "Places", error = e.places %}{% include "pick.html" %}{% endwith %}
+    </fieldset>
+    <fieldset>
+      <legend>Application answers</legend>
+      {% with pick = x.pick("work_authorization", f.work_authorization), label = "Work authorization and sponsorship (one line per country)", error = e.work_authorization %}{% include "pick.html" %}{% endwith %}{{ override(x.overrides or {}, "work_authorization") }}
+      <div class="field{% if e.notice_period %} has-error{% endif %}"><label for="s-notice">Notice period</label>
+        <input id="s-notice" name="notice_period" value="{{ f.notice_period or '' }}" placeholder="2 weeks">
+        {% if e.notice_period %}<p class="field-error">{{ e.notice_period }}</p>{% endif %}{{ override(x.overrides or {}, "notice_period") }}</div>
+      <div class="field{% if e.start_weeks %} has-error{% endif %}"><label for="s-start-weeks">Earliest start: weeks after an application</label>
+        <input id="s-start-weeks" name="start_weeks" inputmode="numeric" value="{{ f.start_weeks or '' }}" placeholder="4">
+        {% if e.start_weeks %}<p class="field-error">{{ e.start_weeks }}</p>{% endif %}{{ override(x.overrides or {}, "start_weeks") }}</div>
+    </fieldset>
+    <fieldset>
+      <legend>Voluntary self-identification</legend>
+      {% for field, label in (("gender", "Gender"), ("race", "Race or ethnicity"), ("veteran", "Veteran status"), ("disability", "Disability")) %}
+      <div class="field{% if e[field] %} has-error{% endif %}"><label for="s-self-{{ field }}">{{ label }}</label>
+        <select id="s-self-{{ field }}" name="{{ field }}">
+          {% for choice in x.self_id[field] %}<option{% if (f[field] or "Prefer not to say") == choice %} selected{% endif %}>{{ choice }}</option>{% endfor %}
+        </select>
+        {% if e[field] %}<p class="field-error">{{ e[field] }}</p>{% endif %}{{ override(x.overrides or {}, field) }}</div>
+      {% endfor %}
+    </fieldset>
+    <button class="button" type="submit">Save profile</button>
+  </form>
+  {% if x.kept_answers %}
+  <div class="settings-kept-answers" id="kept-answers">
+    <h3>Answers you gave on Approvals</h3>
+    <p class="muted">Sidedoor's answering AI uses these on later applications when a question asks the same thing, and decides whether each one fits.</p>
+    {% for key, answer in x.kept_answers %}{% with notice = None, over = x.kept_over or {}, oob = False, status = x.kept_status or {} %}{% include "settings_kept_answer.html" %}{% endwith %}{% endfor %}
+  </div>
+  {% endif %}
+
+{% elif x.name == "resume" %}
+  {% set s = x.saved %}
+  <h2>Résumé</h2>
+  <p class="why">Sidedoor writes outreach from your résumé and uploads its ATS version in applications.</p>
+  {% if x.raw %}
+  <div class="resume-pair">
+    <div class="resume-file">
+      <h3>Your résumé (as uploaded)</h3>
+      <p><strong>{{ x.raw.file_name }}</strong>{% if x.raw.page_count %}, {{ x.raw.page_count }} page{{ "" if x.raw.page_count == 1 else "s" }}{% endif %}</p>
+      <p class="muted">Used for outreach, replies and the sentences below.</p>
+      {% if x.raw_file %}<a class="button button-quiet" href="/settings/resume/file/raw" target="_blank" rel="noopener">Open</a>{% else %}<p class="muted">This file is no longer on this computer. Upload your résumé again below.</p>{% endif %}
+    </div>
+    <div class="resume-file">
+      <h3>ATS version (for applications)</h3>
+      <p><strong>PDF</strong> written from your résumé</p>
+      <p class="muted">The only file Sidedoor uploads in job applications.</p>
+      {% if x.application_file %}<a class="button button-quiet" href="/settings/resume/file/application" target="_blank" rel="noopener">Open</a>{% else %}<p class="muted">Not written yet. Upload your résumé again below.</p>{% endif %}
+    </div>
+  </div>
+  {% else %}
+  <p class="muted">No résumé in use yet. Upload it below.</p>
+  {% endif %}
+
+  {% if x.locked %}
+  <p class="muted">Reading a résumé uses the AI: it needs your OpenRouter key first (<a href="#connections">Connections</a>).</p>
+  {% else %}
+  {% if x.notice %}<p class="note note-warning" role="status">{{ x.notice }}</p>{% endif %}
+  {% if s.status == "reading" %}
+  <p class="note note-info" role="status">{{ s.message }}</p>
+  <div hx-get="/settings/resume/status" hx-trigger="every 3s" hx-target="#resume" hx-swap="outerHTML"><span class="muted">Still reading {{ s.raw.file_name if s.raw else "your résumé" }}...</span></div>
+  {% else %}
+  {% if s.status == "failed" %}
+  <p class="note note-error" role="status">{{ s.message }}{% if x.raw %} Your previous résumé is still in use.{% endif %}</p>
+  {% if s.raw and s.code != "ALL_CLAIMS_REMOVED" %}<form method="post" action="/settings/resume/retry" hx-post="/settings/resume/retry" hx-target="#resume" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Try again</button></form>{% endif %}
+  {% elif s.status == "done" and s.message %}
+  <p class="note note-success" role="status">{{ s.message }}</p>
+  {% endif %}
+  <form method="post" action="/settings/resume" enctype="multipart/form-data" hx-post="/settings/resume" hx-encoding="multipart/form-data" hx-target="#resume" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="s-resume-file">{% if s.code == "ALL_CLAIMS_REMOVED" %}Upload a different résumé{% elif x.raw %}Replace your résumé{% else %}Your résumé{% endif %} (PDF or Word .docx)</label>
+    <input id="s-resume-file" type="file" name="resume" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required>
+    <button class="button{% if s.status == 'failed' and s.raw and s.code != 'ALL_CLAIMS_REMOVED' %} button-quiet{% endif %}" type="submit">Upload</button>
+    <span class="htmx-indicator muted">Uploading...</span>
+  </form>
+  {% endif %}
+  {% endif %}
+
+  {# The extracted claims and their outreach wording are not shown (owner, 2026-10-22: "The user truly
+     doesnt need to see it and it just causes clutter"). Only the no-claims problem is surfaced, with
+     its way forward. #}
+  {% if not x.claims and x.raw and x.removed %}
+  <p class="note note-warning">Sidedoor found nothing in this résumé it can use for outreach. Upload a different résumé above.</p>
+  {% elif not x.claims and x.raw %}
+  <p class="note note-warning">Sidedoor couldn't find anything in your résumé to use for outreach.{% if s.raw and s.status != "reading" and s.code != "ALL_CLAIMS_REMOVED" %} Read it again to try once more.{% endif %}</p>
+  {% if s.raw and s.status != "reading" and not x.locked and s.code != "ALL_CLAIMS_REMOVED" %}<form method="post" action="/settings/resume/retry" hx-post="/settings/resume/retry" hx-target="#resume" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Read my résumé again</button></form>{% endif %}
+  {% endif %}
+
+{% elif x.name == "mode" %}
+  <h2>Mode</h2>
+  <form class="mode" method="post" action="/settings/mode" hx-post="/settings/mode" hx-trigger="change" hx-target="#mode" hx-swap="outerHTML">
+    <label class="choice"><input type="radio" name="mode" value="automatic"{% if x.state.mode != "review" %} checked{% endif %}>
+      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, replies and follow-ups on its own, within its safety rules. Every message is shown on the Sent page.</span></label>
+    <label class="choice"><input type="radio" name="mode" value="review"{% if x.state.mode == "review" %} checked{% endif %}>
+      <span><strong>Review.</strong> Sidedoor drafts them and waits for you to approve each one on the Approvals page. Research and applications still run on their own.</span></label>
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
+  {% if x.mode_error %}<p class="field-error" role="alert">{{ x.mode_error }}</p>{% endif %}
+  {% if x.saved_mode %}<p class="note note-success" role="status">Saved: {{ "Review" if x.state.mode == "review" else "Automatic" }}.</p>{% endif %}
+  {% if x.mode_notice %}<p class="note note-success" role="status">{{ x.mode_notice }}</p>{% endif %}
+  {% if x.switch_question %}{% set n = x.switch_question|length %}
+  <div class="note note-warning mode-question" role="alert">
+    <p><strong>You have {{ n }} message{{ "s" if n != 1 }} waiting. Send them, or keep them for review?</strong></p>
+    <p class="muted">New messages go out automatically either way. Kept messages stay on <a href="/approvals#messages">Approvals</a> until you approve or reject each.</p>
+    <form method="post" action="/settings/mode/release" hx-post="/settings/mode/release" hx-target="#mode" hx-swap="outerHTML" class="actions">
+      {% for item in x.switch_question %}<input type="hidden" name="action_id" value="{{ item.action_id }}"><input type="hidden" name="payload_hash" value="{{ item.payload_hash }}">{% endfor %}
+      <button class="button button-highlight" type="submit">Send them</button>
+    </form>
+    <form method="post" action="/settings/mode/keep" hx-post="/settings/mode/keep" hx-target="#mode" hx-swap="outerHTML" class="actions">
+      <button class="button" type="submit">Keep for review</button>
+    </form>
+    <form method="post" action="/settings/mode/stay" hx-post="/settings/mode/stay" hx-target="#mode" hx-swap="outerHTML" class="actions">
+      <button class="button button-quiet" type="submit">Stay in Review</button>
+    </form>
+  </div>
+  {% endif %}
+  <p class="muted">{{ x.not_recalled }}</p>
+
+{% elif x.name == "connections" %}
+  <h2>Connections</h2>
+  {% include "settings_linkedin.html" %}
+
+  {% include "settings_openrouter.html" %}
+  {% include "settings_codex.html" %}
+  {% include "settings_browser.html" %}
+  {% include "settings_webmail.html" %}
+
+{% elif x.name == "license" %}
+  <h2>License</h2>
+  {% set l = x.license %}
+  <p>Status: <span class="chip chip-{{ x.chip.tone }}">{{ x.chip.label }}</span></p>
+  {% if x.has_key %}
+  <p class="note note-{{ x.view.tone }}" role="status">{{ x.view.text }}</p>
+  {% for action in x.view.actions %}
+  {% if action.post %}
+  {% with check_next="/settings", check_label=action.label %}{% include "license_check.html" %}{% endwith %}
+  {% elif action.external %}
+  <p><a class="button button-highlight" id="renew-license" href="{{ action.href }}" target="_blank" rel="noopener noreferrer">{{ action.label }}</a></p>
+  <span hx-get="/setup/guide/license" hx-trigger="click from:#renew-license" hx-target="#guide-panel"></span>
+  {% endif %}
+  {% endfor %}
+  {% if x.view.support %}<p class="muted">{{ x.view.support }}</p>{% endif %}
+  <dl class="facts">
+    <dt>Key</dt><dd><code>{{ x.key }}</code></dd>
+    {% if x.times.trial_end %}<dt>Trial ends</dt><dd>{{ x.times.trial_end }}</dd>{% endif %}
+    {% if x.times.valid_until %}<dt>Good until</dt><dd>{{ x.times.valid_until }}</dd>{% endif %}
+    {% if x.times.last_check %}<dt>Last successful check</dt><dd>{{ x.times.last_check }}</dd>{% endif %}
+    {% if x.times.last_attempt and x.view.last_attempt != x.view.last_check %}<dt>Last try</dt><dd>{{ x.times.last_attempt }}</dd>{% endif %}
+    <dt>This computer</dt><dd>{% if x.active %}Activated{% else %}Not active{% endif %}</dd>
+  </dl>
+  {% endif %}
+  {% if l.message %}<p class="note note-{{ 'success' if l.status == 'done' else 'error' }}" role="status">{{ l.message }}</p>{% endif %}
+  {% if x.has_key %}
+  <form method="post" action="/settings/license/activate" hx-post="/settings/license/activate" hx-target="#license" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button{% if x.active %} button-quiet{% endif %}" type="submit">Activate</button> <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  {% endif %}
+  <form method="post" action="/settings/license/change" hx-post="/settings/license/change" hx-target="#license" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="s-license-key">{% if x.chip.label == "Expired" %}Bought a new key? Paste it here{% elif x.has_key %}Your key (change it to use a new one){% else %}License key{% endif %}</label>
+    <span class="secret"><input id="s-license-key" type="password" name="key" value="{{ x.key_box }}" placeholder="SD-..." autocomplete="off" spellcheck="false" required><button class="reveal" type="button" data-reveal="s-license-key" aria-controls="s-license-key" aria-label="Show key" aria-pressed="false"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></span>
+    <button class="button" type="submit">{% if x.has_key %}Change key{% else %}Activate{% endif %}</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  {% if not x.has_key %}
+  <p>No key yet? <a class="button button-highlight" id="s-buy-license" href="{{ x.website }}" target="_blank" rel="noopener noreferrer">Buy a license</a></p>
+  <span hx-get="/setup/guide/license" hx-trigger="click from:#s-buy-license" hx-target="#guide-panel"></span>
+  {% endif %}
+  {% if x.portal %}
+  <p><a class="button" id="s-manage-subscription" href="{{ x.portal }}" target="_blank" rel="noopener noreferrer">Manage subscription</a></p>
+  <p class="muted">{{ x.portal_line }}</p>
+  {% else %}
+  <p class="muted">{{ x.no_portal }} {{ x.support }}.</p>
+  {% endif %}
+  <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
+
+{% elif x.name == "login" %}
+  <h2>Start at login</h2>
+  <p class="why">Sidedoor runs in the background after you log in, and your computer restarts it if it crashes. Quitting Sidedoor yourself never restarts it.</p>
+  {% if x.login.message %}<p class="note note-{{ {'done': 'success', 'failed': 'error'}.get(x.login.status, 'muted') }}" role="status">{{ x.login.message }}</p>{% endif %}
+  {% if x.login.supported %}
+  <form method="post" action="/settings/login" hx-post="/settings/login" hx-trigger="change" hx-target="#login" hx-swap="outerHTML">
+    <label class="choice"><input type="checkbox" name="enabled"{% if x.login.on %} checked{% endif %}> <span>Start Sidedoor when I log in</span></label>
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
+  {% if x.login.retry %}
+  <form method="post" action="/settings/login" hx-post="/settings/login" hx-target="#login" hx-swap="outerHTML" hx-disabled-elt="find button">
+    {% if x.login.retry == "on" %}<input type="hidden" name="enabled" value="on">{% endif %}
+    <button class="button" type="submit">{{ x.login.retry_label or "Try again" }}</button>
+  </form>
+  {% endif %}
+  {% endif %}
+{% endif %}
+</section>

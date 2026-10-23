@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% macro failure(f, v) %}
+<li class="card fail-item{% if f.you %} fail-you{% endif %}">
+  <p class="fail-text">{{ f.text }} <span class="fail-todo{% if f.you %} fail-todo-you{% endif %}">{{ f.todo }}</span></p>
+  <p class="muted fail-meta">
+    {% if f.at %}{{ v.when(f.at) }}{% endif %}{% if f.count > 1 %}{% if f.at %} · {% endif %}{{ f.count }} times in the last {{ v.recent_days }} days{% endif %}
+  </p>
+  {% if f.fix %}<a class="button button-quiet fail-fix" href="{{ f.fix.href }}">{{ f.fix.label }}</a>{% endif %}
+  {% if f.detail %}<details class="fail-detail"><summary>Technical details</summary><code>{{ f.detail }}</code></details>{% endif %}
+  {% if f.log %}<details class="fail-detail" open><summary>The end of its error log</summary><pre class="log-lines">{% for line in f.log %}{{ line }}
+{% endfor %}</pre></details>{% endif %}
+</li>
+{% endmacro %}
+{% block content %}
+<h1 class="title">Failures and logs</h1>
+{% set v = view %}
+{% if v.unreadable %}<p class="note note-warning fail-unreadable" role="status">Sidedoor couldn't read its records.</p>{% endif %}
+
+<section id="needs-you" class="fail-section" aria-labelledby="needs-you-title">
+  <h2 id="needs-you-title">Needs you</h2>
+  {% if v.needs_you %}
+  <ul class="fail-list">{% for f in v.needs_you %}{{ failure(f, v) }}{% endfor %}</ul>
+  {% else %}
+  <p class="muted">Nothing needs you right now.</p>
+  {% endif %}
+</section>
+
+{% if v.nothing %}
+<div id="scheduler" class="card empty fail-nothing">
+  <p>Nothing has failed. When something goes wrong, it shows here with what Sidedoor does next.</p>
+</div>
+{% else %}
+{% for s in v.sections %}
+<section id="{{ s.key }}" class="fail-section" aria-labelledby="{{ s.key }}-title">
+  <h2 id="{{ s.key }}-title">{{ s.title }}</h2>
+  {% if s.unavailable %}<p class="muted">Some of these records are not available right now.</p>{% endif %}
+  {% if s.entries %}
+  <ul class="fail-list">{% for f in s.entries %}{{ failure(f, v) }}{% endfor %}</ul>
+  {% if s.more %}<p class="muted">And {{ s.more }} more.{% if s.key == "applications" %} <a href="/applications">See Applications</a>{% endif %}</p>{% endif %}
+  {% elif not s.unavailable %}
+  <p class="muted">Nothing failed here.</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% if not (v.sections | selectattr("key", "equalto", "scheduler") | list) %}
+<section id="scheduler" class="fail-section" aria-labelledby="scheduler-title">
+  <h2 id="scheduler-title">Sidedoor itself</h2>
+  <p class="muted">Nothing failed here.</p>
+</section>
+{% endif %}
+{% endif %}
+
+<section id="checks" class="fail-section" aria-labelledby="checks-title">
+  <h2 id="checks-title">Checks</h2>
+  <p class="muted">Check every part Sidedoor needs. Nothing is sent anywhere.</p>
+  <p><a class="button button-quiet" href="/failures/doctor">Run checks</a></p>
+</section>
+
+<section id="logs" class="fail-section" aria-labelledby="logs-title">
+  {% set l = logs %}
+  <h2 id="logs-title">Logs</h2>
+  <p class="muted">The last {{ l.tail_bytes // 1024 }} KB of each log file, newest at the bottom.</p>
+  <form class="log-filters" method="get" action="/failures#logs">
+    <label>Part
+      <select name="component">
+        <option value="all"{% if l.component == "all" %} selected{% endif %}>All</option>
+        {% for key, label in l.components %}<option value="{{ key }}"{% if l.component == key %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Kind
+      <select name="level">
+        <option value="all"{% if l.level == "all" %} selected{% endif %}>All</option>
+        {% for key, label in l.levels %}<option value="{{ key }}"{% if l.level == key %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="log-search">Search
+      <input type="search" name="q" value="{{ l.query }}" maxlength="200">
+    </label>
+    <button class="button" type="submit">Show</button>
+  </form>
+  <p><a class="button button-quiet" href="/failures/logs.txt" download>Download for a support issue</a></p>
+  {% for s in l.streams %}
+  <details class="card log-stream" id="{{ s.id }}"{% if s.lines and (l.query or s.name.endswith("stderr.log")) %} open{% endif %}>
+    <summary>{{ s.label }} <span class="muted">({% if s.state == "missing" %}no log yet{% elif s.state == "unreadable" %}can't be read{% elif s.lines %}{{ s.lines | length }} line{{ "s" if s.lines | length != 1 }}{% elif l.query %}no matches{% else %}empty{% endif %})</span></summary>
+    {% if s.lines %}<pre class="log-lines">{% for line in s.lines %}{{ line }}
+{% endfor %}</pre>{% endif %}
+  </details>
+  {% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,9 @@
+{# Settings > Connections > Codex; swapped on its own (E6.T8 T6). #}
+<div class="connection" id="connection-codex"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <h3>Codex and ChatGPT</h3>
+  {% if x.codex.message %}<p class="note note-{{ 'success' if x.codex_done else 'error' }}" role="status">{% if x.codex.status == "done" and not x.codex_done %}Codex is not installed.{% else %}{{ x.say(x.codex.message) }}{% endif %}</p>{% endif %}
+  {% if x.codex_done and x.codex_path %}<p class="muted">Found at {{ x.codex_path }}</p>{% endif %}
+  <form method="post" action="/settings/codex" hx-post="/settings/codex" hx-target="#connection-codex" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Check</button> <span class="htmx-indicator muted">Checking...</span></form>
+  <a class="guide-link" href="/setup/guide/codex" hx-get="/setup/guide/codex" hx-target="#guide-panel">Show me how</a>
+</div>

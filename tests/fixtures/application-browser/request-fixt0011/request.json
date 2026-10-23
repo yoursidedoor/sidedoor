@@ -1,0 +1,17 @@
+{
+ "request_id": "request-fixt0011",
+ "binding": "synthetic-binding-request-fixt0011",
+ "max_tool_calls": 40,
+ "payload": {
+  "operation": "investigate",
+  "job": {
+   "job_key": "umbrella:9000000001",
+   "employer": "umbrella",
+   "requisition": "9000000001",
+   "candidate_email": "alex.example@example.com",
+   "payload": "{\"company\": \"Umbrella\", \"role\": \"Staff Software Engineer \\u2014 Developer Platform\", \"url\": \"https://job-boards.greenhouse.io/umbrella/jobs/9000000001\", \"requisition_id\": \"9000000001\"}"
+  },
+  "attempt_id": null
+ },
+ "context": {}
+}

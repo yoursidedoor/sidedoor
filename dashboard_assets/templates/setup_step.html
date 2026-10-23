@@ -1,0 +1,229 @@
+{# One Setup step (E6.T0 spec 3.2). `step` comes from dashboard.create_app.step_view. #}
+{% set s = step.saved %}
+<li class="card step step-{{ step.tone }}" id="step-{{ step.number }}"{% if step.oob %} hx-swap-oob="true"{% endif %}>
+  <div class="step-head">
+    <span class="step-number">{{ step.number }}</span>
+    <h2>{{ step.title }}</h2>
+    <span class="chip chip-{{ step.tone }}">{{ step.label }}</span>
+  </div>
+  {% if step.locked %}
+  {% if step.number == 2 %}<p class="muted">Needs OpenRouter first (<a href="#step-1">step 1</a>): reading your résumé uses the AI.</p>
+  {% else %}<p class="muted">Needs <a href="#step-{{ step.locked }}">step {{ step.locked }}</a> first.</p>{% endif %}
+  {% else %}
+  {% if step.message %}<p class="note note-{{ step.tone }}" role="status">{{ step.message }}</p>{% endif %}
+
+  {% if step.number == 1 %}
+  <p class="why">Sidedoor's AI writes and checks your messages and reads your résumé through OpenRouter. The key is kept on this computer.</p>
+  {% if step.saved_key %}
+  <p>A key is saved, ending in <code>{{ step.saved_key }}</code>, but it hasn't been tested yet.</p>
+  <form method="post" action="/setup/openrouter/test" hx-post="/setup/openrouter/test" hx-target="#step-1" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button button-highlight" type="submit">Test saved key</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  {% endif %}
+  <form method="post" action="/setup/openrouter" hx-post="/setup/openrouter" hx-target="#step-1" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="openrouter-key">OpenRouter key</label>
+    <input id="openrouter-key" type="password" name="key" autocomplete="off" spellcheck="false" required>
+    <button class="button" type="submit">Save and test</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  <a class="guide-link" href="/setup/guide/openrouter" hx-get="/setup/guide/openrouter" hx-target="#guide-panel">Show me how</a>
+
+  {% elif step.number == 2 %}
+  <p class="why">Sidedoor uses your résumé to choose jobs, write outreach and fill applications.</p>
+  {% if s.notice %}<p class="note note-warning" role="status">{{ s.notice }}</p>{% endif %}
+  {% if s.raw %}<p>Your file: <strong>{{ s.raw.file_name }}</strong> ({{ s.raw.kind }}{% if s.pages %}, {{ s.pages }} page{{ "" if s.pages == 1 else "s" }}{% endif %}).</p>{% endif %}
+  {% if step.status == "reading" %}
+  <div hx-get="/setup/resume/status" hx-trigger="every 3s" hx-target="#step-2" hx-swap="outerHTML"><span class="muted">Still reading...</span></div>
+  {% else %}
+  {# Every sentence removed: reading the same file again fails the same way, so only a new upload is offered. #}
+  {% set retry = step.status == "failed" and s.raw and s.code != "ALL_CLAIMS_REMOVED" %}
+  {% if retry %}
+  <form method="post" action="/setup/resume/retry" hx-post="/setup/resume/retry" hx-target="#step-2" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Try again</button></form>
+  {% endif %}
+  <form method="post" action="/setup/resume" enctype="multipart/form-data" hx-post="/setup/resume" hx-encoding="multipart/form-data" hx-target="#step-2" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="resume-file">{% if s.raw %}Upload a different résumé{% else %}Your résumé{% endif %} (PDF or Word .docx)</label>
+    <input id="resume-file" type="file" name="resume" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required>
+    <button class="button{% if retry %} button-quiet{% endif %}" type="submit">Upload</button>
+    <span class="htmx-indicator muted">Uploading...</span>
+  </form>
+  {% endif %}
+
+  {% elif step.number == 3 %}
+  <p class="why">Your contact details, what you are looking for and the answers Sidedoor gives on application forms.</p>
+  {% set f = step.form %}{% set e = step.errors %}
+  <form class="profile" method="post" action="/setup/profile" hx-post="/setup/profile" hx-target="#step-3" hx-swap="outerHTML">
+    <fieldset>
+      <legend>Contact details</legend>
+      <div class="field{% if e.given_name %} has-error{% endif %}"><label for="given-name">First name</label>
+        <input id="given-name" name="given_name" value="{{ f.given_name or '' }}" autocomplete="given-name">
+        {% if e.given_name %}<p class="field-error">{{ e.given_name }}</p>{% endif %}</div>
+      <div class="field{% if e.family_name %} has-error{% endif %}"><label for="family-name">Last name</label>
+        <input id="family-name" name="family_name" value="{{ f.family_name or '' }}" autocomplete="family-name">
+        {% if e.family_name %}<p class="field-error">{{ e.family_name }}</p>{% endif %}</div>
+      <div class="field{% if e.email %} has-error{% endif %}"><label for="email">Application email</label>
+        {% if step.email_locked %}
+        <input id="email" value="{{ step.state.locked_email }}" readonly>
+        <p class="muted">{{ step.locked_line }}</p>
+        {% else %}
+        <input id="email" type="email" name="email" value="{{ f.email or '' }}" autocomplete="email">
+        <p class="muted">Use the email you will sign in to in Sidedoor's browser. Sidedoor reads application receipts there.</p>
+        {% endif %}
+        {% if e.email %}<p class="field-error">{{ e.email }}</p>{% endif %}</div>
+      <div class="field{% if e.phone %} has-error{% endif %}"><label for="phone">Phone</label>
+        <input id="phone" type="tel" name="phone" value="{{ f.phone or '' }}" autocomplete="tel">
+        {% if e.phone %}<p class="field-error">{{ e.phone }}</p>{% endif %}</div>
+      <div class="field{% if e.linkedin %} has-error{% endif %}"><label for="linkedin">LinkedIn profile URL</label>
+        <input id="linkedin" type="text" inputmode="url" autocomplete="url" name="linkedin" value="{{ f.linkedin or '' }}" placeholder="https://www.linkedin.com/in/your-name/">
+        {% if e.linkedin %}<p class="field-error">{{ e.linkedin }}</p>{% endif %}</div>
+      {% with pick = step.pick("current_location", f.current_location), label = "Current location", error = e.current_location %}{% include "pick.html" %}{% endwith %}
+    </fieldset>
+    <fieldset>
+      <legend>What you are looking for</legend>
+      {% with pick = step.pick("roles", f.roles), label = "Target roles", error = e.roles %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("levels", f.levels), label = "Levels", error = e.levels %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("industries", f.industries), label = "Industries", error = e.industries %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("countries", f.countries), label = "Countries", error = e.countries %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("funding_stages", f.funding_stages), label = "Company stage or type", error = e.funding_stages %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("minimum_salary", f.minimum_salary), label = "Minimum base salary (USD a year)", error = e.minimum_salary %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("desired_salary", f.desired_salary), label = "Desired base salary (USD a year, optional)", error = e.desired_salary %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("work_modes", f.work_modes), label = "Work modes", error = e.work_modes %}{% include "pick.html" %}{% endwith %}
+      {% with pick = step.pick("places", f.places), label = "Places", error = e.places %}{% include "pick.html" %}{% endwith %}
+    </fieldset>
+    <fieldset>
+      <legend>Application answers</legend>
+      {% with pick = step.pick("work_authorization", f.work_authorization), label = "Work authorization and sponsorship (one line per country)", error = e.work_authorization %}{% include "pick.html" %}{% endwith %}
+      <div class="field{% if e.notice_period %} has-error{% endif %}"><label for="notice">Notice period</label>
+        <input id="notice" name="notice_period" value="{{ f.notice_period or '' }}" placeholder="2 weeks">
+        {% if e.notice_period %}<p class="field-error">{{ e.notice_period }}</p>{% endif %}</div>
+      <div class="field{% if e.start_weeks %} has-error{% endif %}"><label for="start-weeks">Earliest start: weeks after an application</label>
+        <input id="start-weeks" name="start_weeks" inputmode="numeric" value="{{ f.start_weeks or '' }}" placeholder="4">
+        {% if e.start_weeks %}<p class="field-error">{{ e.start_weeks }}</p>{% endif %}</div>
+    </fieldset>
+    <fieldset>
+      <legend>Voluntary self-identification</legend>
+      {% for field, label in (("gender", "Gender"), ("race", "Race or ethnicity"), ("veteran", "Veteran status"), ("disability", "Disability")) %}
+      <div class="field{% if e[field] %} has-error{% endif %}"><label for="self-{{ field }}">{{ label }}</label>
+        <select id="self-{{ field }}" name="{{ field }}">
+          {% for choice in step.self_id[field] %}<option{% if (f[field] or "Prefer not to say") == choice %} selected{% endif %}>{{ choice }}</option>{% endfor %}
+        </select>
+        {% if e[field] %}<p class="field-error">{{ e[field] }}</p>{% endif %}</div>
+      {% endfor %}
+    </fieldset>
+    <button class="button" type="submit">Save profile</button>
+  </form>
+
+  {% elif step.number == 4 %}
+  <form class="mode" method="post" action="/setup/mode" hx-post="/setup/mode" hx-trigger="change" hx-target="#step-4" hx-swap="outerHTML">
+    <label class="choice"><input type="radio" name="mode" value="automatic"{% if step.state.mode != "review" %} checked{% endif %}>
+      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, replies and follow-ups on its own, within its safety rules. Every message is shown on the Sent page.</span></label>
+    <label class="choice"><input type="radio" name="mode" value="review"{% if step.state.mode == "review" %} checked{% endif %}>
+      <span><strong>Review.</strong> Sidedoor drafts them and waits for you to approve each one on the Approvals page. Research and applications still run on their own.</span></label>
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
+  {% if step.mode_error %}<p class="field-error" role="alert">{{ step.mode_error }}</p>{% endif %}
+  <p class="muted">You can change this any time in Settings.</p>
+
+  {% elif step.number == 5 %}
+  <p class="why">Your license turns on Sidedoor's LinkedIn service. The 14-day trial starts when you buy.</p>
+  <form method="post" action="/setup/license" hx-post="/setup/license" hx-target="#step-5" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="license-key">License key</label>
+    <input id="license-key" name="key" placeholder="SD-..." autocomplete="off" spellcheck="false" required>
+    <button class="button" type="submit">Activate</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  <p>No key yet? <a class="button button-highlight" id="buy-license" href="{{ step.website }}" target="_blank" rel="noopener noreferrer">Buy a license</a></p>
+  <span hx-get="/setup/guide/license" hx-trigger="click from:#buy-license" hx-target="#guide-panel"></span>
+  <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
+
+  {% elif step.number == 6 %}
+  <p class="why">Sidedoor's research and browser work run through Codex, signed in with your ChatGPT plan.</p>
+  {% if step.state.codex_path and step.status == "done" %}<p class="muted">Found at {{ step.state.codex_path }}</p>{% endif %}
+  <form method="post" action="/setup/codex" hx-post="/setup/codex" hx-target="#step-6" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Check</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  <a class="guide-link" href="/setup/guide/codex" hx-get="/setup/guide/codex" hx-target="#guide-panel">Show me how</a>
+
+  {% elif step.number == 7 %}
+  <p class="why">Sidedoor sends your LinkedIn invitations and messages through Unipile, linked to your license.</p>
+  {% if not s.offer %}
+  <div hx-get="/setup/linkedin/status" hx-trigger="load" hx-target="#step-7" hx-swap="outerHTML"><span class="muted">Checking LinkedIn...</span></div>
+  {% elif s.offer == "waiting" %}
+  {% if step.link_url %}<p><a class="button" href="{{ step.link_url }}" target="_blank" rel="noopener noreferrer">Open the LinkedIn sign-in page</a></p>{% endif %}
+  {% set again = "reconnect" if s.kind == "reconnect" else "connect" %}
+  <form method="post" action="/setup/linkedin/{{ again }}" hx-post="/setup/linkedin/{{ again }}" hx-target="#step-7" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button{% if step.link_url %} button-quiet{% endif %}" type="submit">{% if step.link_url %}Get a new link{% else %}{{ "Reconnect" if again == "reconnect" else "Connect" }} again{% endif %}</button></form>
+  <div id="linkedin-wait" hx-get="/setup/linkedin/status?poll=1" hx-trigger="every 5s" hx-target="#linkedin-wait" hx-swap="innerHTML"></div>
+  {% elif s.offer == "connect" %}
+  <form method="post" action="/setup/linkedin/connect" hx-post="/setup/linkedin/connect" hx-target="#step-7" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Connect LinkedIn</button></form>
+  {% elif s.offer == "reconnect" and step.status != "done" %}
+  <form method="post" action="/setup/linkedin/reconnect" hx-post="/setup/linkedin/reconnect" hx-target="#step-7" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Reconnect LinkedIn</button></form>
+  {% elif s.offer == "retry" %}
+  {# Re-read once when the Setup page loads (never from a re-rendered step, so it cannot loop). #}
+  <button class="button" type="button" hx-get="/setup/linkedin/status" hx-target="#step-7" hx-swap="outerHTML"{% if step.page_load %} hx-trigger="click, load"{% endif %}>Check again</button>
+  {% endif %}
+  <a class="guide-link" href="/setup/guide/linkedin" hx-get="/setup/guide/linkedin" hx-target="#guide-panel">Show me how</a>
+
+  {% elif step.number == 8 %}
+  <p class="why">Sidedoor uses its own Chrome window, separate from your everyday Chrome, to apply for jobs and read application receipts.</p>
+  {% if not step.chrome %}
+  <p class="note note-error">Sidedoor needs Google Chrome. Install it, then click Check again.</p>
+  <form method="post" action="/setup/browser/check" hx-post="/setup/browser/check" hx-target="#step-8" hx-swap="outerHTML"><button class="button" type="submit">Check again</button></form>
+  <a class="guide-link" href="/setup/guide/chrome" hx-get="/setup/guide/chrome" hx-target="#guide-panel">Show me how</a>
+  {% else %}
+  <p>In Sidedoor's browser, sign in to:</p>
+  <ul>
+    <li>LinkedIn</li>
+    <li>The mailbox of your application email{% if step.application_email %}: <strong>{{ step.application_email }}</strong>{% else %} (enter it in step 3){% endif %}</li>
+  </ul>
+  <div class="actions">
+    <form method="post" action="/setup/browser/open" hx-post="/setup/browser/open" hx-target="#step-8" hx-swap="outerHTML"><button class="button" type="submit">Open Sidedoor's browser</button></form>
+    {% if step.browser_open %}<form method="post" action="/setup/browser/done" hx-post="/setup/browser/done" hx-target="#step-8" hx-swap="outerHTML"><button class="button" type="submit">I'm done</button></form>{% endif %}
+  </div>
+  <form class="webmail" method="post" action="/setup/webmail" hx-post="/setup/webmail" hx-target="#step-8" hx-swap="outerHTML">
+    {% if step.email_locked %}
+    <p>Your webmail: <strong>{{ step.webmail.label }}</strong> ({{ step.webmail.url }})</p>
+    <p class="muted">{{ step.locked_line }}</p>
+    {% else %}
+    {% if step.webmail %}<p>Your webmail: <strong>{{ step.webmail.label }}</strong> ({{ step.webmail.url }})</p>{% endif %}
+    {% with pick = step.pick("webmail", step.webmail.label if step.webmail else ""), label = "Your webmail (where that mailbox is read)", error = (step.webmail_record.message if step.webmail_record.status == "failed" else None) %}{% include "pick.html" %}{% endwith %}
+    <button class="button" type="submit">Save webmail</button>
+    {% endif %}
+  </form>
+  <a class="guide-link" href="/setup/guide/browser" hx-get="/setup/guide/browser" hx-target="#guide-panel">Show me how</a>
+  {% endif %}
+
+  {% elif step.number == 9 %}
+  <p class="why">Sidedoor checks that its browser is signed in to your application email, where it reads application receipts.</p>
+  <form method="post" action="/setup/email" hx-post="/setup/email" hx-target="#step-9" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Run check</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  {% if s.reason == "unreadable" %}<p class="muted">Use "Open Sidedoor's browser" and "I'm done" in <a href="#step-8">step 8</a>, then Run check.</p>{% endif %}
+
+  {% elif step.number == 10 %}
+  {% if step.login_supported %}
+  <form method="post" action="/setup/login" hx-post="/setup/login" hx-trigger="change" hx-target="#step-10" hx-swap="outerHTML">
+    <label class="choice"><input type="checkbox" name="enabled"{% if step.login_on %} checked{% endif %}> <span>Start Sidedoor when I log in</span></label>
+    <noscript><button class="button button-quiet" type="submit">Save</button></noscript>
+  </form>
+  {% if step.login_retry %}
+  <form method="post" action="/setup/login" hx-post="/setup/login" hx-target="#step-10" hx-swap="outerHTML" hx-disabled-elt="find button">
+    {% if step.login_retry == "on" %}<input type="hidden" name="enabled" value="on">{% endif %}
+    <button class="button" type="submit">{{ step.login_retry_label or "Try again" }}</button>
+  </form>
+  {% endif %}
+  {% endif %}
+  <p class="muted">Optional. Leaving it off never blocks Start. You can change it later in <a href="/settings#login">Settings</a>.</p>
+
+  {% elif step.number == 11 %}
+  <form method="post" action="/setup/start" hx-post="/setup/start" hx-target="#step-11" hx-swap="outerHTML">
+    <button class="button button-highlight" type="submit">Start Sidedoor</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</li>

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="title">Settings</h1>
+{% if setup_file_broken %}
+<div class="card" id="setup-file">
+  <p class="note note-error" role="alert">Sidedoor couldn't read its setup file, so it can't save setup changes.</p>
+  {% include "setup_file_reset.html" %}
+</div>
+{% endif %}
+<nav class="settings-nav" aria-label="Settings sections">
+  <a href="#profile">Profile and search</a> <a href="#resume">Résumé</a> <a href="#mode">Mode</a>
+  <a href="#connections">Connections</a> <a href="#license">License</a> <a href="#login">Start at login</a>
+</nav>
+<div class="setup-layout">
+  <div class="settings-sections">
+    {% for section in sections %}{% include "settings_section.html" %}{% endfor %}
+  </div>
+  <aside class="guide-panel card" id="guide-panel" aria-live="polite">
+    <p class="muted">Connections with another website have a "Show me how" guide. It opens here.</p>
+  </aside>
+</div>
+<script src="/static/settings.js" defer></script>
+{% endblock %}

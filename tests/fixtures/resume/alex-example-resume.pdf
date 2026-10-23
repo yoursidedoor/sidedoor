@@ -1,0 +1,146 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R 10 0 R 12 0 R] /Count 5 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1662 >>
+stream
+BT
+/F1 9 Tf
+1 0 0 1 208.8 756 Tm (ALEX EXAMPLE) Tj
+1 0 0 1 57.6 744 Tm (Staff Platform Engineer | Data Pipelines & Developer Tooling) Tj
+1 0 0 1 79.2 732 Tm (Springfield, Illinois, USA | alex.example@example.com | +1-555-010-0100) Tj
+1 0 0 1 84.6 720 Tm (LinkedIn: https://www.linkedin.com/in/alex-example/) Tj
+1 0 0 1 36.0 672 Tm (PROFESSIONAL SUMMARY) Tj
+1 0 0 1 36.0 660 Tm (Platform engineer with 9+ years of experience in freight and warehouse software at) Tj
+1 0 0 1 36.0 648 Tm (Tailspin Freight and Fabrikam Logistics. Enjoys turning slow, fragile batch jobs into) Tj
+1 0 0 1 36.0 636 Tm (observable streaming services, and writing the runbooks that let a small team sleep) Tj
+1 0 0 1 36.0 624 Tm (through the night.) Tj
+1 0 0 1 36.0 600 Tm (CORE SKILLS) Tj
+1 0 0 1 36.0 588 Tm (Languages: Go, Java, TypeScript, SQL) Tj
+1 0 0 1 36.0 576 Tm (Infrastructure: Kubernetes, Terraform, Helm, Linux) Tj
+1 0 0 1 36.0 564 Tm (Data: Postgres, ClickHouse, RabbitMQ) Tj
+1 0 0 1 36.0 552 Tm (Practices: Incident Review • Contract Testing • Technical Writing) Tj
+1 0 0 1 36.0 528 Tm (Fabrikam Logistics Platform) Tj
+1 0 0 1 36.0 504 Tm (Staff Platform Engineer | March 2021 – August 2025) Tj
+1 0 0 1 36.0 480 Tm (Warehouse Data Platform) Tj
+1 0 0 1 52.2 456 Tm (•   Rebuilt the nightly inventory reconciliation job as a streaming service in Go,) Tj
+1 0 0 1 73.8 444 Tm (so a pallet scanned on the dock showed up on store dashboards within seconds.) Tj
+1 0 0 1 52.2 432 Tm (•   Introduced a schema registry and contract tests for forty producer teams, so a) Tj
+1 0 0 1 73.8 420 Tm (breaking field change failed in code review instead of at three in the morning.) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 771 >>
+stream
+BT
+/F1 9 Tf
+1 0 0 1 52.2 756 Tm (•   Designed a sharded job scheduler with lease-based ownership that let route planning) Tj
+1 0 0 1 73.8 744 Tm (workers fail over between data centers without dropping queued work.) Tj
+1 0 0 1 52.2 732 Tm (•   Wrote the on-call handbook and a weekly failure review that halved repeat pages) Tj
+1 0 0 1 73.8 720 Tm (over two quarters.) Tj
+1 0 0 1 36.0 696 Tm (Developer Tooling) Tj
+1 0 0 1 52.2 672 Tm (•   Built an internal command-line tool that creates a new service with logging,) Tj
+1 0 0 1 73.8 660 Tm (metrics and deployment manifests already wired in.) Tj
+1 0 0 1 52.2 648 Tm (•   Moved build caching to a shared remote store, bringing typical pull request) Tj
+1 0 0 1 73.8 636 Tm (checks from twenty minutes to under six.) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 820 >>
+stream
+BT
+/F1 9 Tf
+1 0 0 1 36.0 756 Tm (LANTERNWORKS) Tj
+1 0 0 1 36.0 744 Tm (Founding Engineer and Technical Advisor | May 2023 – Present) Tj
+1 0 0 1 36.0 720 Tm (Product Engineering) Tj
+1 0 0 1 52.2 708 Tm (•   Started a volunteer scheduling app for community gardens with two friends.) Tj
+1 0 0 1 52.2 696 Tm (•   Wrote a TypeScript and Postgres backend that matches volunteers to garden shifts,) Tj
+1 0 0 1 73.8 684 Tm (sends reminders, and keeps a history of every plot) Tj
+1 0 0 1 36.0 660 Tm (Operations) Tj
+1 0 0 1 52.2 636 Tm (•   Set up error tracking, nightly backups and a simple status page on a single) Tj
+1 0 0 1 73.8 624 Tm (low-cost virtual machine.) Tj
+1 0 0 1 52.2 612 Tm (•   Interviewed garden coordinators every month and turned their requests into a) Tj
+1 0 0 1 73.8 600 Tm (short public roadmap.) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 732 >>
+stream
+BT
+/F1 9 Tf
+1 0 0 1 36.0 756 Tm (TAILSPIN) Tj
+1 0 0 1 36.0 744 Tm (Backend Engineer II | September 2016 – February 2021) Tj
+1 0 0 1 36.0 720 Tm (Freight Booking Services) Tj
+1 0 0 1 52.2 708 Tm (•   Maintained the Java booking service that priced and confirmed truckload orders) Tj
+1 0 0 1 73.8 696 Tm (for regional carriers.) Tj
+1 0 0 1 52.2 684 Tm (•   Wrote Kubernetes operators that restarted stuck pricing workers and posted each) Tj
+1 0 0 1 73.8 672 Tm (restart to the team channel.) Tj
+1 0 0 1 36.0 648 Tm (Database Migration) Tj
+1 0 0 1 52.2 636 Tm (•   Moved the booking database from a single primary to a replicated cluster in) Tj
+1 0 0 1 73.8 624 Tm (stages, keeping carriers able to book throughout each cutover) Tj
+ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 13 0 R >>
+endobj
+13 0 obj
+<< /Length 547 >>
+stream
+BT
+/F1 9 Tf
+1 0 0 1 36.0 756 Tm (Testing & Release) Tj
+1 0 0 1 52.2 744 Tm (•   Added contract tests and staged rollouts to the release process for the booking) Tj
+1 0 0 1 73.8 732 Tm (and invoicing services) Tj
+1 0 0 1 36.0 684 Tm (EDUCATION) Tj
+1 0 0 1 36.0 672 Tm (Bachelor of Science in Information Systems) Tj
+1 0 0 1 36.0 660 Tm (Example State University) Tj
+1 0 0 1 36.0 612 Tm (CERTIFICATIONS) Tj
+1 0 0 1 36.0 600 Tm (HashiCorp Certified: Terraform Associate) Tj
+1 0 0 1 36.0 588 Tm (Linux Foundation Certified System Administrator) Tj
+ET
+endstream
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000141 00000 n 
+0000000236 00000 n 
+0000000362 00000 n 
+0000002075 00000 n 
+0000002201 00000 n 
+0000003022 00000 n 
+0000003148 00000 n 
+0000004018 00000 n 
+0000004146 00000 n 
+0000004929 00000 n 
+0000005057 00000 n 
+trailer
+<< /Size 14 /Root 1 0 R >>
+startxref
+5655
+%%EOF

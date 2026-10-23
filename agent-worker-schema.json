@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "citations", "unresolved_reason", "next_action"],
+  "properties": {
+    "status": {"type": "string", "enum": ["RESOLVED", "UNRESOLVED"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "citations": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "claim"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1, "maxLength": 2048},
+          "claim": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    },
+    "unresolved_reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 500},
+    "next_action": {"type": ["string", "null"], "minLength": 1, "maxLength": 500}
+  }
+}

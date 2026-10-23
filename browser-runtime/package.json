@@ -1,0 +1,12 @@
+{
+  "name": "sidedoor-browser-runtime",
+  "private": true,
+  "description": "E7.T1 option A: @playwright/mcp behind `sidedoor browser-guard` (browser_runtime.py). `npm ci` here with Node 24.22.1 at build time; nothing is fetched at run time.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "24.22.1"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.83"
+  }
+}
