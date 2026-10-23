@@ -81,3 +81,26 @@ def use(testcase, policy):
     patcher.start()
     testcase.addCleanup(patcher.stop)
     return home
+
+
+# Windows (VM pass, 2026-10-23): a file that is still open cannot be deleted there. A temporary
+# folder's removal first collects garbage (a sqlite3 connection only reachable through a reference
+# cycle, e.g. a caught exception's traceback, is closed only then) and retries for up to 2 seconds
+# (an antivirus or indexer briefly holding a new file); a file a test really leaves open still fails.
+if os.name == "nt":
+    import gc
+    import time
+
+    _real_rmtree = tempfile.TemporaryDirectory._rmtree.__func__
+
+    def _rmtree_windows(cls, name, ignore_errors=False, repeated=False):
+        for attempt in range(20):
+            try:
+                return _real_rmtree(cls, name, ignore_errors=ignore_errors, repeated=repeated)
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                gc.collect()
+                time.sleep(0.1)
+
+    tempfile.TemporaryDirectory._rmtree = classmethod(_rmtree_windows)

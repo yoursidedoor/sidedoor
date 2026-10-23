@@ -18,6 +18,7 @@ from unittest.mock import patch
 import outreach_agent
 import outreach_promotion as promotion
 import reply_worker
+import fake_executables
 from tests import test_outreach_composition as composition
 
 KEY = "sk-or-v1-plantedsecretvalue0123456789"
@@ -32,9 +33,9 @@ class ExecutorFailureRecordTests(unittest.TestCase):
         self.directory = Path(tempfile.mkdtemp())
         (self.directory / "stderr.txt").write_text(STDERR)
         (self.directory / "key").write_text(KEY + "\n")
-        codex = self.directory / "fake-codex"
-        codex.write_text("#!/bin/sh\ncat >/dev/null\ncat '%s' >&2\nexit 1\n" % (self.directory / "stderr.txt"))
-        codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+        codex = fake_executables.python(self.directory / "fake-codex", (
+            "import sys\nsys.stdin.read()\nsys.stderr.buffer.write(open(%r, 'rb').read())\nsys.exit(1)\n"
+            % str(self.directory / "stderr.txt")))
         self.config = {"codex": str(codex), "model": "stub",
                        "text_model": {"model": "z-ai/glm-5.3", "key_file": str(self.directory / "key")}}
 

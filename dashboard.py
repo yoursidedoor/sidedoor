@@ -404,6 +404,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     import failures_page
     failures_page.register(app, templates, layout, home=home, root=root, config=config, token=secret,
                            database=paths.database(root), connect_read_only=lambda: read_connection(root))
+    import report_problem  # Report a problem (owner pick F3 a): POST /report-problem, behind `guard`
+    report_problem.register(app, home=home, root=root, config=config, token=secret)
     import doctor  # Failures and logs > Run checks (E4.T4): the `sidedoor doctor` report
     doctor.register(app, templates, layout, home=home, root=root, config=config)
 
@@ -906,9 +908,34 @@ def _wildcard_taken(port):
     return False
 
 
+def _wildcard_taken_windows(port):
+    """Windows: our exclusive 127.0.0.1 bind succeeds beside another program's 0.0.0.0 or [::]
+    listener (seen on the Windows VM, 2026-10-23), and once ours is bound every probe fails. So
+    before our bind, an exclusive wildcard probe (never listening) tells: it is refused only when
+    another program holds the port on some address."""
+    for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+        try:
+            probe = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            continue
+        try:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            probe.bind((address, port))
+        except OSError as error:
+            # Winsock's codes: WSAEADDRINUSE (10048, errno.EADDRINUSE there) and WSAEACCES (10013, a
+            # port held exclusively), which is not errno.EACCES (WR2).
+            if error.errno in (errno.EADDRINUSE, errno.EACCES, getattr(errno, "WSAEACCES", None)):
+                return True
+        finally:
+            probe.close()
+    return False
+
+
 def bind(port=PORT, platform=None):
     """The dashboard's listening socket on 127.0.0.1:`port`; raises OSError when it is taken."""
     platform = platform or sys.platform
+    if platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE") and _wildcard_taken_windows(port):
+        raise OSError(errno.EADDRINUSE, "Port %d is held by another program" % port)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: never share the port with another program

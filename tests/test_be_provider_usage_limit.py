@@ -20,6 +20,7 @@ import desktop_adapter
 import provider_limits
 import reply_worker
 import workflow_tasks
+import fake_executables
 import test_part_c_read_gating as part_c
 
 # The shape of a provider usage-limit failure as codex reports it (executor.log stderr and
@@ -37,11 +38,13 @@ def fake_codex(directory):
     """An executable that behaves like the refusing CLI: consume stdin, print, exit 1."""
     (directory / "stderr.txt").write_text(STDERR)
     (directory / "events.txt").write_text(EVENTS)
-    path = directory / "fake-codex"
-    path.write_text("#!/bin/sh\ncat >/dev/null\nfor a in \"$@\"; do [ \"$a\" = --json ] && { cat '%s'; exit 1; }; done\n"
-                    "cat '%s' >&2\nexit 1\n" % (directory / "events.txt", directory / "stderr.txt"))
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-    return str(path)
+    source = ("import sys\nsys.stdin.read()\n"
+              "if '--json' in sys.argv[1:]:\n"
+              "    sys.stdout.buffer.write(open(%r, 'rb').read())\n"
+              "else:\n"
+              "    sys.stderr.buffer.write(open(%r, 'rb').read())\n"
+              "sys.exit(1)\n") % (str(directory / "events.txt"), str(directory / "stderr.txt"))
+    return str(fake_executables.python(directory / "fake-codex", source))
 
 
 class ProviderUsageLimitTests(unittest.TestCase):

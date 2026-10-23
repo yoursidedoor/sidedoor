@@ -141,7 +141,10 @@ def real_runtime():
     """config["browser_driver"] for a real, verified Sidedoor browser runtime on this machine (headless,
     isolated), or None. Looked for, never fetched: $SIDEDOOR_BROWSER_RUNTIME as the test run started,
     then ~/sidedoor-browser-runtime. It must pass browser_runtime.verify (Node NODE_VERSION,
-    @playwright/mcp PLAYWRIGHT_MCP_VERSION), and Google Chrome must be installed."""
+    @playwright/mcp PLAYWRIGHT_MCP_VERSION), and Google Chrome must be installed. Always None when
+    $SIDEDOOR_NO_REAL_BROWSER is set (CI, E2.T2: no test launches Chrome there)."""
+    if os.environ.get("SIDEDOOR_NO_REAL_BROWSER"):
+        return None
     import browser_runtime
     import profile_home
     import setup_steps

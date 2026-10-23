@@ -401,7 +401,8 @@ def server_argv(directory, executable=None):
         if executable is not None:  # a frozen build has no reply_tools.py for another program to run
             raise ValueError("REPLY_TOOLS_EXECUTABLE_FROZEN: a frozen build starts its own binary")
         return [scheduler_loop.program(), "reply-tools"] + tail
-    return [executable or sys.executable, str(Path(__file__).resolve())] + tail
+    import portable
+    return [executable or sys.executable, *portable.UTF8_FLAGS, str(Path(__file__).resolve())] + tail
 
 
 def options(directory, executable=None):

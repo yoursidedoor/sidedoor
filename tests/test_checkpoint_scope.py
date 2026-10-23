@@ -2,6 +2,7 @@ import copy
 import datetime as dt
 import json
 from pathlib import Path
+import os
 import unittest
 
 import manual_checkpoint_scope as manual
@@ -13,8 +14,9 @@ import user_profile
 
 class CheckpointScopeTests(unittest.TestCase):
     def test_manual_scenarios(self):
-        for mode in ("fresh_recovery", "shared_owner", "application_only", "new_scope", "deadline",
-                     "legacy_audit"):
+        # legacy_audit makes a file unreadable with chmod(0), which Windows ignores (read-only only).
+        for mode in ("fresh_recovery", "shared_owner", "application_only", "new_scope", "deadline") + (
+                () if os.name == "nt" else ("legacy_audit",)):
             with self.subTest(mode=mode):
                 self.assertEqual("PASS", manual.run_scenario(mode)["state"])
 
@@ -99,6 +101,7 @@ class CheckpointScopeTests(unittest.TestCase):
                          parallel_research.research_policy(policy)["answers"])
         self.assertNotIn("answers", parallel_research.research_policy(policy)["unclassified"])
 
+    @unittest.skipIf(os.name == "nt", "chmod(0) does not make a file unreadable on Windows")
     def test_unreadable_legacy_audit_file_does_not_abandon_a_fresh_industry(self):
         fixture, prior, preserved, unused_decisions = manual.setup()
         blocked = next(path for path in prior if parallel_research._label("FinTech and Finance") in path.name)

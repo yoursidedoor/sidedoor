@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidedoor"
-version = "0.0.3"
+version = "0.0.4"
 description = "Referral-first job-search agent for engineers that runs on your machine."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -35,6 +35,9 @@ dependencies = [
     "pyobjc-core==12.2.2; sys_platform == 'darwin'",
     "pyobjc-framework-Cocoa==12.2.2; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
+    # Windows has no system time-zone database: every zoneinfo call needs tzdata there (E2.T2 report,
+    # VM pass 2026-10-23). Same pin as .github/requirements-ci.txt.
+    "tzdata==2025.2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -148,6 +151,7 @@ py-modules = [
     "reply_resume",
     "reply_tools",
     "reply_worker",
+    "report_problem",
     "reporting",
     "research_recovery",
     "research_sources",
@@ -179,3 +183,12 @@ py-modules = [
 "share/sidedoor/dashboard_assets/templates/guides" = ["dashboard_assets/templates/guides/*.html"]
 "share/sidedoor/assets/brand" = ["assets/brand/*"]
 "share/sidedoor/assets/fonts" = ["assets/fonts/*"]
+
+# CI coverage (E2.T2): product modules only. Baseline 84.95% on macOS (2026-10-22, real-browser
+# tests skipped as in CI); the floor sits just below it.
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "spikes/*", "relay/*", "tools/*", ".claude/*", ".github/*"]
+
+[tool.coverage.report]
+fail_under = 84

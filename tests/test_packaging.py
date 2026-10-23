@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PackagingTest(unittest.TestCase):
     def setUp(self):
-        self.project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        self.project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     def test_sidedoor_command_is_the_orchestrator_cli(self):
         module, function = self.project["project"]["scripts"]["sidedoor"].split(":")
@@ -155,7 +155,7 @@ class ResourcesTest(unittest.TestCase):
                          ROOT / "dashboard_assets/templates/setup.html")
 
     def test_pyproject_data_files_install_every_bundled_file(self):
-        table = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]["data-files"]
+        table = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["data-files"]
         installed = set()
         for target, patterns in table.items():
             prefix = Path(target).relative_to("share/sidedoor") if target != "share/sidedoor" else Path()
@@ -221,7 +221,7 @@ class ResourcesTest(unittest.TestCase):
                 self.assertEqual(resources.path("reply-schema.json"), ROOT / "reply-schema.json")
             self.assertIsNone(resources.OVERRIDE)
         for module in product_modules():
-            text = module.read_text()
+            text = module.read_text(encoding="utf-8")
             self.assertFalse("resources.OVERRIDE" in text or "resources.overridden(" in text, module.name)
 
     def test_no_product_module_names_a_bundled_file_outside_the_loader(self):
@@ -237,13 +237,13 @@ class ResourcesTest(unittest.TestCase):
         self.assertFalse(literal_reads("new.py", '"""Reads reply-prompt.md."""\nt = resources.read_text("reply-prompt.md")'))
         modules = product_modules()
         self.assertGreater(len(modules), 50)
-        offenders = {path.name: literal_reads(path.name, path.read_text()) for path in modules}
+        offenders = {path.name: literal_reads(path.name, path.read_text(encoding="utf-8")) for path in modules}
         self.assertEqual({name: hits for name, hits in offenders.items() if hits}, {})
-        users = [path.name for path in modules if "resources." in path.read_text()]
+        users = [path.name for path in modules if "resources." in path.read_text(encoding="utf-8")]
         self.assertGreaterEqual(len(users), 18)
         # Every exemption is still needed (a stale one would hide a later read).
         for (name, literal) in LITERAL_EXEMPTIONS:
-            self.assertIn(repr(literal).strip("'"), (ROOT / name).read_text(), (name, literal))
+            self.assertIn(repr(literal).strip("'"), (ROOT / name).read_text(encoding="utf-8"), (name, literal))
 
 if __name__ == "__main__":
     unittest.main()

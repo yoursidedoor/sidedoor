@@ -109,7 +109,22 @@ def shown_path(path):
         return str(path)
 
 
-def check_home(home):
+def outside_user_folder(home, platform=None, user_home=None):
+    """WR5: on Windows, True when the Sidedoor home is not inside the user's own folder (e.g. C:\\Sidedoor
+    through SIDEDOOR_HOME). Its private files (keys, the dashboard token) are then only as private as
+    that folder's permissions; the user folder admits only the user (VM pass, 2026-10-23)."""
+    if (platform or sys.platform) != "win32":
+        return False
+    import ntpath
+    home_text = ntpath.normcase(ntpath.abspath(str(home)))
+    mine = ntpath.normcase(ntpath.abspath(str(user_home or Path.home())))
+    try:
+        return ntpath.commonpath([home_text, mine]) != mine
+    except ValueError:   # another drive
+        return True
+
+
+def check_home(home, platform=None, user_home=None):
     probe = Path(home) / (".doctor-" + uuid.uuid4().hex)
     try:
         setup_steps._write_private(probe, "ok\n")
@@ -128,6 +143,10 @@ def check_home(home):
     if moved["state"] in ("WAITING", paths.MOVING, "PENDING"):
         return _line(WARN, "Home folder", text, "Quit Sidedoor and open it again once no job is running: it "
                      "finishes the move before it starts any work.")
+    if outside_user_folder(home, platform, user_home):
+        return _line(WARN, "Home folder", "Sidedoor's folder %s is outside your user folder, so other people who use "
+                     "this computer may be able to read your keys and other private files in it." % shown_path(home),
+                     "Use a folder inside your user folder, or make sure only you can open %s." % shown_path(home))
     return _line(OK, "Home folder", "Sidedoor can write to %s." % shown_path(home))
 
 

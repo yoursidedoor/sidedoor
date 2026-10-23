@@ -49,6 +49,7 @@ from zoneinfo import ZoneInfo
 
 import scheduler_control
 import paths
+import portable
 
 
 ROOT = Path(__file__).resolve().parent
@@ -92,7 +93,7 @@ def job_command(name):
         raise ValueError("Unknown job: %r" % (name,))
     if frozen():
         return [program(), "job", name]
-    return [sys.executable, str(ENTRY), "job", name]
+    return [sys.executable, *portable.UTF8_FLAGS, str(ENTRY), "job", name]
 
 
 # Each child's output goes to the file launchd used for that job, so log_retention (STREAMS,

@@ -127,52 +127,52 @@ class IndustryStateFollowsCompanyResolution(unittest.TestCase):
     """D-2 through the real coordinator: the industry state comes from company resolution."""
 
     def test_partial_worker_with_one_resolved_company_completes_its_industry(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for folder in ("state", "reports", "logs"):
-                (root / folder).mkdir()
-            shutil.copyfile(ROOT / "discovery-prompt.md", root / "discovery-prompt.md")
-            policy = user_profile.load()
-            policy["industries"] = ["AI"]
-            profile_home.use(self, policy)
-            database = orchestrator.connect(root)
-            self.addCleanup(database.close)
-            stored = []
+        directory = self.enterContext(tempfile.TemporaryDirectory())  # a cleanup: runs after the connections the test closes (Windows)
+        root = Path(directory)
+        for folder in ("state", "reports", "logs"):
+            (root / folder).mkdir()
+        shutil.copyfile(ROOT / "discovery-prompt.md", root / "discovery-prompt.md")
+        policy = user_profile.load()
+        policy["industries"] = ["AI"]
+        profile_home.use(self, policy)
+        database = orchestrator.connect(root)
+        self.addCleanup(database.close)
+        stored = []
 
-            def research_inputs(root, config, database, pipeline, observation, output, *, companies, industry, discovery):
-                research_workflow.seed_history(database, pipeline, history_complete=True)
-                plan_id = "relaxed-plan:scope:" + config["_research_scope_id"]
-                plan = research_workflow.plan_research(database, plan_id, companies, now=now(), limit=60)
-                return plan, plan_id, "PROMPT", ("research-schema.json", output)
+        def research_inputs(root, config, database, pipeline, observation, output, *, companies, industry, discovery):
+            research_workflow.seed_history(database, pipeline, history_complete=True)
+            plan_id = "relaxed-plan:scope:" + config["_research_scope_id"]
+            plan = research_workflow.plan_research(database, plan_id, companies, now=now(), limit=60)
+            return plan, plan_id, "PROMPT", ("research-schema.json", output)
 
-            def worker(root, command, prompt, log, timeout):
-                schema, output = command
-                if schema == "discovery-schema.json":
-                    payload = {"discovery_status": "COMPLETE", "summary": "SYNTHETIC", "blockers": [],
-                               "companies": [{"company": name, "industry": "AI", "source": "https://www.nasa.gov/",
-                                              "observed_at": now(), "excerpt": name + " builds AI tools.",
-                                              "excerpt_names_company": True}
-                                             for name in ("Alpha", "Beta")]}
-                else:
-                    payload = result([role("Alpha")], [unresolved("Beta")])
-                Path(output).write_text(json.dumps(payload))
+        def worker(root, command, prompt, log, timeout):
+            schema, output = command
+            if schema == "discovery-schema.json":
+                payload = {"discovery_status": "COMPLETE", "summary": "SYNTHETIC", "blockers": [],
+                           "companies": [{"company": name, "industry": "AI", "source": "https://www.nasa.gov/",
+                                          "observed_at": now(), "excerpt": name + " builds AI tools.",
+                                          "excerpt_names_company": True}
+                                         for name in ("Alpha", "Beta")]}
+            else:
+                payload = result([role("Alpha")], [unresolved("Beta")])
+            Path(output).write_text(json.dumps(payload))
 
-            runtime = SimpleNamespace(
-                RESEARCH_STOP=threading.Event(), utcnow=now,
-                write_json=lambda path, payload: Path(path).write_text(json.dumps(payload)),
-                research_command=lambda root, config, output, schema: (schema, output),
-                research_inputs=research_inputs, run_research_worker=worker,
-                store_research=lambda database, pipeline, processed: stored.extend(processed["opportunities"]) or [])
-            with patch("socket.socket.connect", side_effect=AssertionError("Network prohibited")):
-                final = parallel_research.run(root, {"research_timeout_seconds": 30, "research_company_limit": 2},
-                                              database, {"companies": []}, {}, "relaxed-run",
-                                              runtime=runtime, deadline=time.monotonic() + 30)
-            industry = final["industries"][0]
-            self.assertEqual((final["state"], industry["state"], industry["worker_status"]),
-                             ("COMPLETE", "COMPLETE", "PARTIAL"))
-            self.assertEqual([entry["company"] for entry in industry["unresolved_companies"]], ["beta"])
-            self.assertEqual(final["unresolved_companies"], {"AI": industry["unresolved_companies"]})
-            self.assertEqual([item["company"] for item in stored], ["Alpha"])
+        runtime = SimpleNamespace(
+            RESEARCH_STOP=threading.Event(), utcnow=now,
+            write_json=lambda path, payload: Path(path).write_text(json.dumps(payload)),
+            research_command=lambda root, config, output, schema: (schema, output),
+            research_inputs=research_inputs, run_research_worker=worker,
+            store_research=lambda database, pipeline, processed: stored.extend(processed["opportunities"]) or [])
+        with patch("socket.socket.connect", side_effect=AssertionError("Network prohibited")):
+            final = parallel_research.run(root, {"research_timeout_seconds": 30, "research_company_limit": 2},
+                                          database, {"companies": []}, {}, "relaxed-run",
+                                          runtime=runtime, deadline=time.monotonic() + 30)
+        industry = final["industries"][0]
+        self.assertEqual((final["state"], industry["state"], industry["worker_status"]),
+                         ("COMPLETE", "COMPLETE", "PARTIAL"))
+        self.assertEqual([entry["company"] for entry in industry["unresolved_companies"]], ["beta"])
+        self.assertEqual(final["unresolved_companies"], {"AI": industry["unresolved_companies"]})
+        self.assertEqual([item["company"] for item in stored], ["Alpha"])
 
 
 if __name__ == "__main__":

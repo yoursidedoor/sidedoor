@@ -6,6 +6,7 @@ the real runner fails the test.
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
+import portable
 import contextlib
 import importlib.util
 import io
@@ -162,8 +163,9 @@ class MacTest(Base):
             self.assertIn("<Command>%s</Command><Arguments>supervise --start" % sys.executable, login_item.task_xml(user=""))
         with mock.patch.object(sys, "frozen", False, create=True):
             self.assertEqual(login_item.plist()["ProgramArguments"][6:],
-                             [sys.executable, str(scheduler_loop.ENTRY), "serve"] + tail)
+                             [sys.executable, *portable.UTF8_FLAGS, str(scheduler_loop.ENTRY), "serve"] + tail)
 
+    @unittest.skipIf(os.name == "nt", "macOS plist PATH (':'-joined): a Windows path's drive colon splits it")
     def test_L1_the_entry_has_a_path_with_homebrew_and_the_saved_codex_and_its_node(self):
         bin_dir = self.user_home / "nvm" / "bin"
         bin_dir.mkdir(parents=True)
@@ -230,6 +232,7 @@ class LogsTest(Base):
         self.assertIn("sidedoor.stderr.log", log_retention.STREAMS)
         self.assertTrue(log_retention.ARCHIVE_NAME.fullmatch("sidedoor.stdout.log.retained." + "1" * 20 + "." + "a" * 32))
 
+    @unittest.skipIf(os.name == "nt", "POSIX only: on Windows `supervise` rotates the login logs (login_item.sweep_own_logs)")
     def test_the_login_started_process_sweeps_its_own_logs_at_start(self):
         with mock.patch.object(log_retention, "retain", return_value={"state": "COMPLETE"}) as retain:
             self.assertIsNone(login_item.sweep_own_logs(self.root))
@@ -263,9 +266,10 @@ class QuitTest(Base):
                 mock.patch.object(dashboard.uvicorn.Server, "run", side_effect=RuntimeError("boom")), \
                 mock.patch.object(sys, "argv", ["sidedoor", "serve", "--no-browser"]), \
                 mock.patch.object(dashboard, "make_tray", return_value=None), \
+                mock.patch.object(orchestrator.portable, "ensure_utf8_mode", return_value=None), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as stopped:
-                orchestrator.cli()
+                orchestrator.cli()   # in this process (on Windows the UTF-8 re-run is patched out)
         self.assertEqual(stopped.exception.code, 1)
         self.assertIsNone(scheduler_loop.current())
 
@@ -515,6 +519,7 @@ class EntryTest(Base):
         self.assertIn(str(moved.parent), plistlib.loads(self.plist.read_bytes())["EnvironmentVariables"]["PATH"])
         self.assertFalse(login_item.status(home=self.home, codex_path=str(moved))["stale"])
 
+    @unittest.skipIf(os.name == "nt", "macOS plist PATH (':'-joined): a Windows path's drive colon splits it")
     def test_item5_codex_found_again_rewrites_the_entry(self):
         setup_steps.start_at_login(True, self.home)
         codex = self.user_home / "bin2" / "codex"
@@ -565,6 +570,7 @@ class EntryTest(Base):
         self.assertIn("port 47823", login_item.take_notice(self.home))
         self.assertIsNone(login_item.take_notice(self.home), "shown once")
 
+    @unittest.skipIf(os.name == "nt", "POSIX only: on Windows `supervise` rotates the login logs (login_item.sweep_own_logs)")
     def test_item12_the_login_process_rotates_its_log_every_hour(self):
         swept, stop = [], threading.Event()
 
@@ -582,6 +588,7 @@ class EntryTest(Base):
         self.assertIs(thread.call_args.kwargs["target"], rotate)
 
 
+@unittest.skipIf(os.name == "nt", "the macOS launcher runs under /bin/sh")
 class LauncherTest(unittest.TestCase):
     """Item 5: the macOS launcher (/bin/sh, run for real on temporary paths; nothing is registered)."""
 
@@ -625,10 +632,11 @@ class LauncherTest(unittest.TestCase):
 
 
 class RunnerDecodingTest(unittest.TestCase):
-    """R2: the real runner (here on /bin/sh printf, never schtasks) replaces bytes that are not UTF-8."""
+    """R2: the real runner (here on a Python child, never schtasks) replaces bytes that are not UTF-8."""
 
     def test_undecodable_output_is_replaced_not_raised(self):
-        code, output = login_item._run(["/bin/sh", "-c", "printf 'M\\374ller <Enabled>true</Enabled>'"])
+        code, output = login_item._run([sys.executable, "-c",
+                                        "import sys; sys.stdout.buffer.write(b'M\\x81ller <Enabled>true</Enabled>')"])
         self.assertEqual(code, 0)
         self.assertIn("\ufffd", output, "undecodable bytes are replaced, not raised")
 
@@ -685,6 +693,7 @@ class RealProcessQuitTest(unittest.TestCase):
     """A real `serve` (temporary home, a free port, real uvicorn; no OS registration) stopped with
     SIGTERM exits 0, as a deliberate Quit must for the OS not to restart it."""
 
+    @unittest.skipIf(os.name == "nt", "Windows has no SIGTERM delivery to another process (send_signal is TerminateProcess)")
     def test_sigterm_exits_0(self):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))

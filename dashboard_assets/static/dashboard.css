@@ -345,3 +345,7 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 .doctor-fail { border-left: 4px solid #DC2626; }
 .doctor-warn { border-left: 4px solid #F59E0B; }
 .doctor-ok { border-left: 4px solid #16A34A; }
+
+/* Report a problem (report_problem.html) */
+.report-problem { margin-top: 24px; }
+.report-problem-text { width: 100%; box-sizing: border-box; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }

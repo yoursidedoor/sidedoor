@@ -119,36 +119,36 @@ class TwoWritersTests(unittest.TestCase):
         """A deferred SAVEPOINT that read before the other writer committed could not write at
         all ("database is locked" at once, no busy wait); seen in the offline
         two-process rehearsal. orchestrator.connect's outermost SAVEPOINT takes the lock first."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "state").mkdir()
-            first, second = orchestrator.connect(root), orchestrator.connect(root)
-            self.addCleanup(first.close)
-            self.addCleanup(second.close)
-            with first:
-                first.execute("CREATE TABLE sample(value)")
-            first.execute("SAVEPOINT outer_change")
-            first.execute("SELECT COUNT(*) FROM sample").fetchone()
-            first.execute("SAVEPOINT inner_change")
-            first.execute("INSERT INTO sample VALUES ('first')")
-            first.execute("RELEASE inner_change")
-            self.assertTrue(first.in_transaction, "an inner release must not commit")
-            first.execute("RELEASE SAVEPOINT outer_change")
-            self.assertFalse(first.in_transaction, "the outermost release commits, as before")
-            first.execute("SAVEPOINT later_change")
-            first.execute("SELECT COUNT(*) FROM sample").fetchone()
-            # The other process writes meanwhile. Before, it committed and `first` then could not
-            # write at all; now `first` already holds the write lock and the other one waits.
-            other = sqlite3.connect(root / "state/orchestrator.sqlite3", timeout=0.2)
-            self.addCleanup(other.close)
-            with self.assertRaises(sqlite3.OperationalError):
-                with other:
-                    other.execute("INSERT INTO sample VALUES ('other')")
-            first.execute("INSERT INTO sample VALUES ('third')")
-            first.execute("RELEASE later_change")
-            with second:
-                second.execute("INSERT INTO sample VALUES ('second')")
-            self.assertEqual(second.execute("SELECT COUNT(*) FROM sample").fetchone()[0], 3)
+        directory = self.enterContext(tempfile.TemporaryDirectory())  # a cleanup: runs after the connections the test closes (Windows)
+        root = Path(directory)
+        (root / "state").mkdir()
+        first, second = orchestrator.connect(root), orchestrator.connect(root)
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        with first:
+            first.execute("CREATE TABLE sample(value)")
+        first.execute("SAVEPOINT outer_change")
+        first.execute("SELECT COUNT(*) FROM sample").fetchone()
+        first.execute("SAVEPOINT inner_change")
+        first.execute("INSERT INTO sample VALUES ('first')")
+        first.execute("RELEASE inner_change")
+        self.assertTrue(first.in_transaction, "an inner release must not commit")
+        first.execute("RELEASE SAVEPOINT outer_change")
+        self.assertFalse(first.in_transaction, "the outermost release commits, as before")
+        first.execute("SAVEPOINT later_change")
+        first.execute("SELECT COUNT(*) FROM sample").fetchone()
+        # The other process writes meanwhile. Before, it committed and `first` then could not
+        # write at all; now `first` already holds the write lock and the other one waits.
+        other = sqlite3.connect(root / "state/orchestrator.sqlite3", timeout=0.2)
+        self.addCleanup(other.close)
+        with self.assertRaises(sqlite3.OperationalError):
+            with other:
+                other.execute("INSERT INTO sample VALUES ('other')")
+        first.execute("INSERT INTO sample VALUES ('third')")
+        first.execute("RELEASE later_change")
+        with second:
+            second.execute("INSERT INTO sample VALUES ('second')")
+        self.assertEqual(second.execute("SELECT COUNT(*) FROM sample").fetchone()[0], 3)
 
 
 class BrowserTurnTests(unittest.TestCase):

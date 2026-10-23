@@ -190,6 +190,20 @@ class SchedulerAndPathsTest(DoctorBase):
         self.assertIn("~/home", line["line"])
         self.assertNotIn(str(self.home.parent), line["line"])
 
+    def test_a_windows_home_outside_the_user_folder_is_a_warning(self):   # WR5
+        user = r"C:\Users\alex"
+        for home, outside in ((r"C:\Sidedoor", True), (r"D:\Data\Sidedoor", True), (r"C:\Users\alexander\sd", True),
+                              (r"C:\Users\alex\.config\sidedoor", False), (r"c:\users\ALEX\Side Door", False)):
+            with self.subTest(home=home):
+                self.assertEqual(doctor.outside_user_folder(home, "win32", user), outside)
+        self.assertFalse(doctor.outside_user_folder(r"C:\Sidedoor", "darwin", user), "Windows only")
+        with mock.patch.object(doctor, "outside_user_folder", return_value=True):
+            line = doctor.check_home(self.home)
+        self.assertEqual(line["status"], doctor.WARN)
+        self.assertIn("outside your user folder", line["line"])
+        self.assertIn("only you can open", line["todo"])
+        self.assertEqual(doctor.check_home(self.home)["status"], doctor.OK, "a home inside the user folder")
+
     def test_profile_and_resume_use_the_home_passed_in(self):
         self.healthy()
         with mock.patch.dict(os.environ, {user_profile.HOME_VARIABLE: str(self.root / "elsewhere")}), \

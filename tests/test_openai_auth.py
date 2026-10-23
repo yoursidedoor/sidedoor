@@ -424,7 +424,7 @@ class SetupStep6(Home):
         self.assertEqual(state["steps"]["codex"]["status"], "done")
         self.assertTrue(setup_steps.codex_done(state))
         self.assertTrue(openai_auth.api_key_mode(self.home))
-        self.assertEqual(oct((self.home / openai_auth.KEY_FILE).stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct((self.home / openai_auth.KEY_FILE).stat().st_mode & 0o777), "0o666" if os.name == "nt" else "0o600")
         self.assertNotIn(KEY, json.dumps(state))
         self.run.assert_not_called()   # the API key does not ask Codex's own login
         state = setup_steps.choose_codex_auth("chatgpt", CONFIG, self.home, self.run)

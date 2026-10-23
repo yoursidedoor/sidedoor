@@ -384,8 +384,9 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("TerminateJobObject", kernel32.names())
             self.assertNotIn(4242, portable._jobs)
 
-    @unittest.skipUnless(POSIX, "process groups")
-    def test_posix_kill_tree_ends_worker_and_grandchild(self):
+    def test_kill_tree_ends_worker_and_grandchild(self):
+        """A real tree on either system: POSIX through the process group, Windows through the Job
+        Object `contain` made (WR3, run on the Windows VM)."""
         program = ("import subprocess, sys, time\n"
                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
                    "print(child.pid, flush=True)\ntime.sleep(60)\n")

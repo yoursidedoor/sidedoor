@@ -1052,7 +1052,7 @@ class NoTestReadsTheRealHome(unittest.TestCase):
 
     def test_every_test_module_imports_profile_home(self):
         missing = [path.name for path in sorted(Path(__file__).parent.glob("test_*.py"))
-                   if "\nimport profile_home" not in "\n" + path.read_text()]
+                   if "\nimport profile_home" not in "\n" + path.read_text(encoding="utf-8")]
         self.assertEqual(missing, [])
 
 

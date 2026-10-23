@@ -61,7 +61,11 @@ def executor_scenario():
             return 0
 
     try:
-        with patch.object(orchestrator.subprocess, "Popen", Worker), patch.object(orchestrator.os, "killpg"), \
+        # The fake worker has no process to contain or kill (portable: a process group on POSIX, a
+        # Job Object on Windows).
+        with patch.object(orchestrator.subprocess, "Popen", Worker), \
+                patch.object(orchestrator.portable, "contain", lambda worker: None), \
+                patch.object(orchestrator.portable, "kill_tree", lambda pid: None), \
                 patch("signal.signal", side_effect=AssertionError("No off-thread signal handlers")):
             with ThreadPoolExecutor(max_workers=1) as executor:
                 result = executor.submit(research_recovery.research_recovery_decision, fixture.root, config,

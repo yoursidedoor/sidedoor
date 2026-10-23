@@ -1,4 +1,5 @@
 import concurrent.futures
+import contextlib
 import json
 from pathlib import Path
 import sqlite3
@@ -14,10 +15,17 @@ NOW = "2026-09-18T04:00:00+00:00"
 EXPIRY = "2026-09-18T07:00:00+00:00"
 
 
+@contextlib.contextmanager
 def connect(path):
+    """A connection that commits (or rolls back) and is closed at the end of the `with`: an open
+    one keeps the file in use on Windows, so the temporary folder could not be removed."""
     database = sqlite3.connect(path, timeout=15)
     database.row_factory = sqlite3.Row
-    return database
+    try:
+        with database:
+            yield database
+    finally:
+        database.close()
 
 
 def validate():

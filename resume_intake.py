@@ -419,7 +419,9 @@ def ingest(config, path, *, database=None, root=None, transport=None, now=None):
         if source.resolve() != raw_path.resolve():
             shutil.copyfile(source, raw_path)
         text_path = directory / (stem + "-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16] + ".txt")
-        text_path.write_text(text, encoding="utf-8")
+        # newline="": the file holds exactly `text` (Windows would write \r\n), so its bytes match
+        # text_sha256 and reply_resume.context reads the same text back (VM pass, 2026-10-23).
+        text_path.write_text(text, encoding="utf-8", newline="")
         application = _render_application(ats, directory, raw_sha256)
     except IntakeError as error:
         return _failed(error)

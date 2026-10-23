@@ -95,6 +95,9 @@ def outside_box(html, key, box):
 class SettingsPageTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
+        # A cleanup, not tearDown: it then runs after the connections a test closes with addCleanup
+        # (an open database keeps its file in use on Windows).
+        self.addCleanup(self.directory.cleanup)
         self.home = Path(self.directory.name) / "home"
         self.root = Path(self.directory.name) / "root"
         self.home.mkdir()
@@ -114,9 +117,6 @@ class SettingsPageTest(unittest.TestCase):
         client = TestClient(app, base_url=f"http://127.0.0.1:{PORT}", follow_redirects=False)
         client.get("/", params={"t": SECRET})
         return client
-
-    def tearDown(self):
-        self.directory.cleanup()
 
     def profile(self):
         return json.loads((self.home / "profile.json").read_text())

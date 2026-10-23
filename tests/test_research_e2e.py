@@ -9,6 +9,7 @@ from unittest.mock import patch
 import orchestrator
 from test_research_integration import validate_schema_subset
 import profile_home
+import fake_executables
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,11 +27,11 @@ class ResearchEndToEndTests(unittest.TestCase):
 
     def local_worker(self, command, **kwargs):
         executable = Path(command[0])
-        self.assertEqual(executable.name, "fake-codex")
+        self.assertEqual(fake_executables.name(executable), "fake-codex")
         working = Path(kwargs["cwd"]).resolve()
         root = executable.parent.resolve()
         self.assertTrue(working == root or working.parent == root / "reports/research-recovery")
-        self.assertEqual(executable.read_bytes(), (Path(__file__).parent / "fake_codex.py").read_bytes())
+        self.assertEqual(fake_executables.script(executable).read_text(), (Path(__file__).parent / "fake_codex.py").read_text())
         return REAL_POPEN(command, **kwargs)
 
     def prepare_inputs(self, root):
@@ -43,9 +44,7 @@ class ResearchEndToEndTests(unittest.TestCase):
             root = Path(directory)
             for folder in ("state", "reports", "logs"):
                 (root / folder).mkdir()
-            executable = root / "fake-codex"
-            shutil.copyfile(Path(__file__).parent / "fake_codex.py", executable)
-            executable.chmod(0o700)
+            executable = fake_executables.copy(root / "fake-codex", Path(__file__).parent / "fake_codex.py")
             self.prepare_inputs(root)
             database = orchestrator.connect(root)
             config = {"timezone": "America/Los_Angeles", "research_hour": 8, "research_max_attempts": 3,
@@ -79,9 +78,7 @@ class ResearchEndToEndTests(unittest.TestCase):
             root = Path(directory)
             for folder in ("state", "reports", "logs"):
                 (root / folder).mkdir()
-            executable = root / "fake-codex"
-            shutil.copyfile(Path(__file__).parent / "fake_codex.py", executable)
-            executable.chmod(0o700)
+            executable = fake_executables.copy(root / "fake-codex", Path(__file__).parent / "fake_codex.py")
             self.prepare_inputs(root)
             database = orchestrator.connect(root)
             config = {"timezone": "America/Los_Angeles", "research_hour": 8, "research_max_attempts": 3,

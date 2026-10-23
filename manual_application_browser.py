@@ -129,8 +129,10 @@ def write_output(directory, request, result, events=None, mutate=None):
            "result_json": browser.encoded(result), "evidence": evidence}
     if mutate:
         mutate(raw)
-    (directory / "trace.jsonl").write_text("\n".join(browser.encoded(entry) for entry in events) + "\n")
-    (directory / "output.json").write_text(browser.encoded(raw))
+    # UTF-8 as Codex writes them (the trace is read as bytes); never the Windows locale encoding.
+    (directory / "trace.jsonl").write_text("\n".join(browser.encoded(entry) for entry in events) + "\n",
+                                           encoding="utf-8", newline="")
+    (directory / "output.json").write_text(browser.encoded(raw), encoding="utf-8", newline="")
 
 
 def request_at(directory):
@@ -462,7 +464,7 @@ def run(output_root):
                             entry.update(tool_call_id="context:/context/research_sources/0/excerpt", quote=source["excerpt"])
                 write_output(directory, request, review, mutate=cite)
                 if name == "undated-root-facts":
-                    raw = json.loads((directory / "output.json").read_text())
+                    raw = json.loads((directory / "output.json").read_text(encoding="utf-8"))
                     normalized = browser.normalize(request, raw, (directory / "trace.jsonl").read_bytes(), applications.stamp(), directory / "trace.jsonl")
                     # Recorded, never a label (owner, 2026-10-02): undated facts leave `verified` alone.
                     assert normalized["verified"] is not False and normalized["undated_eligibility_fields"]
@@ -524,7 +526,7 @@ def main():
             directory = args.replay.resolve()
             request = json.loads((directory / "request.json").read_text())
             assert request["payload"]["operation"] in desktop_adapter.READ_OPERATIONS
-            raw = json.loads((directory / "output.json").read_text())
+            raw = json.loads((directory / "output.json").read_text(encoding="utf-8"))
             trace = (directory / "trace.jsonl").read_bytes()
             artifact_time = dt.datetime.fromtimestamp((directory / "output.json").stat().st_mtime, dt.timezone.utc).isoformat()
             normalized = browser.normalize(request, raw, trace, artifact_time, directory / "trace.jsonl")

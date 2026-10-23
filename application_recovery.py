@@ -2,7 +2,7 @@
 
 import datetime as dt
 import json
-from pathlib import PurePosixPath
+from pathlib import PurePath, PurePosixPath
 import re
 
 import applications
@@ -164,14 +164,16 @@ def exception_failure(error):
 def trace_reference(value, root):
     if not isinstance(value, str) or len(value) > 1024:
         return None
-    reference = PurePosixPath(value)
+    # This system's own path syntax (Windows: C:\\...\\trace.jsonl as recorded there; VM pass,
+    # 2026-10-23), answered in the "reports/..." form either way.
+    reference = PurePath(value)
     if ".." in reference.parts:
         return None
     if reference.is_absolute():
         # Under the data folder, or (a record written before E9.T1 moved the data into the home)
         # under the code folder it used to sit in.
-        bases = ([PurePosixPath(str(root))] if root is not None else []) + [
-            PurePosixPath(str(folder)) for folder in paths.legacy_roots(root, recorded=False)]
+        bases = ([PurePath(str(root))] if root is not None else []) + [
+            PurePath(str(folder)) for folder in paths.legacy_roots(root, recorded=False)]
         for base in bases:
             try:
                 reference = reference.relative_to(base)
@@ -180,6 +182,7 @@ def trace_reference(value, root):
                 continue
         else:
             return None
+    reference = PurePosixPath(*reference.parts)
     if (len(reference.parts) == 4 and reference.parts[:2] == (paths.REPORTS, "application-browser")
             and re.fullmatch(r"request-[A-Za-z0-9_-]{1,100}", reference.parts[2])
             and reference.name == "trace.jsonl"):

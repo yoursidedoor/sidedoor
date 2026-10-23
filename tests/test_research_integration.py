@@ -16,6 +16,7 @@ import workflow_tasks
 import synthetic_resume  # noqa: F401 (synthetic designated resume; the owner's is not in the repo)
 import profile_home
 import user_profile
+import posix_process_mocks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,6 +146,7 @@ class ResearchIntegrationTests(unittest.TestCase):
         self.cleanup.enter_context(patch.object(orchestrator.dt, "datetime", FrozenDateTime))
         self.process = self.cleanup.enter_context(patch.object(orchestrator.subprocess, "Popen", side_effect=self.fake_process))
         self.cleanup.enter_context(patch.object(orchestrator.os, "killpg", create=True))
+        posix_process_mocks.simulate(self.cleanup)
         self.cleanup.enter_context(patch("socket.socket.connect", side_effect=AssertionError("Network prohibited in this test")))
         self.cleanup.enter_context(patch.object(orchestrator, "HeyReach", side_effect=AssertionError("Provider prohibited in this test")))
         self.cleanup.enter_context(patch.object(orchestrator, "research_recovery_methods", create=True,

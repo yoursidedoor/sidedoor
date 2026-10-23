@@ -119,6 +119,9 @@ def invite_action(database, action_id, state, claimed, started, payload=None, re
 class GatherTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
+        # A cleanup, not tearDown: it then runs after the connections a test closes with addCleanup
+        # (an open database keeps its file in use on Windows).
+        self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.home = self.root / "home"
         finished_home(self.home)
@@ -128,7 +131,6 @@ class GatherTest(unittest.TestCase):
 
     def tearDown(self):
         self.database.close()
-        self.directory.cleanup()
 
     def gather(self, running=False, database=None, now=None):
         return overview_page.gather(database or self.database, CONFIG, self.home, setup_steps.progress(self.home),
@@ -862,8 +864,9 @@ class JobRunsTest(unittest.TestCase):
     def test_no_row_is_empty_with_an_applications_record_and_no_loop(self):
         # create_app without serve (a preview): Next run reads "Not running" on both cards, and Last
         # run shows the applications run with its result; no Last/Next row renders empty.
-        # Today's date (Pacific), so the rows render as bare times whatever day the suite runs on.
-        today = dt.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles")).date()
+        # The day the page's clock is pinned to below, so the rows render as bare times whatever day
+        # the suite runs on (the runs used today's date and read "tomorrow" against the pin).
+        today = dt.date(2026, 10, 22)
         y, m, d = today.year, today.month, today.day
         self.hourly(f"{today.isoformat()}T17", "COMPLETE", pacific(y, m, d, 10, 0), pacific(y, m, d, 10, 12))
         self.applications_run("COMPLETE", pacific(y, m, d, 9, 30), pacific(y, m, d, 9, 50), {})
@@ -871,7 +874,10 @@ class JobRunsTest(unittest.TestCase):
         app = dashboard.create_app(SECRET, PORT, home=self.home, root=self.root, config=self.config)
         client = TestClient(app, base_url=f"http://127.0.0.1:{PORT}", follow_redirects=False)
         client.get("/", params={"t": SECRET})
-        with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):
+        gather = overview_page.gather   # the page's clock pinned to that day (E2.T2: no date bomb)
+        with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"), \
+                mock.patch.object(overview_page, "gather",
+                                  lambda *a, **k: gather(*a, **{**k, "now": pacific(2026, 10, 22, 11, 0)})):
             page = client.get("/").text
         self.database = sqlite3.connect(":memory:")
         outreach_card = page.split("<h3>Outreach</h3>")[1].split("<h3>Applications</h3>")[0]

@@ -19,6 +19,7 @@ import referrals
 import research_workflow as research
 import reply_worker as worker
 import workflow_tasks
+import posix_process_mocks
 from test_pipeline_routing import message as inbound_message, opportunity
 from backlog_fixture import setUpModule, tearDownModule  # noqa: F401 (fixture messages predate the reply cutoff)
 
@@ -211,6 +212,9 @@ class ReplyWorkerValidationReview(unittest.TestCase):
 
 
 class ReplyWorkerSubprocessReview(unittest.TestCase):
+    def setUp(self):
+        posix_process_mocks.simulate(self)
+
     def fake_spawn(self, output=b"{}", returncode=0, error=None):
         def spawn(command, **kwargs):
             self.command = command
@@ -260,7 +264,7 @@ class ReplyWorkerSubprocessReview(unittest.TestCase):
             with self.assertRaises(worker.Held) as raised:
                 worker._execute(configuration(), "fixture", "{}", 1)
         self.assertTrue(raised.exception.retry)
-        kill.assert_called_once_with(987654321, signal.SIGKILL)
+        kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
         self.process.wait.assert_called_once_with(timeout=5)
 
     @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
@@ -268,7 +272,7 @@ class ReplyWorkerSubprocessReview(unittest.TestCase):
         with mock.patch.object(worker.subprocess, "Popen", side_effect=self.fake_spawn()), \
                 mock.patch.object(worker.os, "killpg") as kill:
             worker._execute(configuration(), "fixture", "{}", 1)
-        kill.assert_called_once_with(987654321, signal.SIGKILL)
+        kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
 
     def test_service_sigterm_installs_cleanup_handler_and_restores_it(self):
         with mock.patch.object(worker.subprocess, "Popen", side_effect=self.fake_spawn()), \

@@ -59,7 +59,7 @@ class InProcessGuard:
 
     def __init__(self, testcase, operation, snapshot, **options):
         self.directory = scratch(testcase)
-        (self.directory / "snapshot.yaml").write_text(snapshot)
+        (self.directory / "snapshot.yaml").write_text(snapshot, encoding="utf-8")
         (self.directory / "calls.jsonl").write_text("")
         to_proxy, from_client = os.pipe()
         to_client, from_proxy = os.pipe()
@@ -309,7 +309,8 @@ class Item4StagedUploadsAreReadOnlyAndCheckedAtArm(unittest.TestCase):
             (directory / "trace.jsonl").write_text("")
             raise RuntimeError("stop")
         application_browser.consume(made.root, made.database, made.config, request_id, scripted)
-        self.assertEqual(seen["modes"], ("0o400", "0o500"))
+        # Windows keeps only the read-only bit: 0o444 / 0o555 is read-only there.
+        self.assertEqual(seen["modes"], ("0o444", "0o555") if os.name == "nt" else ("0o400", "0o500"))
         self.assertIsNone(made.database.execute("SELECT armed_at FROM desktop_requests WHERE request_id=?",
                                                 (request_id,)).fetchone()[0])
         # Item 10: the copies are gone once the session ends.
@@ -361,6 +362,7 @@ class Item4RealBrowser(unittest.TestCase):
 
 
 class Item5ProfileOwnership(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX: `ps` command lines; Windows reads the profile's lockfile (portable.profile_busy)")
     def test_holds_profile_reads_the_command_line_not_the_name(self):
         profile = scratch(self)
         ps = lambda argv, **kwargs: mock.Mock(stdout="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --flag\n")

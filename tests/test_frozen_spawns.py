@@ -20,6 +20,7 @@ Spawn sites (what each runs from source / frozen):
 """
 
 import profile_home  # noqa: F401
+import portable
 import ast
 import json
 import shutil
@@ -51,6 +52,7 @@ SITES = {
     ("login_item.py", "windowed_program"): 2,  # source branch only (pythonw.exe); frozen: program()
     ("reply_tools.py", "server_argv"): 1,      # source branch only; frozen: [program(), "reply-tools"]
     ("tools/build_macos.py", "nuitka_command"): 1,  # the build venv's python runs Nuitka (not shipped)
+    ("portable.py", "ensure_utf8_mode"): 1,    # Windows source runs only; frozen: returns before it (W1 a)
 }
 
 def frozen(value=True):
@@ -76,7 +78,7 @@ class FrozenSpawnTests(unittest.TestCase):
             with frozen():
                 self.assertEqual(scheduler_loop.job_command(name), [sys.executable, "job", name])
             with frozen(False):
-                self.assertEqual(scheduler_loop.job_command(name), [sys.executable, str(scheduler_loop.ENTRY), "job", name])
+                self.assertEqual(scheduler_loop.job_command(name), [sys.executable, *portable.UTF8_FLAGS, str(scheduler_loop.ENTRY), "job", name])
 
     def test_browser_guard_server(self):
         with frozen():
@@ -99,8 +101,8 @@ class FrozenSpawnTests(unittest.TestCase):
         self.assertEqual([server["command"]] + server["args"], argv)
         self.assertEqual(command[0], "/bin/codex")
         with frozen(False):
-            self.assertEqual(reply_tools.server_argv(self.directory)[:2],
-                             [sys.executable, str(Path(reply_tools.__file__).resolve())])
+            source = [sys.executable, *portable.UTF8_FLAGS, str(Path(reply_tools.__file__).resolve())]
+            self.assertEqual(reply_tools.server_argv(self.directory)[:len(source)], source)
 
     def test_login_entry_runs_the_binary(self):
         with frozen():
@@ -252,7 +254,7 @@ class InventoryTests(unittest.TestCase):
         for path in sorted(ROOT.glob("*.py")) + sorted((ROOT / "tools").glob("*.py")):
             if path.stem.startswith("manual_"):
                 continue
-            name = str(path.relative_to(ROOT))
+            name = path.relative_to(ROOT).as_posix()
             for function, _ in interpreter_uses(path.read_text(encoding="utf-8"), name):
                 counts[(name, function)] = counts.get((name, function), 0) + 1
         self.assertEqual(counts, SITES, "a new interpreter use: make it frozen-safe and list it in SITES")

@@ -4,6 +4,7 @@ Standard library only (no dashboard packages): every network call goes through a
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
+import fake_executables
 import json
 import os
 import stat
@@ -17,6 +18,12 @@ from unittest import mock
 import license_fixtures
 import run_locks
 import setup_steps
+
+# A private file's mode: Windows keeps only the read-only bit (0o666 when writable); its privacy
+# there is the ACL of the user's profile folder, which the home inherits (VM pass, 2026-10-23).
+PRIVATE = 0o666 if os.name == "nt" else 0o600
+# The fake Codex's file name (tests/fake_executables.stub: a .cmd on Windows).
+CODEX = "codex.cmd" if os.name == "nt" else "codex"
 
 
 CONFIG = {"text_model": {"model": "test/model"}}
@@ -68,7 +75,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual((step["status"], step["message"]), ("done", "Key works."))
         self.assertEqual(calls, ["Bearer " + SECRET_KEY])
         self.assertEqual((self.home / "openrouter.key").read_text().strip(), SECRET_KEY)
-        self.assertEqual(self.mode("openrouter.key"), 0o600)
+        self.assertEqual(self.mode("openrouter.key"), PRIVATE)
         self.assertNotIn(SECRET_KEY, (self.home / setup_steps.STATE_FILE).read_text())
 
     def test_openrouter_failures_in_plain_words(self):
@@ -91,7 +98,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual((step["status"], step["message"]), ("reading", setup_steps.READING_MESSAGE))
         saved = Path(step["raw"]["path"])
         self.assertEqual(saved.read_bytes(), b"%PDF-1.4 test")
-        self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(saved.stat().st_mode), PRIVATE)
         calls = []
         with mock.patch.object(setup_steps.resume_intake, "ingest",
                                side_effect=lambda config, path: calls.append(path) or
@@ -210,7 +217,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual((profile["minimum_base_salary_usd"], profile["desired_base_salary_usd"]), (180000, [180000, 250000]))
         self.assertEqual(answers["phone"]["value"], "+1 (555) 010-0100")
         self.assertEqual(answers["phone"]["semantic"], "contact_phone")
-        self.assertEqual(self.mode("profile.json"), 0o600)
+        self.assertEqual(self.mode("profile.json"), PRIVATE)
 
     def test_phone_and_linkedin_are_required(self):
         state, errors = setup_steps.save_profile(valid_form(phone="", linkedin=""), self.home)
@@ -316,7 +323,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual(sent[0][0], "https://relay.test/license/activate")
         self.assertEqual(sent[0][1]["key"], "SD-TESTKEY")
         self.assertEqual(sent[0][1]["machine"], setup_steps.machine_id(self.home))
-        self.assertEqual(self.mode("license.key"), 0o600)
+        self.assertEqual(self.mode("license.key"), PRIVATE)
         self.assertEqual(setup_steps.license_chip(self.home)["label"], "Trial")
         self.assertTrue(setup_steps.license_done(self.home))
         self.assertNotIn("SD-TESTKEY", (self.home / setup_steps.STATE_FILE).read_text())
@@ -344,9 +351,7 @@ class SetupStepsTest(unittest.TestCase):
         directory = self.home / "bin"
         directory.mkdir(exist_ok=True)
         if install:
-            program = directory / "codex"
-            program.write_text("#!/bin/sh\n")
-            program.chmod(0o755)
+            fake_executables.stub(directory / "codex")
         run = mock.Mock(return_value=subprocess.CompletedProcess([], returncode, output, ""))
         with mock.patch.object(setup_steps.Path, "home", return_value=self.home / "nohome"):
             state = setup_steps.check_codex(self.home, run=run, search_path=str(directory))
@@ -355,21 +360,21 @@ class SetupStepsTest(unittest.TestCase):
     def test_codex_signed_in_with_chatgpt_saves_its_path(self):
         state, run = self.codex("Logged in using ChatGPT\n")
         self.assertEqual(state["steps"]["codex"]["message"], "Codex is installed and signed in.")
-        self.assertEqual(state["codex_path"], str(self.home / "bin" / "codex"))
-        self.assertEqual(run.call_args[0][0], [str(self.home / "bin" / "codex"), "login", "status"])
+        self.assertEqual(state["codex_path"], str(self.home / "bin" / CODEX))
+        self.assertEqual(run.call_args[0][0], [str(self.home / "bin" / CODEX), "login", "status"])
         self.assertTrue(setup_steps.codex_done(state))
 
     def test_codex_failures(self):
         self.assertIn("API key", self.codex("Logged in using an API key - sk-***\n")[0]["steps"]["codex"]["message"])
         self.assertEqual(self.codex("Not logged in\n", 1)[0]["steps"]["codex"]["message"], "Codex is installed but not signed in.")
-        (self.home / "bin" / "codex").unlink()
+        (self.home / "bin" / CODEX).unlink()
         state, _ = self.codex("", install=False)
         self.assertEqual(state["steps"]["codex"]["message"], "Codex is not installed.")
         self.assertNotIn("codex_path", state)
 
     def test_codex_is_looked_for_in_local_bin(self):
         with mock.patch.object(setup_steps.Path, "home", return_value=Path("/u")):
-            self.assertIn("/u/.local/bin/codex", setup_steps.codex_candidates(search_path=""))
+            self.assertIn(str(Path("/u/.local/bin") / CODEX), setup_steps.codex_candidates(search_path=""))
 
     def test_a_known_email_domain_picks_the_webmail(self):
         # Owner, 2026-10-22: "why do i have to still populate it again?"
@@ -682,7 +687,10 @@ class BrowserSessionTest(unittest.TestCase):
         self.session = setup_steps.BrowserSession(
             self.root, self.root / "profile", find_chrome=lambda: "/chrome",
             launch=lambda command, **named: self.launched.append(command) or self.chrome,
-            on_closed=lambda: self.closed.append(True))
+            on_closed=lambda: self.closed.append(True),
+            # macOS's bring-forward (osascript), failing as it does for a fake Chrome's pid; on any
+            # other system the session would start Chrome again instead (VM pass, 2026-10-23).
+            run=lambda *arguments, **named: subprocess.CompletedProcess(arguments, 1), platform="darwin")
 
     def tearDown(self):
         self.directory.cleanup()

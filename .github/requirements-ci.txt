@@ -1,0 +1,21 @@
+# CI test dependencies (E2.T2): the runtime pins from pyproject.toml [project].dependencies, the
+# test extra (httpx) and coverage. Keep these in step with pyproject.toml.
+fastapi==0.158.1
+starlette==1.9.0
+uvicorn==0.54.0
+jinja2==3.1.6
+pydantic==2.14.1
+pydantic-core==2.50.1
+python-multipart==0.0.32
+pypdf==6.21.2
+fpdf2==2.8.9
+pystray==0.19.5; sys_platform == 'darwin' or sys_platform == 'win32'
+six==1.17.0; sys_platform == 'darwin' or sys_platform == 'win32'
+pyobjc-core==12.2.2; sys_platform == 'darwin'
+pyobjc-framework-Cocoa==12.2.2; sys_platform == 'darwin'
+pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'
+httpx==0.28.1
+coverage==7.10.7
+# Windows has no system time-zone database; zoneinfo needs tzdata there. PRODUCT GAP (E2.T2
+# report): pyproject.toml does not declare it, so the product itself fails on Windows without it.
+tzdata==2025.2; sys_platform == 'win32'

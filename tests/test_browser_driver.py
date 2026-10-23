@@ -17,6 +17,7 @@ Worked examples (BACKLOG E7.T1 brief):
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
+import portable
 import contextlib
 import datetime as dt
 import json
@@ -69,7 +70,7 @@ class GuardProcess:
         self.directory = Path(tempfile.mkdtemp(prefix="guard-"))
         testcase.addCleanup(shutil.rmtree, self.directory, True)
         self.snapshot, self.calls = self.directory / "snapshot.yaml", self.directory / "calls.jsonl"
-        self.snapshot.write_text(snapshot)
+        self.snapshot.write_text(snapshot, encoding="utf-8")   # the fake reads UTF-8, as Node writes it
         self.calls.write_text("")
         self.audit = self.directory / "guard.jsonl"
         argv = browser_runtime.sidedoor_command() + ["browser-guard", "--operation", operation, "--audit", str(self.audit)]
@@ -162,7 +163,7 @@ class ArmThroughTheGuardTests(unittest.TestCase):
             snapshot = '- button "Submit application" [ref=e1] [cursor=pointer]\n'
             guard_dir = directory / "fake"
             guard_dir.mkdir()
-            (guard_dir / "snapshot.yaml").write_text(snapshot)
+            (guard_dir / "snapshot.yaml").write_text(snapshot, encoding="utf-8")
             (guard_dir / "calls.jsonl").write_text("")
             argv = browser_runtime.guard_command(config, directory, "submit", config["_application_guard_claim"],
                                                  config["_application_human_check"])
@@ -225,7 +226,7 @@ class HumanCheckThroughTheGuardTests(unittest.TestCase):
             before = lease()
             slept = []
             wait = application_browser.HumanCheckWait(config["_application_human_check"], sleep=slept.append)
-            (directory / "snapshot.yaml").write_text(CAPTCHA_SNAPSHOT)
+            (directory / "snapshot.yaml").write_text(CAPTCHA_SNAPSHOT, encoding="utf-8")
             (directory / "calls.jsonl").write_text("")
             to_proxy, from_client = os.pipe()
             to_client, from_proxy = os.pipe()
@@ -293,7 +294,9 @@ class FrozenCommandTests(unittest.TestCase):
         self.assertFalse([part for part in server["args"][:server["args"].index("--")] if part.endswith(".py")])
         # From source the same subcommand runs through orchestrator.py.
         source = browser_runtime.guard_command(config, directory, "submit")
-        self.assertEqual(source[1:3], [str(browser_runtime.ENTRY), "browser-guard"])
+        flags = len(portable.UTF8_FLAGS)   # -X utf8 on Windows (W1 a)
+        self.assertEqual(source[1:1 + flags], list(portable.UTF8_FLAGS))
+        self.assertEqual(source[1 + flags:3 + flags], [str(browser_runtime.ENTRY), "browser-guard"])
 
 
 class CommandTests(unittest.TestCase):
@@ -339,7 +342,8 @@ class CommandTests(unittest.TestCase):
             application_browser.execute(config, "p", empty, 10)
         with self.assertRaisesRegex(ValueError, "LINKEDIN_CONTACTS_BROWSER_RUNTIME_MISSING"):
             linkedin_contacts.execute(config, "p", empty, 10)
-        self.assertEqual(sorted(Path(path).name for path in browser_runtime.missing(config)), ["cli.js", "node"])
+        self.assertEqual(sorted(Path(path).name for path in browser_runtime.missing(config)),
+                         ["cli.js", "node.exe" if os.name == "nt" else "node"])
 
     def test_staged_uploads_leave_the_arm_envelope_untouched(self):
         directory = Path(tempfile.mkdtemp())
@@ -377,7 +381,7 @@ class PackagingTests(unittest.TestCase):
         cli.parent.mkdir(parents=True)
         cli.write_text("")
         (cli.parent / "package.json").write_text(json.dumps({"version": "0.0.84"}))
-        node = empty / "node" / "bin" / "node"
+        node = Path(browser_runtime.node_path({"browser_driver": {"runtime_dir": str(empty)}}))   # node\node.exe on Windows
         node.parent.mkdir(parents=True)
         node.write_text("")
         ran = lambda argv, **kwargs: mock.Mock(stdout="v" + browser_runtime.NODE_VERSION + "\n")

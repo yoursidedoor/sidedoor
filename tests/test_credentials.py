@@ -29,6 +29,9 @@ import scheduler_loop
 import setup_steps
 import text_model
 
+# A private file's mode: Windows keeps only the read-only bit (VM pass, 2026-10-23).
+PRIVATE = 0o666 if os.name == "nt" else 0o600
+
 
 OPENROUTER = "sk-or-v1-fake-0123456789abcdef-9z9z"
 LICENSE = "SD-FAKELICENSE0123456789TLUS"
@@ -110,7 +113,7 @@ class HelperTest(Base):
         self.assertRegex(record["id"], "^[0-9a-f]{32}$")
         self.assertEqual(record["home"], os.path.realpath(self.home))
         self.assertEqual(self.store.items, {record["id"] + ":openrouter": OPENROUTER})
-        self.assertEqual(stat.S_IMODE((self.home / credentials.ID_FILE).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.home / credentials.ID_FILE).stat().st_mode), PRIVATE)
         credentials.clear_cache()
         self.assertEqual(credentials.get("openrouter", self.home), OPENROUTER)
         self.assertIsNone(credentials.get("license", self.home))
@@ -138,7 +141,7 @@ class HelperTest(Base):
     def test_a_refused_write_with_the_item_confirmed_absent_falls_back_to_the_private_file(self):   # K4
         self.store.fail["write"] = credentials.Unavailable("KEYCHAIN_REFUSED")
         self.assertEqual(credentials.put("openrouter", OPENROUTER, self.home), "file")
-        self.assertEqual(stat.S_IMODE((self.home / "openrouter.key").stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.home / "openrouter.key").stat().st_mode), PRIVATE)
         self.assertEqual(credentials.get("openrouter", self.home), OPENROUTER)
 
     def test_a_save_while_locked_is_refused_and_writes_nothing(self):   # KR3
@@ -487,7 +490,7 @@ class ConfirmFixesTest(Base):
         self.assertFalse(self.exists("openrouter"))
         with mock.patch.object(text_model, "_post", return_value=(200, OK_ANSWER)):
             client.post("/setup/openrouter", data={"key": typed, "to_file": "1"}, headers=self.headers)
-        self.assertEqual(stat.S_IMODE((self.home / "openrouter.key").stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.home / "openrouter.key").stat().st_mode), PRIVATE)
         self.assertEqual(credentials.get("openrouter", self.home), typed)
         self.assertEqual(credentials.status("openrouter", self.home), "file_chosen")
         self.assertIn("Sidedoor's folder instead", doctor.check_credentials(self.home)["todo"])   # the license still waits
@@ -540,6 +543,7 @@ class ConfirmFixesTest(Base):
             self.assertEqual(client.post(path, headers=self.headers).status_code, 200)
         self.assertEqual(setup_steps.load_state(self.home)["steps"], before)
 
+    @unittest.skipIf(os.name == "nt", "POSIX fake executable (the macOS keychain tool)")
     def test_every_call_names_the_default_keychain(self):   # KC4
         security = FakeSecurity(self)
         keychain = "/Users/someone/Library/Keychains/login.keychain-db"

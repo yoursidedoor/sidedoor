@@ -44,3 +44,4 @@ dist/
 
 # Local venv for the dashboard's pinned packages (pyproject.toml dependencies) and its tests.
 .venv-dashboard/
+.coverage

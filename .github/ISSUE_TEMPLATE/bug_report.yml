@@ -1,0 +1,71 @@
+name: Something isn't working
+description: Tell us about a problem with Sidedoor.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to tell us. A few short answers help us fix it faster.
+        Please don't share keys, passwords, your résumé or other personal details here: this page is public.
+        For account, billing or license questions, email support@yoursidedoor.com instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe what you saw, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can we see it happen?
+      description: The steps you took, one per line, if you remember them.
+      placeholder: |
+        1. Opened the dashboard
+        2. Clicked ...
+        3. Saw ...
+    validations:
+      required: false
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Your computer
+      options:
+        - macOS Apple chip
+        - macOS Intel
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sidedoor version
+      description: Shown at the top of your diagnostic summary, for example 0.0.3.
+      placeholder: "0.0.3"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostic-summary
+    attributes:
+      label: Diagnostic summary
+      description: |
+        In Sidedoor, open Failures and logs (or Settings) and click "Report a problem". It copies a short
+        summary of Sidedoor's checks with keys and personal details removed. Paste it here.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before you send
+      options:
+        - label: I removed any keys, passwords, résumé text and personal details
+          required: true

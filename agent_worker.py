@@ -197,15 +197,10 @@ def _artifacts(directory, now):
         path = directory / name
         if path.exists():
             content = _read(path)
-            with path.open("rb") as stream:
-                os.fsync(stream.fileno())
+            portable.fsync_path(path)
             evidence.append({"source": str(path), "observed_at": now, "kind": "ATTEMPT_ARTIFACT",
                              "sha256": hashlib.sha256(content).hexdigest()})
-    descriptor = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    portable.fsync_directory(directory)
     return evidence
 
 

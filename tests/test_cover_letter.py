@@ -3,6 +3,7 @@ import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one
 import hashlib
 import importlib.util
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -27,8 +28,9 @@ class CoverLetterTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), prepared["cover_letter_file"]["sha256"])
         cover_letter.verify(root, prepared)   # the generated file passes
 
-        extracted = subprocess.run(["pdftotext", str(path), "-"], capture_output=True, text=True)
-        if extracted.returncode == 0:         # only assert where a PDF reader exists
+        extracted = (subprocess.run(["pdftotext", str(path), "-"], capture_output=True, text=True)
+                     if shutil.which("pdftotext") else None)
+        if extracted and extracted.returncode == 0:   # only assert where a PDF reader exists
             self.assertIn("40 producer teams", " ".join(extracted.stdout.split()))
 
         path.write_bytes(path.read_bytes() + b"%tampered")

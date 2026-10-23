@@ -7,6 +7,7 @@ import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one
 import contextlib
 import importlib.util
 import io
+import os
 import socket
 import sqlite3
 import stat
@@ -14,6 +15,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+# A private file's mode: Windows keeps only the read-only bit (0o666 when writable); its privacy
+# there is the ACL of the user's profile folder, which the home inherits (VM pass, 2026-10-23).
+PRIVATE = 0o666 if os.name == "nt" else 0o600
 
 DEPENDENCIES = all(importlib.util.find_spec(name) for name in ("fastapi", "httpx"))
 if DEPENDENCIES:
@@ -119,7 +124,7 @@ class DashboardTest(unittest.TestCase):
             first = dashboard.token(home)
             self.assertEqual(dashboard.token(home), first)
             mode = stat.S_IMODE((Path(home) / dashboard.TOKEN_FILE).stat().st_mode)
-            self.assertEqual(mode, 0o600)
+            self.assertEqual(mode, PRIVATE)
 
 
     def serve(self, platform, bound=True, ours=False, path="/"):

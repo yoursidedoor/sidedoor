@@ -138,6 +138,7 @@ class CredentialFileOwnershipTests(unittest.TestCase):
             self.call()
         self.assertEqual("BRIDGE_CREDENTIAL_FILE_PERMISSIONS_INVALID", str(caught.exception))
 
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits and uids (Windows keeps only the read-only bit)")
     def test_posix_refuses_group_or_other_bits_and_a_foreign_owner(self):
         with mock.patch.object(decision_transport.portable, "WINDOWS", False):
             self.credential.chmod(0o644)

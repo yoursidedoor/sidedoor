@@ -16,6 +16,7 @@ import notifications
 import orchestrator
 from fake_codex import opportunity as research_opportunity
 import profile_home
+import fake_executables
 import user_profile
 
 
@@ -504,9 +505,7 @@ class ApplicationEndToEndTests(unittest.TestCase):
         self.assertEqual(tuple(self.database.execute("SELECT state,attempts FROM notification_outbox").fetchone()), ("FAILED", 5))
 
     def test_subprocess_research_to_command_worker_independent_receipt_and_report(self):
-        executable = self.root / "mock-codex"
-        shutil.copyfile(Path(__file__).parent / "fake_codex.py", executable)
-        executable.chmod(0o700)
+        executable = fake_executables.copy(self.root / "mock-codex", Path(__file__).parent / "fake_codex.py")
         (self.root / "research-prompt.md").write_text("Isolated mock research")
         for filename in ("discovery-prompt.md", "discovery-schema.json", "research-schema.json"):
             shutil.copyfile(orchestrator.ROOT / filename, self.root / filename)

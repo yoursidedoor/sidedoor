@@ -1216,7 +1216,7 @@ def run_research_worker(root, command, prompt, log_path, timeout):
     environment = openai_auth.environment(command, environment)
     with log_path.open("w") as log:
         # Its own session (POSIX) or Job Object (Windows), so the kill below reaches its whole tree.
-        worker = subprocess.Popen(command, stdin=subprocess.PIPE, text=True, cwd=root,
+        worker = subprocess.Popen(command, stdin=subprocess.PIPE, text=True, encoding="utf-8", cwd=root,
                                   stdout=log, stderr=log, env=environment, **portable.worker_spawn_options(core=False))
         portable.contain(worker)
 
@@ -1743,6 +1743,10 @@ def main(argv=None):
 
 def cli():
     """The `sidedoor` console command (pyproject.toml); the same as `python3.13 orchestrator.py`."""
+    import scheduler_loop
+    code = portable.ensure_utf8_mode(scheduler_loop.frozen(), LOG.warning)   # Windows only (W1 a)
+    if code is not None:
+        sys.exit(code)
     try:
         sys.exit(main())
     except Exception as error:

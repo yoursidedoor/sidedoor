@@ -64,6 +64,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 import browser_runtime  # noqa: E402
+import portable  # noqa: E402
 import resources  # noqa: E402
 import version  # noqa: E402
 
@@ -228,7 +229,10 @@ def nuitka_command(output, icns, jobs=None, arch=None):
         raise SystemExit("the build interpreter %s cannot run %s (it is %s); use an %s or universal2 build venv"
                          % (python, arch, " ".join(macho_arches(Path(python).resolve())) or "unknown", arch))
     # `arch -<arch>` runs the (universal2) interpreter and every compiler Nuitka starts as <arch>.
-    command = ["arch", "-" + arch, python, "-m", "nuitka", "--standalone", "--macos-create-app-bundle",
+    # Nuitka compiles in the UTF-8 mode of the Python that runs it (Nuitka 4.3.1 MainProgram.c:
+    # Py_UTF8Mode = SYSFLAG_UTF8, from sys.flags.utf8_mode at build time). On Windows the build runs
+    # it with -X utf8 (portable.UTF8_FLAGS, W1 a; empty elsewhere); a Windows build script must keep this.
+    command = ["arch", "-" + arch, python, *portable.UTF8_FLAGS, "-m", "nuitka", "--standalone", "--macos-create-app-bundle",
                "--macos-target-arch=" + arch,
                # libpython as the bundled shared library on both builds (Homebrew's default already;
                # python.org's framework offers no static archive, its libpython3.13.a is the dylib).
@@ -248,6 +252,10 @@ def nuitka_command(output, icns, jobs=None, arch=None):
     command += ["--include-module=" + name for name in product_modules() + list(STRING_IMPORTS)
                 + sorted({name for package in UNCOMPILED for name in foreign_imports(package)})]
     command += resources.nuitka_arguments(REPO)
+    if sys.platform == "win32":
+        # Windows has no system time-zone database: zoneinfo reads the tzdata package's files
+        # (pyproject.toml, win32 only), which Nuitka must carry as data.
+        command += ["--include-package=tzdata", "--include-package-data=tzdata"]
     return command + [str(ENTRY)]
 
 

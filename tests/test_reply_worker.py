@@ -23,6 +23,7 @@ import workflow_tasks
 from test_pipeline_routing import NOW, message, opportunity
 from backlog_fixture import setUpModule, tearDownModule  # noqa: F401 (fixture messages predate the reply cutoff)
 import synthetic_resume  # noqa: F401 (synthetic designated resume; the owner's is not in the repo)
+import posix_process_mocks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +116,7 @@ class ReplyWorkerTests(unittest.TestCase):
         reply_resume.context()
         self.popen = self.enterContext(patch.object(reply_worker.subprocess, "Popen", side_effect=self.process))
         self.kill = self.enterContext(patch.object(reply_worker.os, "killpg", create=True))
+        posix_process_mocks.simulate(self)
 
     def process(self, command, **options):
         process = MockProcess(self, command, options)
@@ -328,7 +330,7 @@ class ReplyWorkerTests(unittest.TestCase):
         self.timeout = True
         self.run_cycle()
         self.assertEqual("RETRY_WAIT", self.task(task_id)["status"])
-        self.kill.assert_called_with(987654321, signal.SIGKILL)
+        self.kill.assert_called_with(987654321, posix_process_mocks.SIGKILL)
         self.assertTrue(self.processes[0].waited)
         self.run_cycle()
         self.assertEqual(1, self.popen.call_count)
@@ -425,7 +427,7 @@ class ReplyWorkerTests(unittest.TestCase):
         self.run_cycle()
         self.assertEqual("CLASSIFICATION_INTERRUPTED", self.task(task_id)["blocker"])
         self.assertIs(previous, signal.getsignal(signal.SIGTERM))
-        self.kill.assert_called_once_with(987654321, signal.SIGKILL)
+        self.kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
         self.assertTrue(self.processes[0].waited)
 
     def test_service_shutdown_preserves_next_queued_task_and_stops_cycle(self):
@@ -457,7 +459,7 @@ class ReplyWorkerTests(unittest.TestCase):
     def test_exited_parent_still_cleans_process_group_without_reaping_again(self):
         task_id = self.enqueue()
         self.run_cycle()
-        self.kill.assert_called_once_with(987654321, signal.SIGKILL)
+        self.kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
         self.assertFalse(self.processes[0].waited)
         self.assertEqual("COMPLETE", self.task(task_id)["status"])
 

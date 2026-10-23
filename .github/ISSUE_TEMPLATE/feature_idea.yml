@@ -1,0 +1,30 @@
+name: I have an idea
+description: Suggest something that would make Sidedoor better for you.
+title: "[Idea] "
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We'd love to hear it. Please don't share keys, passwords or personal details here: this page is public.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: What gets in your way, or what's harder than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What's your idea?
+      description: What would you like Sidedoor to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why would it help?
+      description: What would it change for you?
+    validations:
+      required: false

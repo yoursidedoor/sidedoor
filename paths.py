@@ -763,6 +763,12 @@ def resolve(home=None, legacy=None, keep=None):
             return dict(current, error="Both copies of your database were used after they split. Choose the one "
                                        "to keep with Keep this one or Keep that one.")
         sides[conflict["item"]] = side
+    if os.name == "nt":
+        # W2 a (owner, 2026-10-23): no Windows install ever kept data in a code folder, and Windows
+        # cannot rename state/ while its own lock files in it are open. Nothing is set aside or
+        # moved there; the choice asked for above is still checked.
+        LOG.info("DATA_MOVE_SKIPPED_ON_WINDOWS (state %s)", current["state"])
+        return current
     names = (run_locks.RUNNER, run_locks.APPLICATIONS, run_locks.BROWSER)
     # The code folder's state/ may already be the link to the home's: then one set of locks.
     old = home if _same(legacy / STATE, home / STATE) else legacy

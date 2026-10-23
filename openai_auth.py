@@ -91,7 +91,9 @@ def mode(home=None):
         stat = path.stat()
     except OSError:
         return CHATGPT
-    stamp = (stat.st_mtime_ns, stat.st_size)
+    # The file id too: setup_steps replaces the file atomically, and on Windows two writes inside one
+    # clock tick keep the same mtime ("api_key" and "chatgpt" are the same length; VM pass, 2026-10-23).
+    stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
     cached = _mode_cache.get(str(path))
     if cached and cached[0] == stamp:
         return cached[1]

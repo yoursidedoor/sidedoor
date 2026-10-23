@@ -1,0 +1,16 @@
+{# Report a problem (owner pick F3 a): on the Failures page and in Settings. report_problem.js asks
+   POST /report-problem for the privacy-safe summary, copies it and opens GitHub's bug-report form. #}
+<section class="card report-problem" id="report-problem" aria-labelledby="report-problem-title">
+  <h2 id="report-problem-title">Report a problem</h2>
+  <p>
+    <button class="button" type="button" id="report-problem-button">Report a problem</button>
+    <span class="muted" id="report-problem-status" role="status"></span>
+  </p>
+  <p class="muted">Your summary is copied, not sent. Paste it into the issue. Account or billing questions: support@yoursidedoor.com</p>
+  <div id="report-problem-fallback" hidden>
+    <label for="report-problem-text">Your summary (select it and copy it if it wasn't copied):</label>
+    <textarea id="report-problem-text" class="report-problem-text" rows="10" readonly></textarea>
+    <p><a class="button button-quiet" id="report-problem-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open the GitHub issue form</a></p>
+  </div>
+</section>
+<script src="/static/report_problem.js" defer></script>

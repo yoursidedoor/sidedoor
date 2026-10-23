@@ -7,6 +7,7 @@ the frozen binary re-invokes itself.
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
+import portable
 import contextlib
 import datetime as dt
 import importlib.util
@@ -572,7 +573,7 @@ class FrozenBinaryTests(unittest.TestCase):
             self.assertEqual(scheduler_loop.job_command("run"), [sys.executable, "job", "run"])
         with mock.patch.object(sys, "frozen", False, create=True):
             self.assertEqual(scheduler_loop.job_command("run"),
-                             [sys.executable, str(Path(orchestrator.__file__).resolve()), "job", "run"])
+                             [sys.executable, *portable.UTF8_FLAGS, str(Path(orchestrator.__file__).resolve()), "job", "run"])
         with self.assertRaises(ValueError):
             scheduler_loop.job_command("serve")
 

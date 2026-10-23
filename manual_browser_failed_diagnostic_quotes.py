@@ -95,7 +95,7 @@ def run(artifact_directory=None):
     replay = None
     if artifact_directory:
         directory = Path(artifact_directory)
-        raw_saved = json.loads((directory / "output.json").read_text())
+        raw_saved = json.loads((directory / "output.json").read_text(encoding="utf-8"))
         observed_at = dt.datetime.fromtimestamp((directory / "output.json").stat().st_mtime, dt.timezone.utc).isoformat()
         replayed = browser.normalize(json.loads((directory / "request.json").read_text()), raw_saved,
             (directory / "trace.jsonl").read_bytes(), observed_at, directory / "trace.jsonl")

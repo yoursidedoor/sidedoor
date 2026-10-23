@@ -5,6 +5,7 @@ Chrome. Offline: no Chrome, no `open`, no Node; the frontmost window and CDP are
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
 import io
 import json
+import os
 import signal
 from pathlib import Path
 import subprocess
@@ -21,6 +22,9 @@ import run_locks  # noqa: E402
 from test_browser_driver_review import scratch  # noqa: E402
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+SIGKILL = getattr(signal, "SIGKILL", 9)   # Windows has none; the fake `kill` only records it
 
 
 class OffscreenLaunch(unittest.TestCase):
@@ -203,7 +207,7 @@ def ps(lines):
 class Orphan:
     """A fake Chrome on the profile: `ps` shows it (plus `others`) until a signal it obeys ends it."""
 
-    def __init__(self, line, others=(), obeys=(signal.SIGTERM, signal.SIGKILL)):
+    def __init__(self, line, others=(), obeys=(signal.SIGTERM, SIGKILL)):
         self.line, self.others, self.obeys, self.signals, self.alive = line, list(others), obeys, [], True
 
     def run(self, argv, **kwargs):
@@ -236,6 +240,7 @@ class OrphanedSessionChrome(unittest.TestCase):
     def chrome(self, *extra):
         return " ".join([CHROME, "--user-data-dir=" + str(self.profile), *extra])
 
+    @unittest.skipIf(os.name == "nt", "POSIX: the orphan is found with `ps` and signalled (a no-op on Windows, below)")
     def test_an_orphan_is_closed_and_the_session_proceeds(self):
         for switch in ("--remote-debugging-port=0", "--remote-debugging-pipe"):
             orphan = Orphan(self.chrome(switch))
@@ -248,6 +253,7 @@ class OrphanedSessionChrome(unittest.TestCase):
             self.assertIsNone(browser_runtime.unavailable(self.config, orphan.run, self.root, orphan.kill))
         self.assertEqual(orphan.signals, [signal.SIGTERM])
 
+    @unittest.skipIf(os.name == "nt", "POSIX: the orphan is found with `ps` and signalled (a no-op on Windows, below)")
     def test_an_orphan_with_a_guard_running_is_not_closed(self):
         orphan = Orphan(self.chrome("--remote-debugging-port=0"),
                         others=["/x/sidedoor browser-guard --operation inspect -- node cli.js"])
@@ -255,6 +261,7 @@ class OrphanedSessionChrome(unittest.TestCase):
         self.assertFalse(browser_runtime.close_orphaned_session_chrome(self.profile, self.root, orphan.run, orphan.kill))
         self.assertEqual(orphan.signals, [])
 
+    @unittest.skipIf(os.name == "nt", "POSIX: the orphan is found with `ps` and signalled (a no-op on Windows, below)")
     def test_an_orphan_is_not_closed_while_another_session_holds_the_lock(self):
         orphan = Orphan(self.chrome("--remote-debugging-port=0"))
         with run_locks.held(self.root, run_locks.BROWSER) as held:   # another process's session
@@ -265,17 +272,19 @@ class OrphanedSessionChrome(unittest.TestCase):
                                                                            orphan.kill))
         self.assertEqual(orphan.signals, [])
 
+    @unittest.skipIf(os.name == "nt", "POSIX: the orphan is found with `ps` and signalled (a no-op on Windows, below)")
     def test_a_sign_in_or_user_chrome_is_never_closed(self):
         user = Orphan(self.chrome())     # no DevTools switch: setup step 8's window or the user's own
         self.assertEqual(browser_runtime.display_state(self.config, self.root, user.run, user.kill), "PROFILE_IN_USE")
         self.assertEqual(browser_runtime.unavailable(self.config, user.run, self.root, user.kill), "PROFILE_IN_USE")
         self.assertEqual(user.signals, [])
 
+    @unittest.skipIf(os.name == "nt", "POSIX: the orphan is found with `ps` and signalled (a no-op on Windows, below)")
     def test_an_orphan_that_ignores_sigterm_is_killed(self):
-        orphan = Orphan(self.chrome("--remote-debugging-port=0"), obeys=(signal.SIGKILL,))
+        orphan = Orphan(self.chrome("--remote-debugging-port=0"), obeys=(SIGKILL,))
         self.assertTrue(browser_runtime.close_orphaned_session_chrome(self.profile, self.root, orphan.run, orphan.kill,
                                                                       wait_seconds=0.2, poll_seconds=0.05))
-        self.assertEqual(orphan.signals, [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(orphan.signals, [signal.SIGTERM, SIGKILL])
 
     def test_windows_is_a_no_op(self):
         orphan = Orphan(self.chrome("--remote-debugging-port=0"))
@@ -285,6 +294,7 @@ class OrphanedSessionChrome(unittest.TestCase):
         self.assertEqual(orphan.signals, [])
 
 
+@unittest.skipIf(os.name == "nt", "POSIX: Chrome found through `ps`; Windows reads the profile's lockfile (portable.profile_busy, tests/test_portable.py)")
 class ProfileOwnedBySidedoor(unittest.TestCase):
     """Problem 2: who says "close the window", and when."""
 

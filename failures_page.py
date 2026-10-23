@@ -161,14 +161,15 @@ def _plural(count, words):
 
 
 def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=None, detail=None, log=None, href=None,
-          job=None, moments=(), slots=()):
+          job=None, moments=(), slots=(), code=None):
     """One failure. `todo` always says what happens next or what to do; `fix` is {"label", "href"}.
     `job` names the scheduler job ("run", "research", "applications") whose exit this failure
-    explains, and `moments` when each such failure happened (F1: one item per real failure)."""
+    explains, and `moments` when each such failure happened (F1: one item per real failure). `code` is a
+    short program code for the Report a problem summary (report_problem); it is never shown here."""
     return {"group": group, "text": text, "todo": todo, "at": at, "count": max(1, int(count or 1)), "retry_at": retry_at,
             "you": you, "fix": fix, "detail": detail, "log": log or [], "href": href, "job": job,
             "moments": [moment for moment in moments if moment is not None] or ([at] if job and at else []),
-            "slots": list(slots)}
+            "slots": list(slots), "code": code}
 
 
 def _at(fmt, moment):
@@ -261,7 +262,8 @@ def task_failures(reader, now, fmt):
             kind = "crashed"
         worker = str(row["worker"] or "")
         key = (worker_words(worker), kind, worker in HOURLY_STEPS)
-        entry = grouped.setdefault(key, {"count": 0, "at": None, "retry_at": None, "moments": [], "job": None, "slots": []})
+        entry = grouped.setdefault(key, {"count": 0, "at": None, "retry_at": None, "moments": [], "job": None, "slots": [],
+                                         "code": "%s:%s" % (kind.upper(), worker.split(":", 1)[0])})
         entry["count"] += max(1, failed)
         moment = overview._utc(row["updated_at"])
         entry["at"] = max(filter(None, (entry["at"], moment)), default=None)
@@ -303,7 +305,7 @@ def task_failures(reader, now, fmt):
             todo = ("Nothing you need to do. It runs again on Sidedoor's next round." if hourly
                     else "Nothing you need to do. Sidedoor moves on to its other work.")
         found.append(_item(group, text, todo, entry["at"], entry["count"], entry["retry_at"], job=entry["job"],
-                           moments=entry["moments"], slots=entry["slots"]))
+                           moments=entry["moments"], slots=entry["slots"], code=entry["code"]))
     return found
 
 
@@ -338,7 +340,7 @@ def cycle_failures(reader, now, crashed_slots=()):
             slots.append(str(row["slot"]))
         if matching:
             found.append(_item("scheduler", text, "Nothing you need to do. It runs again at the start of the next hour.",
-                               max(matching), len(matching), job="run", moments=matching, slots=slots))
+                               max(matching), len(matching), job="run", moments=matching, slots=slots, code="ROUND_" + state))
     return found
 
 
@@ -388,13 +390,14 @@ def scheduler_failures(loop, config, now, fmt, log_tail=None, secrets=()):
             todo, fix = "It runs again once Sidedoor is running. Start it on Overview.", {"label": "Open Overview", "href": "/"}
         stem = scheduler_loop.LOG_NAMES.get(job)
         log = log_tail(stem + ".stderr.log") if log_tail and stem else None
-        entry = _item("scheduler", text, todo, moment, fix=fix, log=log)
+        entry = _item("scheduler", text, todo, moment, fix=fix, log=log, code="JOB_EXIT:" + str(job))
         entry["exited"] = job
         found.append(entry)
     if loop.get("last_error"):
         found.append(_item("scheduler", "Sidedoor ran into a problem keeping its schedule.",
                            "Nothing you need to do if it goes away on its own. If it stays, download the logs below and "
-                           "send them to %s." % SUPPORT_EMAIL, detail=redact_text(loop["last_error"], secrets)))
+                           "send them to %s." % SUPPORT_EMAIL, detail=redact_text(loop["last_error"], secrets),
+                           code="SCHEDULE_ERROR"))
     return found
 
 
@@ -491,15 +494,16 @@ def application_failures(reader, now, fmt):
         name = "%s, %s" % (view["company"], view["role"]) if view["role"] != "Role not recorded" else view["company"]
         link = {"label": "Open application", "href": _job_link(key)}
         at = overview._utc(row["updated_at"])
+        code = _code(row["blocker"]) or "APPLICATION_" + str(row["state"])
         if view["needs_you"]:
             found.append(_item("applications", "%s: %s" % (name, view["problem"]), view["todo"], at, you=True,
                                fix={"label": view["todo_label"], "href": view["todo_href"]} if view["todo_href"] else link,
-                               href=_job_link(key)))
+                               href=_job_link(key), code=code))
         else:
             retry = view["next_at"]
             found.append(_item("applications", "%s: %s" % (name, view["problem"]), "Nothing you need to do. " + view["todo"],
                                at, counts.get(key, 1), retry if retry is not None and retry > now else None, fix=link,
-                               href=_job_link(key)))
+                               href=_job_link(key), code=code))
     return found
 
 
@@ -574,7 +578,7 @@ def outreach_failures(reader, now):
             if words == PURPOSE_WORDS["REPLY"]:
                 todo = ("Nothing you need to do. Sidedoor keeps checking the conversation but won't send %s again, so "
                         "nobody gets a reply twice." % ("it" if count == 1 else "them"))
-        found.append(_item("outreach", text, todo, entry["at"], count))
+        found.append(_item("outreach", text, todo, entry["at"], count, code=state))
     launches = reader.rows("SELECT state,claimed_at FROM outreach_attempts WHERE state IN ('LAUNCH_RETRY_WAIT','LAUNCH_FAILED')",
                            (), "outreach_attempts")
     for state, text, todo in (("LAUNCH_RETRY_WAIT", "didn't start", "Nothing you need to do. Sidedoor will try again on its own, up to 3 tries."),
@@ -585,7 +589,7 @@ def outreach_failures(reader, now):
         if matching:
             at = max(filter(None, (overview._utc(row["claimed_at"]) for row in matching)), default=None)
             found.append(_item("outreach", "%s %s." % (_plural(len(matching), ("invitation campaign", "invitation campaigns")), text),
-                               todo, at, len(matching)))
+                               todo, at, len(matching), code=state))
     return found
 
 
@@ -611,24 +615,27 @@ def notification_failures(reader, now, fmt):
     if failed:
         found.append(_item("connections", "%s couldn't be delivered." % _plural(len(failed), words),
                            "Nothing you need to do. Sidedoor stopped trying; anything that needs you also shows on this dashboard.",
-                           max(filter(None, (overview._utc(row["updated_at"]) for row in failed)), default=None), len(failed)))
+                           max(filter(None, (overview._utc(row["updated_at"]) for row in failed)), default=None), len(failed),
+                           code="NOTIFICATION_FAILED"))
     if unsure:
         found.append(_item("connections", "Sidedoor couldn't confirm whether %s arrived." % _plural(len(unsure), words),
                            "Nothing you need to do. Sidedoor checks before sending again, so nothing arrives twice.",
-                           max(filter(None, (overview._utc(row["updated_at"]) for row in unsure)), default=None), len(unsure)))
+                           max(filter(None, (overview._utc(row["updated_at"]) for row in unsure)), default=None), len(unsure),
+                           code="NOTIFICATION_UNCERTAIN"))
     if stopped:
         found.append(_item("connections", "Sidedoor couldn't confirm whether %s arrived, and has stopped checking."
                            % _plural(len(stopped), words),
                            "Nothing you need to do. Sidedoor won't send %s again; anything that needs you also shows on "
                            "this dashboard." % ("it" if len(stopped) == 1 else "them"),
-                           max(filter(None, (overview._utc(row["updated_at"]) for row in stopped)), default=None), len(stopped)))
+                           max(filter(None, (overview._utc(row["updated_at"]) for row in stopped)), default=None), len(stopped),
+                           code="NOTIFICATION_UNCONFIRMED"))
     if waiting:
         retry = min(filter(lambda moment: moment is not None and moment > now,
                            (overview._utc(row["next_at"]) if row["next_at"] else None for row in waiting)), default=None)
         found.append(_item("connections", "%s didn't go through yet." % _plural(len(waiting), words),
                            "Nothing you need to do. Sidedoor will try again %s." % (_at(fmt, retry) if retry else "on its own"),
                            max(filter(None, (overview._utc(row["updated_at"]) for row in waiting)), default=None),
-                           len(waiting), retry))
+                           len(waiting), retry, code="NOTIFICATION_RETRY"))
     return found
 
 
@@ -661,7 +668,7 @@ def browser_failures(reader, now, fmt):
             continue
         found.append(_item(BROWSER_GROUPS.get(row["source"], "other"), browser_runtime.UNAVAILABLE_WORDS[reason],
                            browser_runtime.UNAVAILABLE_TODO[reason] + " It started %s." % fmt(since),
-                           overview._utc(row["last_seen"]) or since, you=True, detail=row["code"]))
+                           overview._utc(row["last_seen"]) or since, you=True, detail=row["code"], code=row["code"]))
     return found
 
 

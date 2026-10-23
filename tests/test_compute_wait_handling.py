@@ -440,37 +440,37 @@ class ComputeWaitTests(unittest.TestCase):
 
     def test_migration_preserves_existing_exhausted_days_without_reopening_them(self):
         """The live 2026-09-17 / 2026-09-18 EXHAUSTED rows must survive untouched."""
-        with tempfile.TemporaryDirectory() as directory:
-            legacy_root = Path(directory)
-            (legacy_root / "state").mkdir()
-            legacy = orchestrator.connect(legacy_root)
-            self.addCleanup(legacy.close)
-            legacy.executescript("""
-                CREATE TABLE research_days (
-                    day TEXT PRIMARY KEY, state TEXT NOT NULL, attempts INTEGER NOT NULL,
-                    attempt_id TEXT, next_retry_at TEXT, completed_at TEXT);
-                CREATE TABLE schedule_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                INSERT INTO schedule_meta VALUES ('daily_migration','1');
-                INSERT INTO research_days VALUES
-                    ('2026-09-16','COMPLETE',1,'c0000015',NULL,'2026-09-17T05:42:30.777123+00:00'),
-                    ('2026-09-17','EXHAUSTED',10,'c0000001',NULL,NULL),
-                    ('2026-09-18','EXHAUSTED',1,'c0000008',NULL,NULL);
-            """)
-            legacy.commit()
-            before = [tuple(row) for row in legacy.execute(
-                "SELECT day,state,attempts,attempt_id,next_retry_at,completed_at FROM research_days ORDER BY day")]
+        directory = self.enterContext(tempfile.TemporaryDirectory())  # a cleanup: runs after the connections the test closes (Windows)
+        legacy_root = Path(directory)
+        (legacy_root / "state").mkdir()
+        legacy = orchestrator.connect(legacy_root)
+        self.addCleanup(legacy.close)
+        legacy.executescript("""
+            CREATE TABLE research_days (
+                day TEXT PRIMARY KEY, state TEXT NOT NULL, attempts INTEGER NOT NULL,
+                attempt_id TEXT, next_retry_at TEXT, completed_at TEXT);
+            CREATE TABLE schedule_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schedule_meta VALUES ('daily_migration','1');
+            INSERT INTO research_days VALUES
+                ('2026-09-16','COMPLETE',1,'c0000015',NULL,'2026-09-17T05:42:30.777123+00:00'),
+                ('2026-09-17','EXHAUSTED',10,'c0000001',NULL,NULL),
+                ('2026-09-18','EXHAUSTED',1,'c0000008',NULL,NULL);
+        """)
+        legacy.commit()
+        before = [tuple(row) for row in legacy.execute(
+            "SELECT day,state,attempts,attempt_id,next_retry_at,completed_at FROM research_days ORDER BY day")]
 
-            daily_schedule.initialize(legacy, "America/Los_Angeles")
+        daily_schedule.initialize(legacy, "America/Los_Angeles")
 
-            self.assertEqual(before, [tuple(row) for row in legacy.execute(
-                "SELECT day,state,attempts,attempt_id,next_retry_at,completed_at FROM research_days ORDER BY day")])
-            self.assertEqual([row[0] for row in legacy.execute(
-                "SELECT compute_wait_attempts FROM research_days ORDER BY day")], [0, 0, 0])
-            for day, expected in (("2026-09-17", "EXHAUSTED"), ("2026-09-18", "EXHAUSTED"), ("2026-09-16", "COMPLETE")):
-                now = dt.datetime.fromisoformat(day + "T12:00:00").replace(tzinfo=PACIFIC)
-                self.assertEqual(daily_schedule.claim(legacy, self.config, now)["state"], expected, day)
-            self.assertEqual(before, [tuple(row) for row in legacy.execute(
-                "SELECT day,state,attempts,attempt_id,next_retry_at,completed_at FROM research_days ORDER BY day")])
+        self.assertEqual(before, [tuple(row) for row in legacy.execute(
+            "SELECT day,state,attempts,attempt_id,next_retry_at,completed_at FROM research_days ORDER BY day")])
+        self.assertEqual([row[0] for row in legacy.execute(
+            "SELECT compute_wait_attempts FROM research_days ORDER BY day")], [0, 0, 0])
+        for day, expected in (("2026-09-17", "EXHAUSTED"), ("2026-09-18", "EXHAUSTED"), ("2026-09-16", "COMPLETE")):
+            now = dt.datetime.fromisoformat(day + "T12:00:00").replace(tzinfo=PACIFIC)
+            self.assertEqual(daily_schedule.claim(legacy, self.config, now)["state"], expected, day)
+        self.assertEqual(before, [tuple(row) for row in legacy.execute(
+            "SELECT day,state,attempts,attempt_id,next_retry_at,completed_at FROM research_days ORDER BY day")])
 
 
 if __name__ == "__main__":

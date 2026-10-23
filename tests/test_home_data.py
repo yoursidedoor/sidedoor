@@ -65,7 +65,7 @@ class OnePlaceTest(unittest.TestCase):
         for path in sorted(CODE.glob("*.py")):
             if path.name.startswith("manual_") or path.name == "paths.py":
                 continue
-            hits = built_paths(path.read_text())
+            hits = built_paths(path.read_text(encoding="utf-8"))
             if hits:
                 offenders[path.name] = hits
         self.assertEqual(offenders, {}, "build data paths with paths.state()/reports()/logs()/backups()/database()")
@@ -138,6 +138,17 @@ class Folders(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(database)) as connection:
             return connection.execute("SELECT count(*) FROM runs").fetchone()[0]
 
+    def moved(self, **keep):
+        """[Move my data now] (paths.resolve). On Windows it sets nothing aside and moves nothing (W2 a,
+        owner 2026-10-23): asserted here, and None tells the test to stop; elsewhere its result."""
+        before = paths.status()
+        after = paths.resolve(**keep)
+        if os.name == "nt":
+            self.assertNotIn("error", after)
+            self.assertEqual((after["state"], after["conflicts"]), (before["state"], before["conflicts"]))
+            return None
+        return after
+
     def quiet(self, function, *args, **kwargs):
         with contextlib.redirect_stderr(io.StringIO()) as errors:
             return function(*args, **kwargs), errors.getvalue()
@@ -207,7 +218,9 @@ class MigrationTest(Folders):
         self.assertEqual([(c["item"], c["reason"], c["keep"]) for c in status["conflicts"]],
                          [(paths.STATE, paths.REAPPEARED, str(self.home / "state"))])
         # [Move my data now]: the later copy is set aside, nothing deleted, work may start.
-        after = paths.resolve()
+        after = self.moved()
+        if after is None:
+            return
         self.assertEqual(after["state"], paths.DONE)
         self.assertEqual(self.rows(self.home / "state" / "orchestrator.sqlite3"), 1000)
         self.assertEqual(len(list(self.legacy.glob("state" + paths.ASIDE + "*"))), 1)
@@ -228,7 +241,9 @@ class MigrationTest(Folders):
         self.assertEqual((self.legacy / "reports" / "latest.json").read_text(), '{"state": "NEWER"}')
         self.assertTrue((self.home / "reports" / "application-browser" / "request-1" / "trace.jsonl").is_file())
         self.assertEqual(paths.prepare(), self.home, "a reports/ conflict does not hold the jobs")
-        after = paths.resolve()
+        after = self.moved()
+        if after is None:
+            return
         self.assertEqual(after["state"], paths.DONE)
         self.assertEqual(len(list((self.legacy / "reports").glob("latest.json" + paths.ASIDE + "*"))), 1)
 
@@ -245,7 +260,9 @@ class MigrationTest(Folders):
         self.assertEqual((status["state"], status["held"]), (paths.CONFLICT, False))
         self.assertEqual(status["conflicts"][0]["keep"], str(self.legacy / "logs"))
         self.assertEqual(paths.prepare(), self.home, "jobs go on")
-        resolved = paths.resolve()
+        resolved = self.moved()
+        if resolved is None:
+            return
         self.assertEqual(resolved["state"], paths.DONE, resolved)
         self.assertEqual((self.home / "logs" / "launchd.stdout.log").read_text(), "hello\n")
         self.assertEqual(len(list(self.home.glob("logs" + paths.ASIDE + "*"))), 1)
@@ -274,7 +291,10 @@ class MigrationTest(Folders):
         banner = dashboard.data_move_banner(self.home)
         self.assertEqual((banner["form_action"], banner["tone"]), ("/data/move", "error"))
         self.assertTrue(any("Rename" in step for step in banner["steps"]))
-        self.assertEqual(paths.resolve()["state"], paths.DONE)
+        after = self.moved()
+        if after is None:
+            return
+        self.assertEqual(after["state"], paths.DONE)
         self.assertEqual(self.rows(self.home / "state" / "orchestrator.sqlite3"), 50)
         aside = list(self.home.glob("state" + paths.ASIDE + "*"))
         self.assertEqual(self.rows(aside[0] / "orchestrator.sqlite3"), 1, "the home's copy is kept aside")
@@ -538,7 +558,8 @@ class ReappearedDatabaseTest(Folders):
             with mock.patch.object(os, "lstat", wraps=os.lstat) as lstat:
                 self.assertEqual(paths.migrate()["state"], "DONE_BEFORE")
             self.assertEqual(lstat.call_count, 1, "one lstat while the link is in place")
-            (self.legacy / "state").unlink()
+        if (self.legacy / "state").is_symlink():
+            (self.legacy / "state").unlink()   # Windows too when it could make the link (an admin)
         (self.legacy / "state").mkdir(exist_ok=True)
         sqlite3.connect(self.legacy / "state" / "orchestrator.sqlite3").close()
         self.assertEqual(paths.status()["state"], paths.CONFLICT)
@@ -566,7 +587,10 @@ class ReappearedDatabaseTest(Folders):
         self.assertEqual(conflict["reason"], paths.HOME_HAS_DATA)
         self.assertIn("501 application jobs", conflict["code_detail"])
         self.assertIn("1 application jobs", conflict["home_detail"])
-        self.assertEqual(paths.resolve(keep=paths.CODE_SIDE)["state"], paths.DONE)
+        after = self.moved(keep=paths.CODE_SIDE)
+        if after is None:
+            return
+        self.assertEqual(after["state"], paths.DONE)
         self.assertEqual(self.count(self.home / "state" / "orchestrator.sqlite3"), 501)
         self.assertEqual(self.count(next(self.home.glob("state" + paths.ASIDE + "*")) / "orchestrator.sqlite3"), 1)
 
@@ -583,7 +607,10 @@ class ReappearedDatabaseTest(Folders):
         self.jobs(self.legacy / "state" / "orchestrator.sqlite3", 0, split + dt.timedelta(hours=1))   # newer, empty
         conflict = paths.status()["conflicts"][0]
         self.assertEqual((conflict["keep_side"], conflict["choice_required"]), (paths.HOME, False))
-        self.assertEqual(paths.resolve()["state"], paths.DONE)
+        after = self.moved()
+        if after is None:
+            return
+        self.assertEqual(after["state"], paths.DONE)
         self.assertEqual(self.count(self.home / "state" / "orchestrator.sqlite3"), 1000)
         self.assertEqual(len(list(self.legacy.glob("state" + paths.ASIDE + "*"))), 1, "set aside, not deleted")
 
@@ -602,7 +629,10 @@ class ReappearedDatabaseTest(Folders):
             banner = dashboard.data_move_banner(self.home)
             self.assertEqual([form["fields"]["keep"] for form in banner["forms"]], [paths.HOME, paths.CODE_SIDE])
             self.assertNotIn("form_action", banner)
-        self.assertEqual(paths.resolve(keep=paths.CODE_SIDE)["state"], paths.DONE)
+        after = self.moved(keep=paths.CODE_SIDE)
+        if after is None:
+            return
+        self.assertEqual(after["state"], paths.DONE)
         self.assertEqual(self.count(self.home / "state" / "orchestrator.sqlite3"), 1500)
         self.assertEqual(len(list(self.home.glob("state" + paths.ASIDE + "*"))), 1)
 

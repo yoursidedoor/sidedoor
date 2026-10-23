@@ -53,7 +53,7 @@ def normalized(fixture, request, result, mutate=None):
     directory = fixture.root / "normalization"
     directory.mkdir(exist_ok=True)
     write_output(directory, request, result, mutate=mutate)
-    raw = json.loads((directory / "output.json").read_text())
+    raw = json.loads((directory / "output.json").read_text(encoding="utf-8"))
     return browser.normalize(request, raw, (directory / "trace.jsonl").read_bytes(), applications.stamp(), directory / "trace.jsonl")
 
 

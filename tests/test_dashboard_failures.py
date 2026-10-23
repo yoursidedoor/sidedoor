@@ -487,6 +487,7 @@ class LogTest(unittest.TestCase):
         self.assertEqual(len(lines), failures_page.LOG_LINES)
         self.assertTrue(lines[-1].startswith("line 04999"))
 
+    @unittest.skipIf(os.name == "nt", "POSIX modes, uids and symlinks")
     def test_missing_unreadable_symlinked_or_odd_files_never_raise(self):
         (self.logs / "research.stderr.log").write_text("secret stuff\n")
         os.chmod(self.logs / "research.stderr.log", 0)
@@ -548,6 +549,7 @@ class LogTest(unittest.TestCase):
         self.assertNotIn("s3cr3tvalue", shown)
         self.assertNotIn("hunter2pw", shown)
 
+    @unittest.skipIf(os.name == "nt", "no FIFOs (os.mkfifo) on Windows")
     def test_f14_a_fifo_never_hangs_the_page(self):
         os.mkfifo(self.logs / "research.stdout.log")
         states = {s["name"]: s["state"] for s in failures_page.logs_view(self.logs, [])["streams"]}

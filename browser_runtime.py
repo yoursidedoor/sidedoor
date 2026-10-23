@@ -139,7 +139,7 @@ def sidedoor_command():
     if frozen():
         import scheduler_loop
         return [scheduler_loop.program()]
-    return [sys.executable, str(ENTRY)]
+    return [sys.executable, *portable.UTF8_FLAGS, str(ENTRY)]
 
 
 def upload_folder(directory):

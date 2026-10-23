@@ -39,6 +39,37 @@ except ImportError:          # POSIX
 
 WINDOWS = os.name == "nt"
 
+# Python UTF-8 mode (W1 a, owner 2026-10-23): on Windows every Sidedoor process runs with it, so
+# open(), read_text() and pipes default to UTF-8, not the ANSI code page (cp1252), where a profile or
+# resume with characters such as Polish or Japanese letters could not be written. Each Python child Sidedoor starts from source
+# gets these interpreter flags; the frozen build has the mode compiled in (Nuitka run with -X utf8).
+UTF8_FLAGS = ("-X", "utf8") if WINDOWS else ()
+
+
+def ensure_utf8_mode(frozen=False, warn=None, call=None):
+    """Windows, the entry point (W1 a): a process not in UTF-8 mode (`python orchestrator.py ...` typed
+    by hand) runs itself again with -X utf8 and exits with that run's code; a frozen build lacking
+    the mode logs `warn` and goes on. Children inherit PYTHONUTF8=1. Elsewhere: nothing. Returns the
+    exit code to end with, or None to go on."""
+    import sys
+    if not WINDOWS:
+        return None
+    os.environ["PYTHONUTF8"] = "1"
+    if sys.flags.utf8_mode:
+        return None
+    if frozen:
+        if warn:
+            warn("WINDOWS_UTF8_MODE_OFF: the build was not made with -X utf8; files use the ANSI code page")
+        return None
+    import subprocess
+    argv = [sys.executable, *UTF8_FLAGS, *sys.orig_argv[1:]]
+    process = (call or subprocess.Popen)(argv)
+    while True:
+        try:
+            return process.wait()
+        except KeyboardInterrupt:   # the console's Ctrl-C reaches the child too; wait for it to end
+            continue
+
 # Windows constants (winbase.h / winnt.h / tlhelp32.h).
 CREATE_SUSPENDED = 0x00000004
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -298,6 +329,26 @@ def wait_profile_free(path, wait_seconds=5.0, poll_seconds=0.1):
 
 # ---------------------------------------------------------------------------------------------
 # Logs (R1, R2)
+
+def fsync_path(path):
+    """Flush a file already written and closed to disk. POSIX: fsync on a read-only descriptor, as
+    before. Windows: FlushFileBuffers needs write access (fsync of an "rb" handle is EBADF), so the
+    file is opened for appending, which never changes it."""
+    with open(path, "ab" if WINDOWS else "rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def fsync_directory(path):
+    """Flush a directory's entries (new names) to disk. POSIX: fsync on the directory, as before.
+    Windows: a directory cannot be opened with os.open and NTFS journals its entries; nothing to do."""
+    if WINDOWS:
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
 
 def try_rotate(path, archive):
     """Rename `path` to `archive`. True when done. Windows: False when another process holds the

@@ -191,6 +191,15 @@ class ActionsTest(unittest.TestCase):
             self.assertEqual(doctor.check_tray(home, platform="linux")["status"], "OK")
 
 
+def signal_self(number):
+    """Deliver `number` to this process's handler. On Windows os.kill with SIGINT/SIGTERM terminates
+    the process (TerminateProcess) instead, so raise it in-process there (E2.T2)."""
+    if os.name == "nt":
+        signal.raise_signal(number)
+    else:
+        os.kill(os.getpid(), number)
+
+
 @unittest.skipUnless(DASHBOARD, "dashboard packages (fastapi, httpx) are not installed")
 class ServeWithTrayTest(unittest.TestCase):
     def serve(self, server, modules, act):
@@ -242,7 +251,7 @@ class ServeWithTrayTest(unittest.TestCase):
 
         def sigterm(icon, home):
             wait_for(lambda: (tray.read_state(home) or {}).get("state") == "shown")
-            os.kill(os.getpid(), signal.SIGTERM)
+            signal_self(signal.SIGTERM)
         result, state, loop = self.serve(server, fake_modules(), sigterm)
         self.assertEqual(result, 0)
         self.assertTrue(server.should_exit)
@@ -256,7 +265,7 @@ class ServeWithTrayTest(unittest.TestCase):
             wait_for(lambda: (tray.read_state(home) or {}).get("state") == "unavailable")
             time.sleep(0.2)
             seen["still serving"] = not server.should_exit
-            os.kill(os.getpid(), signal.SIGINT)
+            signal_self(signal.SIGINT)
         result, state, loop = self.serve(server, fake_modules(fail_with=RuntimeError("no status bar")), later_sigint)
         self.assertEqual(result, 0)
         self.assertTrue(seen["still serving"])

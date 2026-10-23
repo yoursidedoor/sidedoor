@@ -4,6 +4,7 @@ sidedoor browser from just snatching control of my screen?", option a). Offline.
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -27,6 +28,7 @@ class LaunchIsNeverActivated(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    @unittest.skipIf(os.name == "nt", "macOS only (/usr/bin/open -g); Chrome's path is a POSIX path")
     def test_the_launch_command_is_open_dash_g(self):
         profile = Path("/private/tmp/sidedoor-profile")
         command = browser_runtime.background_command(browser_runtime.chrome_app(CHROME), profile)

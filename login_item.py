@@ -65,6 +65,7 @@ import log
 import scheduler_loop
 import user_profile
 import paths
+import portable
 
 LOG = log.get(__name__)
 
@@ -195,7 +196,7 @@ def _program():
     """[program] or [python, orchestrator.py], as `scheduler_loop.job_command` runs the jobs."""
     if scheduler_loop.frozen():
         return [scheduler_loop.program()]
-    return [sys.executable, str(scheduler_loop.ENTRY)]
+    return [sys.executable, *portable.UTF8_FLAGS, str(scheduler_loop.ENTRY)]
 
 
 MOVE_TO_APPLICATIONS = "Move Sidedoor to your Applications folder, then open it again."
@@ -365,14 +366,33 @@ def windowed_program():
     return str(windowed) if windowed.exists() else sys.executable
 
 
+def windows_user():
+    """This user as DOMAIN\\name, the way Windows itself resolves it (GetUserNameExW,
+    NameSamCompatible), for the task's <UserId>. %USERDOMAIN% is not reliable: in an SSH session on
+    the Windows VM it was WORKGROUP, and schtasks then refused the task ("No mapping between account
+    names and security IDs was done"). Falls back to %USERDOMAIN%\\%USERNAME% off Windows (tests) or
+    if the call fails."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            secur32 = ctypes.WinDLL("secur32")
+            size = ctypes.c_ulong(0)
+            secur32.GetUserNameExW(2, None, ctypes.byref(size))   # NameSamCompatible; sets the size
+            buffer = ctypes.create_unicode_buffer(max(size.value, 1))
+            if size.value and secur32.GetUserNameExW(2, buffer, ctypes.byref(size)) and buffer.value:
+                return buffer.value
+        except (OSError, AttributeError, ValueError):
+            pass
+    return "\\".join(part for part in (os.environ.get("USERDOMAIN"), os.environ.get("USERNAME")) if part)
+
+
 def task_xml(root=None, user=None, home=None):
     """The Task Scheduler definition: at logon of this user, the windowed program runs
     `supervise ...` (no cmd.exe, no console); no time limit; RestartOnFailure for a failed launch."""
     root = paths.data(root, _sidedoor_home(home))
     arguments = command(home)[1:]
     arguments[arguments.index("serve")] = "supervise"
-    user = user if user is not None else "\\".join(part for part in (os.environ.get("USERDOMAIN"),
-                                                                      os.environ.get("USERNAME")) if part)
+    user = user if user is not None else windows_user()
     trigger_user = "<UserId>%s</UserId>" % escape(user) if user else ""
     return ('<?xml version="1.0" encoding="UTF-16"?>\n'
             '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
