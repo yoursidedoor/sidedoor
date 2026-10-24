@@ -52,8 +52,9 @@ rule ties it to (its lead ids and conversation ids, the rule the reply path uses
 and `outreach.tracked_person` read once per request (`Tracking`). A member-id spelling that resolves to
 nobody, to several people, or that is tracked on its own stays its own entry: never wrongly merged.
 
-Who is listed: anyone with a message of ours (sent, sending, failed or refused), a referral or an open
-note. Someone who only wrote to the user (a cold stranger) is not listed, and Overview's "Replies
+Who is listed: anyone with a message of ours (sent, sending, failed or refused), an invitation still
+queued (an INVITE action in PENDING; owner, 2026-10-24: the page shows everyone in the pipeline; in the
+"Waiting" filter, not "Invitations sending", which is Overview's count), a referral or an open note. Someone who only wrote to the user (a cold stranger) is not listed, and Overview's "Replies
 received" counts the listed people who wrote today (`replied_between`, the "Replied today" filter).
 
 Indexes: the summary reads engagement_events through `engagement_kind_identity` (kind, identity,
@@ -92,6 +93,7 @@ MESSAGE_PURPOSES = ("INVITE", "INITIAL", "FIRST_MESSAGE", "FOLLOWUP", "URGENT", 
 SENDING = tuple(overview.INVITE_WAITING)            # acknowledged or in flight; Sidedoor still settles these
 UNCERTAIN = ("UNCERTAIN_NO_RETRY",)                 # never resent; kept for reconciliation only
 NOT_SENT = ("CONFIRMED_NOT_SENT",)
+QUEUED = ("PENDING",)                               # an invitation not started yet (owner, 2026-10-24: list it)
 CAMPAIGN_UNSETTLED = ("CLAIMED", "DISPATCHING", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", "UNCERTAIN_NO_RETRY")
 AUDIT_SCAN = 50
 SKIPPED_PHASES = ("RECONCILIATION", "COMPOSITION")
@@ -103,6 +105,7 @@ SEEN_IN_INBOX = "Your message, seen in your LinkedIn inbox"
 STATUS = {"closed": ("Closed", "muted"), "opted_out": ("Opted out", "muted"), "replied": ("Replied", "success"),
           "connected": ("Connected", "info"), "messaged": ("Messaged", "info"),
           "invited": ("Invited, waiting for acceptance", "info"), "sending": ("Sending…", "warning"),
+          "queued": ("Invitation queued", "muted"),
           "uncertain": ("Couldn't confirm it went out", "warning"), "failed": ("Couldn't send", "error"),
           "none": ("Nothing sent yet", "muted")}
 REFERRAL_WORDS = {"AGREED": ("Referral agreed", "success"), "DECLINED": ("Referral declined", "muted")}
@@ -174,6 +177,7 @@ class Person:
         self.direct = False        # a confirmed message that is not an invitation
         self.sending = False
         self.invite_sending = False
+        self.queued = False        # an INVITE action still PENDING
         self.uncertain = False
         self.failed = False
         self.refused = 0
@@ -189,9 +193,10 @@ class Person:
         return moment
 
     def listed(self):
-        """On this page: a message of ours (sent, sending, failed, refused), a referral or an open note."""
+        """On this page: a message of ours (sent, sending, queued invitation, failed, refused), a referral or an
+        open note."""
         ours = any(self.kinds.get(kind) for kind in ("initial_sent", "followup_sent", "outbound_observed"))
-        return bool(ours or self.sending or self.uncertain or self.failed or self.refused or self.referral is not None
+        return bool(ours or self.sending or self.queued or self.uncertain or self.failed or self.refused or self.referral is not None
                     or self.notes)
 
 
@@ -227,14 +232,18 @@ def people(reader):
         if payload is not None and payload.get("purpose") != "REPLY" and (source, source_id) not in reconciled:
             if (person := get(identity)) is not None:
                 person.observed += 1
-    states = SENDING + UNCERTAIN + NOT_SENT
+    states = SENDING + UNCERTAIN + NOT_SENT + QUEUED
     for identity, text, state, claimed_at in reader.rows(
             "SELECT identity,payload,state,claimed_at FROM outreach_actions WHERE state IN (%s)" % _marks(states), states,
             "outreach_actions"):
         payload = _object(text)
         if payload is None or payload.get("purpose") not in MESSAGE_PURPOSES or (person := get(identity)) is None:
             continue
-        if state in SENDING:
+        if state in QUEUED:
+            if payload.get("purpose") != "INVITE":
+                continue
+            person.queued = True
+        elif state in SENDING:
             person.sending = True
             person.invite_sending = person.invite_sending or payload.get("purpose") == "INVITE"
         elif state in UNCERTAIN:
@@ -286,7 +295,9 @@ class Joins:
     def __init__(self, reader, identities):
         self.parent = {identity: identity for identity in identities}
         self.size = dict.fromkeys(identities, 1)
-        for alias, canonical in reader.rows("SELECT alias,canonical FROM rw_aliases WHERE kind='contact'", (), "rw_aliases"):
+        reader.alias_rows = reader.rows("SELECT alias,canonical FROM rw_aliases WHERE kind='contact'", (), "rw_aliases") \
+            if reader.has("rw_aliases") else None   # kept for sequence_view (engagement.aliases_read_once)
+        for alias, canonical in reader.alias_rows or ():
             one, two = _key(alias), _key(canonical)
             if one and two:
                 self.join(one, two)
@@ -410,6 +421,7 @@ class Contact:
         self.direct = any(person.direct for person in own)
         self.sending = any(person.sending for person in own)
         self.invite_sending = any(person.invite_sending for person in own)
+        self.queued = any(person.queued for person in own)
         self.uncertain = any(person.uncertain for person in own)
         self.failed = any(person.failed for person in own)
         self.refused = sum(person.refused for person in own)
@@ -446,6 +458,8 @@ class Contact:
                 self._status = "invited"
             elif self.sending:
                 self._status = "sending"
+            elif self.queued:
+                self._status = "queued"
             elif self.uncertain:
                 self._status = "uncertain"
             elif self.failed or self.refused:
@@ -460,7 +474,7 @@ class Contact:
         if show == "replied_today":
             return self.last_inbound is not None and start is not None and start <= self.last_inbound < end
         if show == "waiting":
-            return self.status() in ("invited", "sending")
+            return self.status() in ("invited", "sending", "queued")
         if show == "sending":
             return self.invite_sending
         if show == "referral_agreed":
@@ -708,14 +722,39 @@ def _digest(key):
     return hashlib.sha1(str(key).encode()).hexdigest()[:16]
 
 
-def entry(reader, contact, notes, refused):
+def sequence_line(reader, contact, now, zone):
+    """The contact's place in the outreach sequence ("Invited 10-21 · Accepted 10-22 · Follow-up due
+    10-27"), from `sequence.sequence_view` of each of the contact's spellings merged (one entry per
+    person); None when nothing is on record or the records cannot be read (the rest of the entry still
+    shows)."""
+    import sequence
+    try:
+        views = [sequence.sequence_view(reader.database, identity, now) for identity in contact.ids]
+    except Exception:
+        return None
+    steps, seen = [], set()
+    for step in sorted((step for view in views for step in view["steps"]), key=lambda step: str(step.get("at") or "")):
+        key = (step["label"], step.get("at")) if step["label"] == "Follow-up" else step["label"]
+        if key in seen:   # spellings joined by rw_aliases read the same events
+            continue
+        seen.add(key)
+        steps.append(step)
+    due = next((view["due"] for view in views if view.get("due")), None)
+    stage = next((view["stage"] for view in views if view["stage"].startswith("INVITE_")), None)
+    return sequence.position({"steps": steps, "due": due, "stage": stage}, zone) or None
+
+
+def entry(reader, contact, notes, refused, now=None, zone=None):
     pages = _pages()
     actions = _actions(reader, contact.ids)
     status, tone = STATUS[contact.status()]
     found = dict(_who(reader, contact.ids, actions), status=status, tone=tone, last=contact.last,
                  conversation=conversation(reader, contact.ids, actions), referral=referral(reader, contact.ids),
                  notes=[note_view(note) for identity, note in notes.values() if identity in contact.ids],
-                 dom="contact-" + _digest(contact.ids[0]))
+                 dom="contact-" + _digest(contact.ids[0]),
+                 sequence=sequence_line(reader, contact, now, zone or ZoneInfo("America/Los_Angeles")))
+    if found["sequence"] == status:
+        found["sequence"] = None   # "Invitation queued" is already the chip
     found["refused"] = [{"kind": _word(pages.PURPOSE_WORDS, item["purpose"], "Message"),
                          "text": item["message"] if isinstance(item["message"], str) else None,
                          "reasons": list(dict.fromkeys(pages.GATE_WORDS.get(gate, pages.GENERIC_GATE)
@@ -726,7 +765,7 @@ def entry(reader, contact, notes, refused):
 
 # --- The page ------------------------------------------------------------------------------------
 
-def listing(reader, show, page, query, start, end):
+def listing(reader, show, page, query, start, end, now=None, zone=None):
     found, notes, refused = contacts(reader)
     if query:
         texts, needle = _search_texts(reader), query.casefold()
@@ -738,7 +777,9 @@ def listing(reader, show, page, query, start, end):
     pages = max(1, math.ceil(len(chosen) / PAGE_SIZE))
     page = min(max(1, page), pages)
     window = chosen[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]
-    return {"contacts": [entry(reader, contact, notes, refused) for contact in window], "total": len(chosen),
+    with engagement.aliases_read_once(reader.database, getattr(reader, "alias_rows", None)):   # sequence_view
+        shown = [entry(reader, contact, notes, refused, now, zone) for contact in window]
+    return {"contacts": shown, "total": len(chosen),
             "page": page, "pages": pages, "counts": counts}
 
 
@@ -769,7 +810,7 @@ def gather(database, config, show="all", page=1, query=None, now=None):
         return "/sent" + ("?" + urllib.parse.urlencode(pairs) if pairs else "")
 
     return {"show": show, "query": query, "filters": FILTERS, "link": link, "unavailable": UNAVAILABLE,
-            "unreadable": reader.broken, "list": overview.section(reader, listing, show, _int(page), query, start, end),
+            "unreadable": reader.broken, "list": overview.section(reader, listing, show, _int(page), query, start, end, now, zone),
             "when": lambda moment: overview.when(moment, now, zone) if moment else None}
 
 

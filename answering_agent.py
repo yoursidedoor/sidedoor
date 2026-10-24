@@ -870,7 +870,9 @@ def answer(database, job, questions, policy, now, adapter=None, *, root=None, co
 
     Returns a dict with at least:
       "answers":  {question_key: {"value", "semantic", "attribution", "question_id", "judge"}}
-      "unknown":  [question_key, ...]   # retried by the AI on a later cycle (ANSWERING_RETRY)
+      "unknown":  [question_key, ...]   # retried on a later cycle (ANSWERING_RETRY), or asked on
+                                        # Approvals when the verdicts say only the owner can answer
+                                        # (`applications.owner_questions`)
       "refused":  [{"question_key", "reason"}]  # the resume, attached out of band
       "audit":    {...}                 # raw model output preserved verbatim
 
@@ -887,7 +889,9 @@ def answer(database, job, questions, policy, now, adapter=None, *, root=None, co
 
     This function never raises for a model problem. Every failure of the answering call -
     unconfigured, exhausted compute, timeout, malformed output, failed validation - leaves the affected questions in
-    `unknown`, which the ANSWERING_RETRY hold retries on a later cycle; the owner is not asked.
+    `unknown`, which the ANSWERING_RETRY hold retries on a later cycle; the owner is not asked
+    about a failure, only about a question the judge agrees has no truthful answer in the packet
+    (CANNOT_ANSWER, or an UNKNOWN it accepted; `applications.owner_questions`).
     """
     root = Path(root).resolve() if root is not None else Path(__file__).resolve().parent
     config = config if isinstance(config, dict) else _config(root)
@@ -1390,7 +1394,7 @@ def _record_attempt(database, job, result, now):
                              "refused": result["refused"]}, sort_keys=True)))
     except Exception:
         # The audit is evidence, never a gate. A job must not fail because a row could not
-        # be written, and the caller still degrades to asking the owner.
+        # be written; the caller still decides from `result` (retry, or ask the owner).
         pass
 
 

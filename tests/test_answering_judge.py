@@ -263,13 +263,14 @@ class DirectCallTests(base.ResumeFixture):
 
 
 class JudgeSeamTests(unittest.TestCase):
-    """Through `applications.cycle`: a question the judge cannot accept holds the job on ANSWERING_RETRY."""
+    """Through `applications.cycle`: a question the judge finds no truthful answer to (CANNOT_ANSWER) is
+    asked on Approvals and holds the job for the owner (owner, 2026-10-24); nothing is submitted."""
 
     _fixture = base.SeamTests
     setUp, cycle, discover, job = _fixture.setUp, _fixture.cycle, _fixture.discover, _fixture.job
     del _fixture
 
-    def test_a_rejected_answer_is_retried_next_cycle_and_nothing_is_submitted(self):
+    def test_a_rejected_answer_is_asked_of_the_owner_and_nothing_is_submitted(self):
         key = self.discover()
         model = Scripted([willing], [lambda item, packet: ("CANNOT_ANSWER", "not recorded", None)])
         self.adapter.answering_executor = model
@@ -277,8 +278,10 @@ class JudgeSeamTests(unittest.TestCase):
         self.assertEqual((len(model.prompts), len(model.judge_prompts)), (1, 1))
         job = self.job(key)
         self.assertEqual(job["state"], "BLOCKED")
-        self.assertTrue(job["blocker"].startswith("ANSWERING_RETRY:"))
-        self.assertIn(applications.question_field(OFFICE_ATTENDANCE), job["blocker"])
+        self.assertEqual(job["blocker"], "UNKNOWN_REQUIRED_ANSWERS:" + applications.question_field(OFFICE_ATTENDANCE))
+        self.assertEqual(job["attempts"], 0)
+        self.assertEqual([row[0] for row in self.database.execute("SELECT field FROM user_decisions WHERE state='PENDING'")],
+                         [applications.question_field(OFFICE_ATTENDANCE)])
         self.assertFalse([call for call in self.adapter.calls if call[0] == "submit"])
 
 

@@ -44,6 +44,7 @@
         {% if c.referral %}<span class="chip chip-{{ c.referral.tone }}">{{ c.referral.words }}</span>{% endif %}
         {% if c.notes or c.refused %}<span class="chip chip-error">Needs you</span>{% endif %}
         {% if c.last %}<span class="muted net-times">Last activity {{ v.when(c.last) }}</span>{% endif %}
+        {% if c.sequence %}<span class="muted net-sequence">{{ c.sequence }}</span>{% endif %}
       </summary>
       <div class="net-body">
         {% if c.linkedin %}<p><a href="{{ c.linkedin }}" rel="noopener noreferrer" target="_blank">Open their LinkedIn profile</a></p>{% endif %}

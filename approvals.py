@@ -525,10 +525,10 @@ def waiting_read(database):
 
 # --- Approved, then refused by a sending rule (E6.T4, owner D3) ------------------------------------
 
-def refused_after_approval(database, limit=25):
+def refused_after_approval(database, limit=25, offset=0):
     """Messages the owner approved whose send a sending rule then refused: the row is BLOCKED with its
     gate codes (outreach.cycle) and the owner's approval is of exactly its payload. Newest first, at
-    most `limit`, without those the owner dismissed. Reads only."""
+    most `limit` after skipping `offset` (Approvals' paging), without those the owner dismissed. Reads only."""
     if not (_has_table(database, "outreach_actions") and _has_table(database, "outreach_owner_records")):
         return []
     dismissed = set()
@@ -550,6 +550,9 @@ def refused_after_approval(database, limit=25):
             gates = json.loads(result) if result else []
         except ValueError:
             gates = []
+        if offset > 0:
+            offset -= 1
+            continue
         found.append({"action_id": action_id, "payload_hash": payload_hash, "recipient": action.get("recipient"),
                       "company": action.get("company"), "purpose": action.get("purpose"), "message": action.get("message"),
                       "profile": action.get("profile"), "approved_at": record.get("decided_at"),
@@ -558,6 +561,24 @@ def refused_after_approval(database, limit=25):
             break
     return found
 
+
+def refused_count(database):
+    """How many cards `refused_after_approval` has in all (Approvals' "Page X of Y (N)"): the same
+    bounded scan, counted without building the cards."""
+    if not (_has_table(database, "outreach_actions") and _has_table(database, "outreach_owner_records")):
+        return 0
+    dismissed = set()
+    if _has_table(database, "approval_dismissals"):
+        dismissed = {tuple(row) for row in database.execute("SELECT action_id,payload_hash FROM approval_dismissals")}
+    total = 0
+    for action_id, identity, payload, payload_hash in database.execute(
+            "SELECT action_id,identity,payload,payload_hash FROM outreach_actions WHERE state='BLOCKED' ORDER BY rowid DESC LIMIT 500"):
+        if (action_id, payload_hash) in dismissed or _object(payload) is None:
+            continue
+        if any(record["kind"] in (APPROVAL, REVISION) and record.get("approved_payload_hash") == payload_hash
+               for record in decisions(database, action_id, identity)):
+            total += 1
+    return total
 
 def dismiss_refused(database, action_id, payload_hash, now=None):
     """[Dismiss] on a "couldn't send" card: only the card goes; the message stays as it is (never sent

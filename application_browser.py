@@ -24,6 +24,7 @@ import urllib.parse
 
 import applications
 import application_destination
+import external_history
 import browser_guard
 import browser_runtime
 import desktop_adapter
@@ -85,7 +86,8 @@ before the deadline and respect max_tool_calls including guard calls. No unbound
 {gmail_accounts}
 
 inspect/verify/reconcile/investigate are strictly read-only: no filling, uploads, signups or
-submissions. AI maps form questions, interprets eligibility and confirmation from
+submissions. The one kind of typing a read may do: in verify and reconcile, searching the user's
+webmail (see the mailbox rules above). AI maps form questions, interprets eligibility and confirmation from
 observed evidence. Preserve unknowns as null; do not infer absent application,
 interview or referral history from an empty page or from this request. Do not
 invent candidate/legal/demographic/work-authorization facts. Inspection must
@@ -274,7 +276,16 @@ result_json, never wrapped in another object.
 
 # Owner, 2026-09-19: "opening my mail in browser should support account switch since i have
 # multiple accounts logged in." Formatted into both prompts at the {gmail_accounts} marker.
-GMAIL_ACCOUNTS = """Gmail account selection (owner decision, 2026-09-19): this Chrome profile may have
+# Since 2026-10-24 (owner invariant 2026-10-16, E0.T2.S1: receipt reads in the user's own webmail,
+# any provider): the mailbox is context.webmail, Setup's choice; the Gmail rule below is unchanged.
+GMAIL_ACCOUNTS = """The candidate mailbox is the user's own webmail, context.webmail (provider, mailbox_url,
+hosts). Open mail only in that webmail: every mail page and message you cite as evidence must be
+on one of context.webmail.hosts, and source_url is that message's own URL there. The one
+exception is investigate's saved prior-history messages: each is opened at its own record's
+context.external_history[].mailbox_url (these saved records are Gmail messages) and its
+source_url is that saved message's URL, on that record's own host.
+Gmail account selection (owner decision, 2026-09-19), when context.webmail.provider is Gmail: this
+Chrome profile may have
 several Google accounts signed in, and a numbered Gmail URL (/mail/u/<number>/) opens
 whichever account signed in at that position, so never use one. Open Gmail only at URLs
 that address the candidate mailbox by email, https://mail.google.com/mail/?authuser=<candidate email>#<view>, as
@@ -285,7 +296,33 @@ pick that already signed-in account in Google's account chooser). Never enter a 
 sign in, add or create an account, complete MFA or change account settings. The URL only
 selects the account: confirm the mailbox from what the page itself shows (the signed-in
 account address) and quote that observation as mailbox_email evidence. If the candidate
-mailbox is not among the signed-in accounts, stop and report AUTHENTICATION_REQUIRED."""
+mailbox is not among the signed-in accounts, stop and report AUTHENTICATION_REQUIRED.
+Any other provider (Outlook, Yahoo, iCloud and the rest): open the mailbox at
+context.webmail.mailbox_url. The same rules hold: never enter a password, sign in, add,
+create or switch an account, complete MFA or change account settings; confirm from what the
+page itself shows that the signed-in account is the candidate mailbox and quote that
+observation as mailbox_email evidence. If it is another account, a sign-in page or an
+account chooser, stop and report AUTHENTICATION_REQUIRED. Such a webmail has no search URL
+(context.webmail.search_url_prefix is null).
+Searching the mailbox (owner, 2026-10-24: "Sidedoor should be allowed to type/search", "filters
+should be allowed"), in verify and reconcile, for every provider including Gmail: you may type
+into the webmail's own search box (the employer's name or domain, its ATS, role words, the
+candidate address) and narrow the search with the webmail's search filters and refinements -
+date range, from/to, has-attachment, folder or label scope, "search all folders", the filter
+chips and the advanced-search panel - typing into those fields too, then open each candidate
+message by its subject link. Gmail may still be searched at context.webmail.search_url_prefix +
+<URL-encoded query>. You may also browse a folder (Inbox, the folder the provider files
+notifications in, Sent) by its folder link and its pages (Older / Next). Typing anywhere else is
+refused, and nothing may change the mailbox or the account: never compose, reply or forward;
+never create, edit or delete a saved filter RULE, a label or a folder (a search filter narrows a
+search; a rule changes the mailbox); never move, archive, delete, mark, snooze or report a
+message; never open settings, sign in, enter a password or switch accounts.
+Never click Reply, Forward, Send, Delete, Archive, Move or a label control. Sending is
+never allowed in any read operation (inspect, investigate, verify, reconcile), for any provider.
+The single allowed write in a mailbox, for every provider including Gmail, is in the submit
+operation of an EMAIL APPLICATION: composing and sending that one application email from
+context.webmail exactly as the submit section says (Send pressed exactly once); nothing else is
+ever sent, replied to, forwarded, deleted, archived, moved or labelled."""
 PROMPT = PROMPT.replace("{gmail_accounts}", GMAIL_ACCOUNTS)
 
 # Operation-specific guidance, kept OUT of the shared PROMPT (2026-09-22). All operations but
@@ -311,7 +348,7 @@ form. Use observed links and dated saved sources, not guessed requisitions or UR
 No filling, clicking controls, typing, pressing keys, uploads, sends or submissions.
 Navigate directly to observed public links with browser navigation and read snapshots.
 Use scoped saved employer evidence in context. For prior-history investigation,
-the existing browser may read the exact saved Gmail employer messages, opened through each
+the existing browser may read the exact saved employer messages, opened through each
 record's context.external_history[].mailbox_url (the saved message addressed to the
 candidate account), and their observed related message links. Verify the signed-in
 mailbox shown on the page equals the candidate (a recipient alias delivered to that inbox
@@ -606,8 +643,8 @@ word for word in confirmation_text; otherwise acknowledged false. That confirmat
 the verified submission, so never report it from anything else (a spinner, a cleared form, an
 email about a code, or your expectation that it went through).
 EMAIL APPLICATIONS. When request.email_application is present this posting has no form: you
-apply by sending one email from the candidate's own signed-in Gmail. Open a new compose
-window in the mailbox addressed by request.job.candidate_email. Put exactly
+apply by sending one email from the candidate's own signed-in webmail (context.webmail). Open a
+new compose window in that mailbox, at context.webmail.mailbox_url, addressed by request.job.candidate_email. Put exactly
 request.email_application.address in To and nothing in Cc or Bcc. Use
 request.email_application.subject as the subject when it is present, otherwise the answer
 to the request.questions entry whose semantic is application_email_subject; the message is the
@@ -637,10 +674,10 @@ rather than inferring, reconstructing or copying one from the request, and never
 its absence as a reason to withhold SUBMITTED.
 An EMAIL APPLICATION (context.current_attempt.email_application is present) is proved by the
 candidate's own sent message (evidence_kind sent_application_email). Open the Sent folder of the
-candidate's Gmail and read the actual message, not a search snippet. Report mailbox_email and
+candidate's webmail (context.webmail) and read the actual message, not a search snippet. Report mailbox_email and
 sender (both the candidate's address), email_to as the list of every recipient exactly as the
 message shows them, sent_at as the message's own time, attachment_names as the file names it
-carries, source_url as the message's Gmail URL and receipt_id as its message id. It is SUBMITTED
+carries, source_url as the message's own URL in that webmail and receipt_id as its message id. It is SUBMITTED
 only when that message went to the application address, after context.current_attempt.armed_at,
 with the resume attached. A draft, an unsent or failed message, or one to anyone else is not;
 if no such message is in Sent, the email was not sent - report that as NOT_SUBMITTED with the
@@ -661,16 +698,16 @@ this employer. If you cannot tie it to this attempt, return UNKNOWN as before.
 Include the request's exact job_key and attempt_id, and candidate_email verified
 from the authenticated account. Host observed_at follows this claimed read.
 For the email route in verify/reconcile - and, for the emailed-verification-code step
-described under submit above, in submit - the same browser may open Gmail at
-context.gmail.mailbox_url or context.gmail.search_url_prefix + <URL-encoded query>, the
-candidate account addressed by email as above. Search only for
+described under submit above, in submit - the same browser may open the candidate's webmail at
+context.webmail.mailbox_url or, when it is not null, context.webmail.search_url_prefix +
+<URL-encoded query>, the candidate account as above (another provider: browse as above). Search only for
 this employer's confirmation after context.current_attempt.started_at. Read
 the actual matching message and sender details, not just a search snippet. Verify
 the signed-in mailbox, recipient, authenticated employer sender, message identity and
 received time; verify the requisition too when the message carries one, and do not
 withhold SUBMITTED when it does not - most of these messages never name it. Include mailbox_email, recipient, sender,
 sender_authenticated=true, received_at (timezone-qualified ISO time) and source_url
-(the actual Gmail message URL), with actual browser quotes for each. The receipt
+(the actual message URL in that webmail, on one of context.webmail.hosts), with actual browser quotes for each. The receipt
 must independently confirm submission for this attempt; old messages, our own
 drafts and forwarded claims do not qualify. An acknowledgment that names only the
 employer is NOT disqualified for that alone - judge it by employer and timing as set
@@ -681,7 +718,13 @@ Do not use a new connector or work around the browser platform's own controls.
 If the required account/message evidence is unavailable, preserve UNKNOWN or the
 specific blocker (for example a required login). An initial success page or missing email is insufficient.
 NOT_SUBMITTED requires authoritative_absence and no_inflight, each backed by what you
-actually read. An authenticated ATS record is the strongest such evidence, but it is not
+actually read. Read off the webmail, absence is certain only when you report and quote the
+search you ran that covers this employer - mailbox_search.query (the query as the page shows
+it), mailbox_search.results (the results list or the "no results" view) and
+mailbox_search.covers_employer true - or, browsing without a search, when you reached and quote
+a message older than context.current_attempt.started_at (mailbox_oldest_reached.received_at,
+its date as the opened message shows it). A first page of the Inbox is not absence; without one
+of these the host records the outcome as unknown and reads again. An authenticated ATS record is the strongest such evidence, but it is not
 the only one: most employers give a signed-out candidate no account at all, and an
 application status page, a search of the employer's own candidate portal, or an
 authenticated mailbox showing no submission for this role can each establish absence.
@@ -705,8 +748,8 @@ it is entered - Greenhouse does this for applicants who are not signed in (umbre
 completing THIS authorized submission, not making a second one. The once-only arm still
 stands: do NOT arm again. When, and only when, the page itself says a code was emailed
 and the application is incomplete, you may complete it, once:
-- open the candidate mailbox at context.gmail.mailbox_url, or context.gmail.search_url_prefix
-  + <URL-encoded query>, as the signed-in candidate account;
+- open the candidate mailbox at context.webmail.mailbox_url, or (when it is not null)
+  context.webmail.search_url_prefix + <URL-encoded query>, as the signed-in candidate account;
 - find the message from THIS employer or its ATS received AFTER
   context.current_attempt.started_at, open that actual message and read the code from it.
   Never take a code from a search snippet, from a message you did not open, from one that
@@ -816,7 +859,11 @@ def result_contract(operation):
                 "provider_message_or_application_id": None, "job_key": None, "attempt_id": None,
                 "authoritative_absence": False, "no_inflight": False, "next_action": "Investigate unknown outcome",
                 # sent_application_email only: the message the candidate SENT (owner, 2026-09-24).
-                "email_to": [], "sent_at": None, "attachment_names": []}
+                "email_to": [], "sent_at": None, "attachment_names": [],
+                # A "not submitted" read off the webmail: the search it ran, or the oldest message
+                # browsing reached (owner, 2026-10-24, W1; application_browser.mailbox_absence).
+                "mailbox_search": {"query": None, "results": None, "covers_employer": False},
+                "mailbox_oldest_reached": {"received_at": None}}
     # `employer_matches_expected` is asked for in the inspect prompt and was in no contract
     # (2026-09-22). `result_json` is an opaque string in the outer schema, so this template is
     # the ONLY thing that tells a read which keys to emit, and the prompt itself says unknown
@@ -1003,11 +1050,9 @@ def context(root, database, payload):
     # to the candidate account instead (owner, 2026-09-19). The stored record is not changed.
     import external_history
     mailbox = job.get("candidate_email") or (policy.get("answers", {}).get("email") or {}).get("value")
-    try:
-        packet["gmail"] = {"mailbox_email": mailbox, "mailbox_url": external_history.gmail_url(mailbox, "inbox"),
-                           "search_url_prefix": external_history.gmail_url(mailbox, "search/")}
-    except ValueError:
-        packet["gmail"] = None
+    # The user's own webmail from Setup, any provider (owner invariant 2026-10-16, E0.T2.S1; Gmail
+    # when none is saved). Its host list is what the receipt validators bind source_url to.
+    packet["webmail"] = external_history.webmail_context(external_history.chosen_webmail(), mailbox)
     for row in packet["external_history"]:
         try:
             source = json.loads(row.get("payload") or "{}").get("source")
@@ -1806,7 +1851,6 @@ def normalize_investigation(request, result, bound, now):
         # A comparison binds either a Gmail confirmation or one of OUR OWN receipts (owner,
         # 2026-09-24). The id says which: only `external_history.local_receipt_id` produces the
         # local prefix, and it is derived from the receipt row, never reported by a model.
-        import external_history
         local = isinstance(evidence_id, str) and evidence_id.startswith(external_history.LOCAL_RECEIPT_PREFIX)
         collection = "local_history" if local else "external_history"
         records = request.get("context", {}).get(collection, [])
@@ -1894,13 +1938,17 @@ def normalize_investigation(request, result, bound, now):
         # the mailbox binding below applies when the comparison cites an email.
         if evidence.get("source_url"):
             source_url = urllib.parse.urlsplit(evidence.get("source_url", ""))
+            # The saved message is re-read where it was saved: its own record's host (every saved
+            # record is a Gmail message, external_history.validate), not the chosen webmail's,
+            # which binds receipts only.
+            mailbox_hosts = external_history.record_hosts(original.get("source"))
             # Owner, 2026-09-19: alias-delivered inbox email (e.g. an address at another
             # domain that forwards to the inbox) counts like any other; the signed-in mailbox binds it, the recipient is recorded.
             if (evidence.get("mailbox_email") != job["candidate_email"]
                     or not isinstance(evidence.get("recipient"), str) or not evidence["recipient"].strip()
                     or evidence.get("sender_authenticated") is not True or source_url.scheme != "https"
-                    or source_url.hostname != "mail.google.com" or source_url.username or source_url.password
-                    or not evidence.get("source_message_id") or evidence["source_message_id"] not in source_url.fragment
+                    or source_url.hostname not in mailbox_hosts or source_url.username or source_url.password
+                    or not evidence.get("source_message_id") or evidence["source_message_id"] not in message_locator(source_url)
                     or "aiapply" in evidence.get("sender", "").casefold()):
                 raise ValueError("APPLICATION_HISTORY_MAILBOX_UNBOUND")
         evidence.setdefault("prior_requisition", None)
@@ -1921,6 +1969,76 @@ QUESTION_FIELD_POINTER = re.compile(r"^/observed_questions/\d+/field$")
 
 
 WRAPPER_KEYS = {"blocked", "job_key", "attempt_id", "request_id", "binding"}
+
+
+MAILBOX_ABSENCE_DOWNGRADE = "MAILBOX_ABSENCE_NOT_EXHAUSTIVE"
+
+
+def mailbox_absence(request, result, bound, pages):
+    """A "not submitted" read off the user's webmail is certain only when it shows it looked everywhere
+    that matters (owner, 2026-10-24, W1: "I agree with your fix"); otherwise it is downgraded, in
+    place, to an UNKNOWN that is not authoritative (the job stays in RECONCILE and is read again; it
+    is never CONFIRMED_NOT_SUBMITTED).
+
+    A webmail absence: its status or authoritative_absence is quoted from a page on the request's
+    webmail hosts. It stays certain when any of these holds:
+    - Gmail's search-URL route, as before: that quote is from a Gmail search results page (its URL
+      fragment is search/...), which the browser itself reports, never the model;
+    - (a) mailbox_search: the query (quoted) and the results or "no results" view (quoted), both on
+      the webmail, and the read's own covers_employer true;
+    - (b) mailbox_oldest_reached.received_at: browsing reached and quoted (on the webmail, the same
+      calendar day as the quote shows) a message older than this attempt's started_at.
+    An absence read anywhere else (an ATS candidate record, a status page) is unchanged."""
+    hosts = external_history.request_webmail_hosts(request.get("context"))
+
+    def live(pointer):
+        return [entry for entry in bound.get(pointer, []) if not entry["tool_call_id"].startswith("context:")
+                and entry.get("source_kind") != "failed_tool_diagnostic"]
+
+    def on_webmail(entry):
+        try:
+            page = urllib.parse.urlsplit(pages.get(entry["tool_call_id"], ""))
+        except ValueError:
+            return None
+        if page.scheme != "https" or page.hostname not in hosts or page.username or page.password:
+            return None
+        return page
+
+    claimed = live("/status") + live("/authoritative_absence")
+    shown = [page for page in (on_webmail(entry) for entry in claimed) if page is not None]
+    if not shown:
+        return
+    if any(page.hostname in external_history.WEBMAIL_HOSTS["Gmail"] and page.fragment.startswith("search/")
+           for page in shown):
+        return
+    search = result.get("mailbox_search")
+    if (isinstance(search, dict) and search.get("covers_employer") is True
+            and all(isinstance(search.get(key), str) and search[key].strip()
+                    and any(on_webmail(entry) for entry in live("/mailbox_search/" + key)) for key in ("query", "results"))):
+        return
+    oldest = result.get("mailbox_oldest_reached")
+    attempt = (request.get("context") or {}).get("current_attempt") or {}
+    try:
+        reached = dt.datetime.fromisoformat(str((oldest or {}).get("received_at") or "").replace("Z", "+00:00"))
+        started = dt.datetime.fromisoformat(str(attempt.get("started_at") or ""))
+    except (TypeError, ValueError, AttributeError):
+        reached = started = None
+    pointer = "/mailbox_oldest_reached/received_at"
+    if (reached is not None and started is not None and reached.tzinfo is not None and started.tzinfo is not None
+            and reached < started and day_observation({pointer: [entry for entry in live(pointer) if on_webmail(entry)]},
+                                                      pointer, oldest["received_at"])):
+        return
+    result.update(status="UNKNOWN", authoritative_absence=False, absence_downgraded=MAILBOX_ABSENCE_DOWNGRADE,
+                  next_action="Search the webmail for the employer (quote the query and the results), or browse "
+                              "until a message older than the attempt is reached, before concluding absence")
+
+
+def message_locator(source_url):
+    """Where a message URL names its message: Gmail's fragment (#all/<id>), as always; another
+    webmail's path, query and fragment (Outlook /mail/inbox/id/<id>, Yahoo /d/folders/1/messages/<id>)."""
+    if source_url.hostname in external_history.WEBMAIL_HOSTS["Gmail"]:
+        return source_url.fragment
+    return source_url.path + "?" + source_url.query + "#" + source_url.fragment
 
 
 def normalize_stop(result, operation):
@@ -2000,6 +2118,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
         raise ValueError("APPLICATION_RESULT_BINDING_INVALID")
     quotable = quotable_request(request)
     observations, failed_observations, calls, sequence = {}, {}, set(), []
+    pages = {}  # tool call id -> the page URL its answer showed (host-observed, never model text)
     for line in trace.splitlines():
         event = json.loads(line)
         if event.get("type") not in {"item.started", "item.completed"}:
@@ -2017,6 +2136,9 @@ def normalize(request, raw, trace, observed_at, trace_path):
         # never evidence, as live (they were other servers there).
         if item.get("tool") not in browser_guard.TOOLS or not isinstance(response, dict):
             continue
+        shown = PAGE_URL.findall(result_text(response))
+        if shown:
+            pages[identifier] = shown[-1]
         if item.get("status") == "failed" or response.get("isError"):
             failed_observations[identifier] = observed_text(response, item.get("tool"))
         elif item.get("status") == "completed" and not item.get("error"):
@@ -2164,6 +2286,10 @@ def normalize(request, raw, trace, observed_at, trace_path):
             # relies on it (desktop_adapter.validate_read_result).
             if pointer == "/employer_matches_expected" and isinstance(value, bool):
                 continue
+            # The read's own judgement that the search it ran covers this employer (owner,
+            # 2026-10-24, W1); the query and the results view it judged keep their quotes.
+            if pointer == "/mailbox_search/covers_employer" and isinstance(value, bool):
+                continue
             # `evidence_kind` on a SUBMITTED result is a label naming the receipt route, not a page
             # fact. It only selects WHICH quoted fields the receipt must carry (ATS: employer,
             # requisition, candidate_email, receipt_id; email routes: employer, candidate_email,
@@ -2211,6 +2337,8 @@ def normalize(request, raw, trace, observed_at, trace_path):
                 refusal = ValueError("APPLICATION_UNSOURCED_FIELD")
                 refusal.pointer = pointer
                 raise refusal
+    if operation in {"verify", "reconcile"} and result.get("status") == "NOT_SUBMITTED":
+        mailbox_absence(request, result, bound, pages)
     if operation == "investigate" and result.get("blocked"):
         blocker = result["blocked"]
         if not isinstance(blocker, dict) or not blocker.get("code") or not blocker.get("next_action"):
@@ -2267,6 +2395,8 @@ def normalize(request, raw, trace, observed_at, trace_path):
         # anything; it stays in the schema so it is still recorded when the page shows one.
         fields = ["employer", "candidate_email"] if email_receipt or sent_receipt else [
             "employer", "requisition", "candidate_email"]
+        # The user's webmail from Setup (Gmail for a request made before context.webmail existed).
+        mailbox_hosts = external_history.request_webmail_hosts(request.get("context"))
         if result["status"] == "SUBMITTED":
             fields.append("receipt_id")
         if email_receipt:
@@ -2281,7 +2411,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
                     or result.get("sender_authenticated") is not True
                     or result.get("mailbox_email", "").casefold() != candidate.casefold()
                     or result.get("recipient", "").casefold() != candidate.casefold()
-                    or source_url.scheme != "https" or source_url.hostname != "mail.google.com"
+                    or source_url.scheme != "https" or source_url.hostname not in mailbox_hosts
                     or source_url.username or source_url.password):
                 raise ValueError("APPLICATION_EMAIL_RECEIPT_UNBOUND")
             for field in ("received_at", "sender_authenticated"):
@@ -2289,7 +2419,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
                     raise ValueError("APPLICATION_EMAIL_RECEIPT_UNOBSERVED")
         if sent_receipt:
             # The mirror of a confirmation email: read in the candidate's OWN mailbox, SENT by the
-            # candidate, inside this attempt's window, on mail.google.com. Who it went to and
+            # candidate, inside this attempt's window, in the user's webmail. Who it went to and
             # whether it followed the arm are checked against this attempt's saved review in
             # desktop_adapter.validate_read_result, which holds the authoritative target.
             fields.extend(["mailbox_email", "sender", "source_url"])
@@ -2310,7 +2440,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
                     or not isinstance(recipients, list) or not recipients
                     or not all(isinstance(item, str) and item.strip() for item in recipients)
                     or not isinstance(attachments, list) or not attachments
-                    or source_url.scheme != "https" or source_url.hostname != "mail.google.com"
+                    or source_url.scheme != "https" or source_url.hostname not in mailbox_hosts
                     or source_url.username or source_url.password):
                 raise ValueError("APPLICATION_SENT_RECEIPT_UNBOUND")
             # Each of these must come from something the browser actually showed of the message.

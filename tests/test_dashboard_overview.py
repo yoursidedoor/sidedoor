@@ -418,6 +418,53 @@ class GatherTest(unittest.TestCase):
             if item["tone"] != "success":
                 self.assertTrue(item["fix"], item["name"])
 
+    def record_wait(self, name, resume_at=None):
+        import provider_limits
+        path = self.home / name
+        path.write_text(json.dumps({"observed_at": "2026-10-22T15:00:00Z", "resume_at": resume_at,
+                                    "stated_reset": None}), encoding="utf-8")
+        return provider_limits
+
+    def health_and_banners(self, provider_limits):
+        """Health and the banners from one recorded state, read the way the dashboard reads them."""
+        with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"), \
+                mock.patch.object(setup_steps, "codex_done", return_value=True):   # Codex signed in
+            health = {item["name"]: item for item in self.gather()["health"]}
+        return health, provider_limits.banners(self.home, self.now, finished=True)
+
+    def test_health_shows_the_provider_waits_the_banners_show(self):
+        import provider_limits
+        health, banners = self.health_and_banners(provider_limits)
+        self.assertEqual(banners, [])
+        self.assertEqual((health["OpenRouter"]["tone"], health["Codex"]["tone"]), ("success", "success"))
+
+        self.record_wait(provider_limits.CREDIT_WAIT_FILE)
+        health, banners = self.health_and_banners(provider_limits)
+        self.assertEqual((health["OpenRouter"]["tone"], health["OpenRouter"]["text"]), ("error", "Out of credits"))
+        self.assertEqual(health["OpenRouter"]["fix"], {"label": "Add credits", "href": provider_limits.CREDITS_URL})
+        self.assertEqual([banner["action_href"] for banner in banners], [provider_limits.CREDITS_URL])
+        (self.home / provider_limits.CREDIT_WAIT_FILE).unlink()
+
+        reset = (self.now + dt.timedelta(hours=2)).isoformat()
+        self.record_wait(provider_limits.CHATGPT_WAIT_FILE, reset)
+        health, banners = self.health_and_banners(provider_limits)
+        until = provider_limits._local_clock(reset)
+        self.assertEqual((health["Codex"]["tone"], health["Codex"]["text"]), ("warning", "Usage limit reached until " + until))
+        self.assertEqual(health["Codex"]["fix"]["href"], provider_limits.CHATGPT_USAGE_URL)
+        self.assertEqual([banner["tone"] for banner in banners], ["warning"])
+        self.assertIn(until, banners[0]["text"])
+
+        self.record_wait(provider_limits.CODEX_WAIT_FILE)   # can't find Codex outranks the usage wait, as in the banners
+        health, banners = self.health_and_banners(provider_limits)
+        self.assertEqual((health["Codex"]["tone"], health["Codex"]["text"]), ("error", "Can't find Codex"))
+        self.assertEqual(health["Codex"]["fix"], {"label": banners[0]["action_label"], "href": banners[0]["action_href"]})
+        self.assertEqual(banners[0]["action_href"], "/settings#connection-codex")
+
+        (self.home / provider_limits.CODEX_WAIT_FILE).unlink()
+        self.record_wait(provider_limits.CHATGPT_WAIT_FILE, (self.now - dt.timedelta(minutes=1)).isoformat())
+        health, banners = self.health_and_banners(provider_limits)   # the reset passed: both clear together
+        self.assertEqual((health["Codex"]["tone"], banners), ("success", []))
+
     def test_o15_never_checked_says_so_once_and_codex_never_none(self):
         finished_home(self.home, openrouter=None, linkedin=False)
         setup_steps.update_state(lambda state: state["steps"].update(codex={"status": "failed", "at": "2026-10-22T17:00:00Z"}),
@@ -512,6 +559,17 @@ class OverviewPageTest(unittest.TestCase):
             self.assertIn(text, page)
         self.assertNotIn('href="/setup"', page)
         self.assertFalse((self.root / "state").exists())   # a GET never creates the database
+
+    def test_health_and_banner_agree_on_the_page(self):
+        import provider_limits
+        (self.home / provider_limits.CREDIT_WAIT_FILE).write_text(json.dumps({"observed_at": "2026-10-22T15:00:00Z"}),
+                                                                  encoding="utf-8")
+        page = self.page().text
+        self.assertIn("Your OpenRouter account is out of credits.", page)
+        health = page[page.index('id="health-title"'):]
+        self.assertIn("Out of credits", health)
+        self.assertNotIn("Key works", health)
+        self.assertIn('href="%s"' % provider_limits.CREDITS_URL, health)
 
     def test_get_writes_nothing_not_even_side_files(self):
         database = database_with_schema(self.root)

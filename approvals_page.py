@@ -49,10 +49,15 @@ DATABASE = Path(paths.STATE) / paths.DATABASE   # dashboard.DATABASE
 CONVERSATION_KINDS = ("inbound", "outbound_observed", "initial_sent", "followup_sent")
 CONVERSATION_LIMIT = 9      # the reply AI's own context: the invitation plus eight other messages
 PAGE_SIZE = 25
-QUESTION_LIMIT = 50
-NOTE_LIMIT = 50
+QUESTION_LIMIT = 25         # a page of each list; every list pages (owner, 2026-10-24), none is capped
+NOTE_LIMIT = 25
 REFUSED_LIMIT = 25
 NOTICE_LIMIT = 20
+# Each list's own page parameter (and #anchor), so paging one list never resets another.
+PAGE_PARAMS = {"messages": "page", "refused": "refused_page", "questions": "questions_page", "notes": "notes_page",
+               "notices": "notices_page"}
+LIST_SIZES = {"messages": PAGE_SIZE, "refused": REFUSED_LIMIT, "questions": QUESTION_LIMIT, "notes": NOTE_LIMIT,
+              "notices": NOTICE_LIMIT}
 AUDIT_SCAN = 50             # DECISION rows read per card (newest first) to find the hold's verdict
 PURPOSE_WORDS = {"INVITE": "Invitation note", "PREPARE_CAMPAIGN": "Invitation note",
                  "INITIAL": "First message", "FIRST_MESSAGE": "First message after they accepted",
@@ -206,9 +211,33 @@ def messages(database, page=1, only=None):
     return [card_of(database, item) for item in items[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]], len(items), page, unreadable
 
 
-def refused(database, only=None):
+def pages_of(params):
+    """{list: page number} from a request's query (a missing or bad number is page 1)."""
+    found = {}
+    for name, param in PAGE_PARAMS.items():
+        try:
+            found[name] = max(1, int(params.get(param) or 1))
+        except (TypeError, ValueError):
+            found[name] = 1
+    return found
+
+
+def query_of(pages, **change):
+    """The query string for these pages with `change` applied ({list: number}); page 1 is left out."""
+    from urllib.parse import urlencode
+    merged = dict(pages or {}, **change)
+    return urlencode([(PAGE_PARAMS[name], merged[name]) for name in PAGE_PARAMS if merged.get(name, 1) > 1])
+
+
+def _clamp(page, total, size):
+    pages = max(1, -(-total // size))
+    return min(max(1, page), pages), pages
+
+
+def refused(database, only=None, page=1):
     found = []
-    for item in approvals.refused_after_approval(database, REFUSED_LIMIT if only is None else 500):
+    offset = 0 if only is not None else (page - 1) * REFUSED_LIMIT
+    for item in approvals.refused_after_approval(database, REFUSED_LIMIT if only is None else 500, offset):
         if only is not None and item["action_id"] != only:
             continue
         reasons = list(dict.fromkeys(GATE_WORDS.get(gate, GENERIC_GATE) for gate in item["gates"])) or [GENERIC_GATE]
@@ -222,22 +251,38 @@ def _words(code):
     return str(code or "").replace("_", " ").strip().capitalize() or "Answer"
 
 
-def questions(database, now, only=None):
+def question_words(label, semantic, field):
+    """The question as the form asks it (its label, owner 2026-10-24), else its meaning in words."""
+    return " ".join(label.split()) if isinstance(label, str) and label.strip() else _words(semantic or field)
+
+
+def question_count(database, now):
+    if not _has(database, "user_decisions"):
+        return 0
+    columns = {row[1] for row in database.execute("PRAGMA table_info(user_decisions)")}
+    test = " AND kind!='test'" if "kind" in columns else ""
+    return database.execute("SELECT COUNT(*) FROM user_decisions WHERE state='PENDING' AND expires_at>?" + test,
+                            (int(now.timestamp() * 1000),)).fetchone()[0]
+
+
+def questions(database, now, only=None, page=1):
     if not _has(database, "user_decisions"):
         return []
     columns = {row[1] for row in database.execute("PRAGMA table_info(user_decisions)")}
     test = " AND d.kind!='test'" if "kind" in columns else ""
+    offset = 0 if only is not None else (page - 1) * QUESTION_LIMIT
     jobs = _has(database, "application_jobs")
+    label = ",d.label" if "label" in columns else ",NULL"
     rows = database.execute(
         "SELECT d.id,d.job_key,d.field,d.semantic,d.answer_type,d.choices,d.payload_hash,d.expires_at"
-        + (",j.employer,j.payload" if jobs else ",NULL,NULL")
+        + (",j.employer,j.payload" if jobs else ",NULL,NULL") + label
         + " FROM user_decisions d" + (" LEFT JOIN application_jobs j ON j.job_key=d.job_key" if jobs else "")
         + " WHERE d.state='PENDING' AND d.expires_at>?" + test + (" AND d.id=?" if only is not None else "")
-        + " ORDER BY d.expires_at,d.id LIMIT ?",
-        (int(now.timestamp() * 1000),) + ((only,) if only is not None else ()) + (QUESTION_LIMIT,)).fetchall()
+        + " ORDER BY d.expires_at,d.id LIMIT ? OFFSET ?",
+        (int(now.timestamp() * 1000),) + ((only,) if only is not None else ()) + (QUESTION_LIMIT, offset)).fetchall()
     import decision_transport
     found = []
-    for identifier, job_key, field, semantic, answer_type, choices, payload_hash, expires_at, employer, payload in rows:
+    for identifier, job_key, field, semantic, answer_type, choices, payload_hash, expires_at, employer, payload, label in rows:
         role = _object(payload) or {}
         operational = field == decision_transport.FORM_NOT_READABLE_FIELD
         choices = _json(choices)
@@ -249,7 +294,7 @@ def questions(database, now, only=None):
                       "employer": employer or role.get("company") or "An employer",
                       "role": role.get("role") or role.get("title"),
                       "url": role.get("url") if str(role.get("url") or "").startswith("https://") else None,
-                      "question": FORM_NOT_READABLE_WORDS if operational else _words(semantic or field),
+                      "question": FORM_NOT_READABLE_WORDS if operational else question_words(label, semantic, field),
                       "answer_type": "text" if operational else answer_type,
                       "choices": [choice for choice in choices if isinstance(choice, str)] if isinstance(choices, list) else [],
                       "expires": expires})
@@ -277,9 +322,10 @@ def person_name(database, profile):
     return None
 
 
-def notes(database, only=None):
+def notes(database, only=None, page=1):
     import reply_tools
-    found = [note for note in reply_tools.open_flags(database, None if only is not None else NOTE_LIMIT)
+    found = [note for note in reply_tools.open_flags(database, None if only is not None else NOTE_LIMIT,
+                                                     0 if only is not None else (page - 1) * NOTE_LIMIT)
              if only is None or str(note["note_id"]) == str(only)]
     tasks = _has(database, "workflow_tasks")
     for note in found:
@@ -294,18 +340,23 @@ def notes(database, only=None):
     return found
 
 
-def notices(database):
+# A notice the Dashboard transport delivered (its delivery record names the "dashboard" provider).
+DASHBOARD_NOTICE = ("state='DELIVERED' AND json_valid(delivery) AND json_type(delivery)='object' "
+                    "AND json_extract(delivery,'$.provider')='dashboard'")
+
+
+def notice_count(database):
+    if not _has(database, "notification_outbox"):
+        return 0
+    return database.execute("SELECT COUNT(*) FROM notification_outbox WHERE " + DASHBOARD_NOTICE).fetchone()[0]
+
+
+def notices(database, page=1):
     if not _has(database, "notification_outbox"):
         return []
-    rows = database.execute("SELECT message,updated_at,delivery FROM notification_outbox WHERE state='DELIVERED' "
-                            "ORDER BY updated_at DESC LIMIT 500").fetchall()
-    found = []
-    for message, updated_at, delivery in rows:
-        if (_object(delivery) or {}).get("provider") == "dashboard":
-            found.append({"text": message, "at": overview_page._utc(updated_at)})
-            if len(found) >= NOTICE_LIMIT:
-                break
-    return found
+    rows = database.execute("SELECT message,updated_at FROM notification_outbox WHERE " + DASHBOARD_NOTICE
+                            + " ORDER BY updated_at DESC LIMIT ? OFFSET ?", (NOTICE_LIMIT, (page - 1) * NOTICE_LIMIT)).fetchall()
+    return [{"text": message, "at": overview_page._utc(updated_at)} for message, updated_at in rows]
 
 
 def _when(config):
@@ -314,16 +365,35 @@ def _when(config):
     return lambda moment: overview_page.when(moment, now, zone) if moment else None
 
 
-def gather(database, config, page=1):
-    """Everything the page lists. `database` is a read-only connection or None (no file yet)."""
+def gather(database, config, page=1, pages=None):
+    """Everything the page lists, one page of each list (`pages`: {list: number}, `pages_of`; `page`
+    is the messages' page). Each list has `paging`: {page, pages, total} counted by its own COUNT, so
+    "Page X of Y (N)" is the real total. `database` is a read-only connection or None (no file yet)."""
     now = dt.datetime.now(dt.timezone.utc)
+    pages = dict(pages or {}, messages=(pages or {}).get("messages", page))
+    paging = {}
     if database is None:
         found = {"messages": [], "total": 0, "page": 1, "unreadable": 0, "refused": [], "questions": [], "notes": [], "notices": []}
+        paging = {name: {"page": 1, "pages": 1, "total": 0} for name in PAGE_PARAMS}
     else:
-        cards, total, page, unreadable = messages(database, page)
-        found = {"messages": cards, "total": total, "page": page, "unreadable": unreadable, "refused": refused(database),
-                 "questions": questions(database, now), "notes": notes(database), "notices": notices(database)}
-    found["pages"] = max(1, -(-found["total"] // PAGE_SIZE))
+        import reply_tools
+        cards, total, number, unreadable = messages(database, pages["messages"])
+        found = {"messages": cards, "total": total, "page": number, "unreadable": unreadable}
+        paging["messages"] = {"page": number, "pages": max(1, -(-total // PAGE_SIZE)), "total": total}
+        for name, count, load in (
+                ("refused", approvals.refused_count, lambda number: refused(database, page=number)),
+                ("questions", lambda database: question_count(database, now), lambda number: questions(database, now, page=number)),
+                ("notes", reply_tools.open_flag_count, lambda number: notes(database, page=number)),
+                ("notices", notice_count, lambda number: notices(database, page=number))):
+            total = count(database)
+            number, last = _clamp(pages.get(name, 1), total, LIST_SIZES[name])
+            paging[name] = {"page": number, "pages": last, "total": total}
+            found[name] = load(number)
+    found["pages"] = paging["messages"]["pages"]
+    found["paging"] = paging
+    current = {name: paging[name]["page"] for name in PAGE_PARAMS}
+    found["query"] = query_of(current)
+    found["link"] = lambda name, number: query_of(current, **{name: number})
     found["when"] = _when(config)
     return found
 
@@ -354,9 +424,14 @@ def register(app, templates, layout, *, home, root, config):
     def read(use):
         return overview_page.snapshot(paths.database(root), use, lambda: dashboard.read_connection(root))
 
-    def view(request, flash=None, page=1):
+    def view(request, flash=None, page=None):
         context = layout("approvals", "Approvals")
-        context["view"] = read(lambda database: gather(database, config, page=page))
+        # Every list's page from the query (a card's form posts back to the page it was on, so a plain
+        # post without JavaScript keeps the pages too).
+        pages = pages_of(request.query_params)
+        if page is not None:
+            pages["messages"] = page
+        context["view"] = read(lambda database: gather(database, config, pages=pages))
         context.update(review=approvals.install_mode(root, home) == approvals.REVIEW, flash=flash or {})
         return templates.TemplateResponse(request, "approvals.html", context)
 
@@ -367,7 +442,8 @@ def register(app, templates, layout, *, home, root, config):
         found = read(lambda database: finder(database) if database is not None else [])
         if request.headers.get("hx-request") == "true":
             if found:
-                return HTMLResponse(templates.get_template(template).render(item=found[0], f=flash, v={"when": _when(config)}))
+                return HTMLResponse(templates.get_template(template).render(
+                    item=found[0], f=flash, v={"when": _when(config), "query": query_of(pages_of(request.query_params))}))
             return HTMLResponse(templates.get_template("approvals_done.html").render(dom=dom(kind, key), f=gone))
         return view(request, {"cards": {found[0]["dom"]: flash}} if found else {"top": gone})
 
@@ -386,12 +462,8 @@ def register(app, templates, layout, *, home, root, config):
             raise
 
     @app.get("/approvals", name="approvals")
-    def approvals_page(request: Request, page: str = "1"):
-        try:
-            number = int(page)
-        except ValueError:
-            number = 1
-        return view(request, page=number)
+    def approvals_page(request: Request):
+        return view(request)
 
     # --- Messages -----------------------------------------------------------------------------------
 
@@ -484,7 +556,11 @@ def register(app, templates, layout, *, home, root, config):
             if policy is None:
                 return {"state": "REFUSED", "message": decision_transport.DASHBOARD_REFUSALS["PROFILE_MISSING"]}, None
             result = decision_transport.answer_locally(database, decision_id, raw, shown_payload_hash=shown, policy=policy)
-            row = database.execute("SELECT d.field,d.semantic,d.answer_type,j.employer,j.payload,d.choices FROM user_decisions d "
+            # A database from before the label column (Q3, review round 1): NULL, never an error after the
+            # answer was recorded.
+            columns = {column[1] for column in database.execute("PRAGMA table_info(user_decisions)")}
+            row = database.execute("SELECT d.field,d.semantic,d.answer_type,j.employer,j.payload,d.choices,"
+                                   + ("d.label" if "label" in columns else "NULL") + " FROM user_decisions d "
                                    "LEFT JOIN application_jobs j ON j.job_key=d.job_key WHERE d.id=?", (decision_id,)).fetchone()
             return result, row
         outcome = await run_in_threadpool(write, act)
@@ -499,20 +575,27 @@ def register(app, templates, layout, *, home, root, config):
                          {"tone": "warning", "text": result["message"], "kept": raw})
         import decision_transport
         import setup_steps
-        field, semantic, answer_type, employer, payload, row_choices = row
+        field, semantic, answer_type, employer, payload, row_choices, label = row
         text = "Answer saved. The application goes on at its next turn."
         if field != decision_transport.FORM_NOT_READABLE_FIELD:
             role = _object(payload) or {}
             value = raw.casefold() in {"yes", "true"} if answer_type == "boolean" else raw
             title = role.get("role") or role.get("title")
-            context = "Your answer to \"%s\" for %s%s" % (_words(semantic or field), employer or role.get("company") or "a job",
-                                                         ", " + str(title) if title else "")
+            asked = question_words(label, semantic, field)
+            company = employer or role.get("company") or "a job"
+            context = "Your answer to \"%s\" for %s%s" % (asked, company, ", " + str(title) if title else "")
             try:
                 choices = _json(row_choices) if row_choices else None
-                yes_no = isinstance(choices, list) and len(choices) == 2 and {
-                    str(choice).strip().casefold() for choice in choices} == {"yes", "no"}
-                await run_in_threadpool(setup_steps.save_owner_answer, decision_id, semantic, value, context, home, yes_no)
-                text += " It is also kept in Settings > Profile and search for later applications that ask the same thing."
+                choices = [choice for choice in choices if isinstance(choice, str)] if isinstance(choices, list) else []
+                yes_no = len(choices) == 2 and {choice.strip().casefold() for choice in choices} == {"yes", "no"}
+                # What was asked, where, and the form's own options, for Settings > Your saved answers
+                # (owner, 2026-10-24). A choice answer is the chosen option's own text, so the answering
+                # AI can match it to a later form's differently worded options.
+                asked_for = {"question": asked, "employer": company, "role": str(title) if title else None,
+                             "choices": choices or (["Yes", "No"] if answer_type == "boolean" else [])}
+                await run_in_threadpool(setup_steps.save_owner_answer, decision_id, semantic, value, context, home, yes_no,
+                                        asked_for)
+                text += " It is also kept in Settings > Your saved answers for later applications that ask the same thing."
             except OSError:
                 text += " It could not be kept for later applications (your profile file could not be written)."
             else:

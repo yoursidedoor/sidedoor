@@ -68,13 +68,17 @@
     </fieldset>
     <button class="button" type="submit">Save profile</button>
   </form>
-  {% if x.kept_answers %}
+
+{% elif x.name == "answers" %}
+  <h2>Your saved answers</h2>
+  <p class="why">Answers you gave to Sidedoor's questions on Approvals. Sidedoor's answering AI uses them on later applications when a question asks the same thing, and decides whether each one fits.</p>
   <div class="settings-kept-answers" id="kept-answers">
-    <h3>Answers you gave on Approvals</h3>
-    <p class="muted">Sidedoor's answering AI uses these on later applications when a question asks the same thing, and decides whether each one fits.</p>
+  {% if x.kept_answers %}
     {% for key, answer in x.kept_answers %}{% with notice = None, over = x.kept_over or {}, oob = False, status = x.kept_status or {} %}{% include "settings_kept_answer.html" %}{% endwith %}{% endfor %}
-  </div>
+  {% else %}
+    <p class="muted">No saved answers yet. When an application asks something only you can answer, the question appears on Approvals, and your answer is kept here.</p>
   {% endif %}
+  </div>
 
 {% elif x.name == "resume" %}
   {% set s = x.saved %}

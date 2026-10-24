@@ -196,6 +196,21 @@ def run():
             del unbound_live["resolution"]["history"][0]["evidence"]["source_message_id"]
             rejects(lambda: normalized(fixture, request, unbound_live, bind_saved_message), "MAILBOX_UNBOUND")
             checks.append("scoped live Gmail history requires observed message/sender/recipient and exact signed-in candidate; wrong or unbound mailbox rejected")
+            # A saved history message is re-read on its own record's host (round-1 W3): with Outlook as
+            # the user's webmail, the saved Gmail message still binds; the chosen webmail, a lookalike or
+            # another message id never does. Receipts follow the chosen webmail (test_webmail_receipts).
+            assert request["context"]["webmail"]["hosts"] == ["mail.google.com"]
+            outlook = copy.deepcopy(request)
+            outlook["context"]["webmail"] = external_history.webmail_context(
+                {"label": "Outlook.com", "url": "https://outlook.live.com/mail/"}, fixture.job()["candidate_email"])
+            assert normalized(fixture, outlook, live_proposal, bind_saved_message)["resolution"]["history"][0]["evidence"]["independent_read"] is True
+            for url in ("https://outlook.live.com/mail/0/inbox/id/synthetic",
+                        "https://mail.google.com.evil.example/mail/u/0/#all/synthetic",
+                        "https://mail.google.com/mail/u/0/#all/other"):
+                moved = copy.deepcopy(live_proposal)
+                moved["resolution"]["history"][0]["evidence"]["source_url"] = url
+                rejects(lambda: normalized(fixture, outlook, moved, bind_saved_message), "MAILBOX_UNBOUND")
+            checks.append("a saved-message comparison binds to the saved record's own host whatever webmail is chosen; another host or a lookalike is refused")
             for status in ("UNRESOLVED", "ABANDON"):
                 result = normalized(fixture, request, {"status": status, "reason": "Evidence cannot identify prior requisition",
                     "next_action": "Retain unknown or abandon at bound", "resolution": {"identity": None, "history": []}})

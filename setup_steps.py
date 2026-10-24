@@ -927,7 +927,7 @@ def save_profile(form, home=None):
 # key of its own (`owner-answer:<decision id>`, never the question's field, so no later question is
 # filled from it by key) and a source starting decision_transport.OWNER_ANSWER_SOURCE that names
 # the job it was given for. Only the answering AI applies it, judging whether it fits
-# (`applications.recorded_answer_for_ai`). Settings > Profile and search lists these answers; the
+# (`applications.recorded_answer_for_ai`). Settings > Your saved answers lists these answers; the
 # owner can change or remove each (`change_owner_answer`, `remove_owner_answer`). Every write is
 # under résumé intake's profile lock, through the same private writer as `save_profile`.
 
@@ -953,7 +953,7 @@ def _change_answers(change, home=None):
 YES_NO = {"yes": True, "true": True, "no": False, "false": False}
 
 
-def save_owner_answer(decision_id, semantic, value, context, home=None, yes_no=False):
+def save_owner_answer(decision_id, semantic, value, context, home=None, yes_no=False, asked_for=None):
     """Record a dashboard answer for later jobs. `context` says where it was given (employer, role,
     question), kept in the source for the answering AI. Returns the profile key.
 
@@ -961,7 +961,11 @@ def save_owner_answer(decision_id, semantic, value, context, home=None, yes_no=F
     (`yes_no`) or the profile already records a boolean for this semantic (Setup's yes/no facts): a
     "Yes"/"No" string would otherwise reach eligibility reads that test `is True`/`is False`. A value
     that is not a plain yes or no is kept as written, and never supersedes a recorded boolean
-    (`applications.answers_in_force`)."""
+    (`applications.answers_in_force`).
+
+    `asked_for` ({question, employer, role, choices}) is what Settings > Your saved answers shows: the
+    question as the form asked it, where it was first asked, and the form's options (an edit picks
+    from them). Kept beside the answer; the answering AI reads only value, semantic and source."""
     key = OWNER_ANSWER_KEY + decision_id
     source = _owner_answer_source() + decision_id + (": " + context if context else "")
     recorded_at = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -974,6 +978,13 @@ def save_owner_answer(decision_id, semantic, value, context, home=None, yes_no=F
         if boolean_semantic and isinstance(kept, str) and kept.strip().casefold() in YES_NO:
             kept = YES_NO[kept.strip().casefold()]
         answers[key] = {"value": kept, "semantic": semantic, "source": source, "recorded_at": recorded_at}
+        if isinstance(asked_for, dict):
+            for name in ("question", "employer", "role"):
+                if isinstance(asked_for.get(name), str) and asked_for[name].strip():
+                    answers[key][name] = asked_for[name].strip()[:500]
+            choices = [choice for choice in asked_for.get("choices") or () if isinstance(choice, str) and choice.strip()]
+            if choices and not isinstance(kept, bool):
+                answers[key]["choices"] = choices[:50]
     _change_answers(change, home)
     return key
 
@@ -1051,6 +1062,10 @@ def change_owner_answer(key, value, home=None):
             if text not in ("Yes", "No"):
                 return False
             new = text == "Yes"
+        elif isinstance(answer.get("choices"), list) and answer["choices"]:
+            if text not in answer["choices"]:   # an answer to a question with options is one of them
+                return False
+            new = text
         else:
             new = text[:4000]
         answers[key] = dict(answer, value=new, recorded_at=dt.datetime.now(dt.timezone.utc).isoformat())

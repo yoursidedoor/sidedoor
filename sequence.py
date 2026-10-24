@@ -386,6 +386,8 @@ def record_acceptance(database, port, profile):
 def sequence_view(database, profile, now=None, recipient=""):
     """Where this lead stands, derived from the records the sequence already writes (no new state):
     the latest INVITE action, the invite/acceptance/follow-up events and `engagement.next_action`."""
+    if isinstance(profile, str) and "://" not in profile:
+        profile = "https://" + profile   # a stored identity ("linkedin.com/in/x"), as engagement.identity_keys reads it
     identity = profile_key(profile)
     invite = database.execute("""SELECT action_id,state FROM outreach_actions WHERE identity=?
         AND json_extract(payload,'$.purpose')=? ORDER BY rowid DESC LIMIT 1""", (identity, INVITE)).fetchone()
@@ -403,5 +405,108 @@ def sequence_view(database, profile, now=None, recipient=""):
         stage = "INVITE_" + invite[1]
     else:
         stage = "NOT_STARTED"
+    following = engagement.next_action(database, profile, now, recipient)
     return {"profile": profile, "stage": stage, "invite_action": invite[0] if invite else None,
-            "next": engagement.next_action(database, profile, now, recipient)}
+            "next": following, "steps": _steps(events), "due": _due(following)}
+
+
+def _steps(events):
+    """[{"label", "at"}] in order: Invited, Accepted, First message (or Message), each Follow-up, Replied,
+    Opted out. An invitation versus a message is Overview's rule (`overview_page._invitation`), so a
+    HeyReach-era INITIAL with a campaign is an invitation and a Unipile INVITE is one too. Each kind
+    once (its first time), follow-ups each."""
+    import overview_page
+    steps, seen = [], set()
+    for event in events:
+        kind, purpose = event.get("kind"), event.get("purpose")
+        if kind == "initial_sent":
+            label = "Invited" if overview_page._invitation(kind, event) else \
+                "First message" if purpose == "FIRST_MESSAGE" else "Message"
+        else:
+            label = {"accepted": "Accepted", "followup_sent": "Follow-up", "inbound": "Replied",
+                     "opt_out": "Opted out"}.get(kind)
+        if label is None or (label != "Follow-up" and label in seen):
+            continue
+        seen.add(label)
+        steps.append({"label": label, "at": event.get("occurred_at")})
+    return steps
+
+
+def _due(following):
+    """{"label", "at"} for the next planned message while it waits or is due, else None."""
+    if not isinstance(following, dict) or following.get("state") not in ("WAITING", "DUE") or not following.get("due_at"):
+        return None
+    label = "First message due" if following.get("purpose") == "FIRST_MESSAGE" else "Follow-up due"
+    return {"label": label, "at": following["due_at"]}
+
+
+# A person invited by an action whose invitation is not on record as sent yet (no step), by its state:
+# every state the product writes to an outreach_actions row (sequence, outreach, approvals, engagement,
+# outreach_campaign, the provider adapters), so none falls to the generic words.
+INVITE_STAGE_WORDS = {
+    "PENDING": "Invitation queued",
+    "AWAITING_APPROVAL": "Invitation waiting for your approval",
+    "BLOCKED": "Invitation on hold",
+    STARTED: "Invitation sending", "DISPATCHING": "Invitation sending",
+    ACKED: "Invitation sent, delivery not confirmed", "ACKNOWLEDGED_UNCONFIRMED": "Invitation sent, delivery not confirmed",
+    RETRY_WAIT: "Invitation will be tried again", "RETRY_WAIT": "Invitation will be tried again",
+    "WRITE_RETRY_WAIT": "Invitation will be tried again",
+    CONFIRMED: "Invitation sent", "PREPARED": "Invitation prepared, not sent yet",
+    NOT_SENT: "Invitation did not go out", "WRITE_FAILED": "Invitation could not be sent",
+    "UNCERTAIN_NO_RETRY": "Couldn't confirm the invitation went out",
+    "CANCELLED_BEFORE_SEND": "Invitation cancelled before sending", "CANCELLED": "Invitation cancelled before sending",
+    "CLOSED": "Closed, no invitation sent"}
+
+
+def position(view, zone):
+    """One line for a person's place in the sequence: "Invited 10-21 · Accepted 10-22 · Follow-up due
+    10-27" (local dates in `zone`); "" when nothing is on record yet."""
+    def day(stamp):
+        try:
+            return dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).astimezone(zone).strftime("%m-%d")
+        except (TypeError, ValueError, OverflowError):
+            return None
+    parts = []
+    steps = list(view.get("steps") or ())
+    stage = view.get("stage") or ""
+    if not steps and stage.startswith("INVITE_"):
+        parts.append(INVITE_STAGE_WORDS.get(stage[len("INVITE_"):], "Invitation in progress"))
+    for step in steps + ([view["due"]] if view.get("due") else []):
+        moment = day(step.get("at"))
+        parts.append(step["label"] + (" " + moment if moment else ""))
+    if view.get("due") and view["due"]["label"] == "Follow-up due" and \
+            not any(step["label"] in ("Accepted", "First message", "Message") for step in steps):
+        parts[-1] += " (once they accept)"   # a follow-up waits for acceptance (followup_execution)
+    return " · ".join(parts)
+
+
+def positions(database, zone, now=None, limit=25):
+    """`orchestrator.py status`'s view: everyone with an invitation action or a sent/accepted/reply event,
+    latest activity first, each with sequence_view's stage, next state and `position` line (read only)."""
+    tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    latest = {}
+    if "engagement_events" in tables:
+        for identity, moment in database.execute(
+                "SELECT identity,MAX(occurred_at) FROM engagement_events WHERE kind IN "
+                "('initial_sent','accepted','followup_sent','inbound','opt_out') GROUP BY identity"):
+            latest[identity] = max(latest.get(identity) or "", moment or "")
+    if "outreach_actions" in tables:
+        for identity, moment in database.execute(
+                "SELECT identity,MAX(claimed_at) FROM outreach_actions WHERE json_extract(payload,'$.purpose')=? "
+                "GROUP BY identity", (INVITE,)):
+            latest[identity] = max(latest.get(identity) or "", moment or "")
+    people, covered, total = [], set(), 0
+    with engagement.aliases_read_once(database):
+        for identity in sorted(latest, key=lambda key: (latest[key], key), reverse=True):
+            if identity in covered:
+                continue   # another spelling of someone already listed (rw_aliases): one line per person
+            try:
+                covered.update(engagement.identity_keys(database, identity))
+            except ValueError:
+                continue   # not a profile key
+            total += 1
+            if len(people) < limit:
+                view = sequence_view(database, identity, now)
+                people.append({"profile": identity, "stage": view["stage"], "next": (view["next"] or {}).get("state"),
+                               "position": position(view, zone)})
+    return {"total": total, "people": people}

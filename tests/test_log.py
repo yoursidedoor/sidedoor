@@ -2,6 +2,7 @@
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
 import contextlib
+import gc
 import io
 import json
 import os
@@ -47,6 +48,7 @@ class JobStdoutContractTest(LogStateTest):
             orchestrator.LOG.warning("a diagnostic")
             return result
 
+        gc.collect()   # another test's leaked connection must not print its ResourceWarning into this capture
         out, err = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, {"SIDEDOOR_HOME": str(self.root)}), \
                 patch.object(orchestrator, "applications_service", side_effect=service), \

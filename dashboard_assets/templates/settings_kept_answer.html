@@ -1,8 +1,16 @@
-{# One answer kept from Approvals (setup_steps.owner_answers): `key`, `answer` (None once removed), `notice`. #}
+{# One answer kept from Approvals (setup_steps.owner_answers): `key`, `answer` (None once removed), `notice`.
+   Settings > Your saved answers (owner, 2026-10-24): the question as asked, where it was first asked, the
+   answer and its date, with Edit (the form's own options when it had them) and Remove. #}
 <div class="kept-answer" id="kept-{{ key|replace(':', '-') }}"{% if oob %} hx-swap-oob="true"{% endif %}>
   {% if notice %}<p class="note note-info" role="status">{{ notice }}</p>{% endif %}
   {% if answer %}
-  <p class="muted">{{ answer.source.split(": ", 1)[1] if ": " in answer.source else "An answer you gave" }}</p>
+  {% if answer.question %}
+  <p><strong>{{ answer.question }}</strong></p>
+  <p class="muted">First asked for {{ answer.employer or "a job" }}{% if answer.role %}, {{ answer.role }}{% endif %}{% if answer.recorded_at %} · answered {{ answer.recorded_at[:10] }}{% endif %}</p>
+  {% else %}
+  <p class="muted">{{ answer.source.split(": ", 1)[1] if ": " in answer.source else "An answer you gave" }}{% if answer.recorded_at %} · answered {{ answer.recorded_at[:10] }}{% endif %}</p>
+  {% endif %}
+  <p>Your answer: {{ "Yes" if answer.value is sameas true else "No" if answer.value is sameas false else answer.value }}</p>
   {% if status is defined and status.get(key) %}<p class="note note-info">Not used: {{ status[key] }}</p>{% endif %}
   {% if over is defined and key in over %}{% set setup = over[key] %}
   <p class="note note-warning">Used instead of your answer in Profile and search ({{ "Yes" if setup is sameas true else "No" if setup is sameas false else setup }}).</p>
@@ -11,6 +19,8 @@
     <input type="hidden" name="key" value="{{ key }}">
     {% if answer.value is sameas true or answer.value is sameas false %}
     <select name="value" aria-label="Answer"><option{% if answer.value %} selected{% endif %}>Yes</option><option{% if not answer.value %} selected{% endif %}>No</option></select>
+    {% elif answer.choices %}
+    <select name="value" aria-label="Answer">{% for choice in answer.choices %}<option value="{{ choice }}"{% if choice == answer.value %} selected{% endif %}>{{ choice }}</option>{% endfor %}</select>
     {% else %}
     <input name="value" value="{{ answer.value }}" maxlength="4000" aria-label="Answer">
     {% endif %}

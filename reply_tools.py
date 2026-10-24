@@ -490,7 +490,7 @@ def owner_flags(database, since):
         "SELECT task_id,flagged_at,reason FROM reply_owner_flags WHERE flagged_at>=? ORDER BY flagged_at", (since,))]
 
 
-def open_flags(database, limit=None):
+def open_flags(database, limit=None, offset=0):
     """Notes not marked done, oldest first, for the Approvals page and Overview's "Needs you", each with
     its rowid (`note_id`, what [Mark done] names). Reads only; a table from before done_at existed
     counts every note as open."""
@@ -498,7 +498,7 @@ def open_flags(database, limit=None):
         return []
     columns = {row[1] for row in database.execute("PRAGMA table_info(reply_owner_flags)")}
     done = " WHERE done_at IS NULL" if "done_at" in columns else ""
-    bound = " LIMIT %d" % int(limit) if limit else ""
+    bound = (" LIMIT %d" % int(limit) if limit else "") + (" OFFSET %d" % int(offset) if limit and offset else "")
     return [dict(zip(("note_id", "task_id", "flagged_at", "reason"), row)) for row in database.execute(
         "SELECT rowid,task_id,flagged_at,reason FROM reply_owner_flags" + done + " ORDER BY flagged_at,task_id" + bound)]
 

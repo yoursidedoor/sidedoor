@@ -1289,7 +1289,7 @@ def _serve(open_browser, home, path, start, scheduler, tray=False):
         server = uvicorn.Server(config)
         scheduler_loop.start_license_heartbeat(root, home=home)  # E8.T2: checks once now, then daily
         import update_check
-        update_check.start(home=home)  # E9.T3: checks once now, then daily; never blocks a page
+        update_check.start(home=home)  # E9.T3: checks once now, then every 30 minutes; never blocks a page
         # Wait for Start (owner, 2026-10-22): `--start` starts the loop only once Setup's own Start
         # (step 11) has succeeded; before that, that Start does.
         if (start or start_requested) and setup_steps.started(home):

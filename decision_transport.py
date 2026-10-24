@@ -59,7 +59,10 @@ def initialize(database):
         INSERT OR IGNORE INTO transport_cursor VALUES (1,0);
     """)
     columns = {row[1] for row in database.execute("PRAGMA table_info(user_decisions)")}
-    for name, definition in {"kind": "TEXT NOT NULL DEFAULT 'fact'", "owner_id": "TEXT", "replaces_id": "TEXT"}.items():
+    # `label`: the question as the form asks it (owner, 2026-10-24), shown on Approvals and kept with the
+    # answer for Settings; NULL for older rows and for the operational escalation.
+    for name, definition in {"kind": "TEXT NOT NULL DEFAULT 'fact'", "owner_id": "TEXT", "replaces_id": "TEXT",
+                             "label": "TEXT"}.items():
         if name not in columns:
             database.execute(f"ALTER TABLE user_decisions ADD COLUMN {name} {definition}")
     database.execute("CREATE UNIQUE INDEX IF NOT EXISTS decision_replacement ON user_decisions(replaces_id) WHERE replaces_id IS NOT NULL")
@@ -343,7 +346,9 @@ def reissue_fact(database, decision, now):
     if decision["expires_at"] <= int(dt.datetime.fromisoformat(now).timestamp() * 1000):
         return None
     identifier = uuid.uuid4().hex
-    question = {"id": decision["field"], "answer_type": decision["answer_type"], "choices": json.loads(decision["choices"])}
+    label = decision["label"] if "label" in decision.keys() else None
+    question = {"id": decision["field"], "answer_type": decision["answer_type"], "choices": json.loads(decision["choices"]),
+                **({"label": label} if label else {})}
     job = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (decision["job_key"],)).fetchone()
     if not job or job["state"] != "BLOCKED" or row_job_hash(decision, json.loads(job["payload"])) != decision["job_hash"]:
         return None
@@ -351,11 +356,11 @@ def reissue_fact(database, decision, now):
                + fact_summary(job, question, decision["expires_at"]))
     database.execute("""INSERT INTO user_decisions(
         id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,policy_hash,
-        expires_at,state,summary,event_key,kind,owner_id,replaces_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,'fact',?,?)""",
+        expires_at,state,summary,event_key,kind,owner_id,replaces_id,label)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,'fact',?,?,?)""",
         (identifier, decision["job_key"], decision["field"], decision["semantic"], decision["answer_type"],
          decision["choices"], decision["payload_hash"], decision["job_hash"], decision["policy_hash"],
-         decision["expires_at"], summary, "decision:" + identifier, decision["owner_id"], decision["id"]))
+         decision["expires_at"], summary, "decision:" + identifier, decision["owner_id"], decision["id"], label))
     database.execute("INSERT INTO notification_outbox(event_key,message,state,updated_at) VALUES (?,?,'WAITING_TRANSPORT',?)",
                      ("decision:" + identifier, summary, now))
     return identifier
@@ -380,8 +385,9 @@ def request_fact(database, job, question, policy, now):
     expires_at = milliseconds + 7 * 86400000
     summary = fact_summary(job, question, expires_at)
     event_key = "decision:" + identifier
-    database.execute("INSERT INTO user_decisions(id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,policy_hash,expires_at,state,summary,event_key) VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?)",
-                     (identifier, job["job_key"], question["id"], question["semantic"], question.get("answer_type", "text"), encoded(question.get("choices", [])), payload_hash, job_hash, policy_hash, expires_at, summary, event_key))
+    label = question.get("label") if isinstance(question.get("label"), str) and question["label"].strip() else None
+    database.execute("INSERT INTO user_decisions(id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,policy_hash,expires_at,state,summary,event_key,label) VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)",
+                     (identifier, job["job_key"], question["id"], question["semantic"], question.get("answer_type", "text"), encoded(question.get("choices", [])), payload_hash, job_hash, policy_hash, expires_at, summary, event_key, label))
     database.execute("INSERT OR IGNORE INTO notification_outbox(event_key,message,state,updated_at) VALUES (?,?,'WAITING_TRANSPORT',?)", (event_key, summary, now))
     return identifier
 

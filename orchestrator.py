@@ -1661,6 +1661,11 @@ def main(argv=None):
             if held_senders:
                 # Machine contract (E2.T6): the command's JSON result; stays print.
                 print(json.dumps({"held_reply_senders": held_senders}, indent=2))
+            import sequence  # each contact's place in the outreach sequence (E3.T3 sequence_view)
+            from zoneinfo import ZoneInfo
+            # Machine contract (E2.T6): the command's JSON result; stays print.
+            print(json.dumps({"outreach_sequences": sequence.positions(
+                database, ZoneInfo(config.get("timezone") or "America/Los_Angeles"))}, indent=2))
             if database.execute("SELECT 1 FROM sqlite_master WHERE name='workflow_tasks'").fetchone():
                 # Machine contract (E2.T6): the command's JSON result; stays print.
                 print(json.dumps({"applications_job": reporting.applications_job(database)}, indent=2))

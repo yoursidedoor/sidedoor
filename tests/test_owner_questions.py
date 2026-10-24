@@ -1,0 +1,344 @@
+"""Questions only the owner can answer (owner, 2026-10-24), end to end from what the owner sees.
+
+"If the required question has 'options', e.g like green card, permanent residence, citizen, etc..
+Those should be displayed too, so a user can pass in their answer. It still be persisted ... so it can
+be reused in the future. It should be shown on settings page too."
+
+Shaped like the two real cases on the owner's install (2026-10-23):
+- ASI: a required choice question, export_control_protected_individual_status, with five options;
+  the answering AI said UNKNOWN and the judge accepted it.
+- InsForge: two required text questions (GitHub profile, Twitter / X profile); the judge said
+  CANNOT_ANSWER ("The packet records no GitHub profile URL").
+
+Each test runs the real applications cycle (mock browser, fake answering model), renders /approvals
+with TestClient, answers there, and checks profile.json, the job and a later job asking the same thing.
+"""
+
+import datetime as dt
+import html
+import importlib.util
+import json
+import unittest
+from unittest import mock
+
+import applications
+import orchestrator
+import profile_home
+import setup_steps
+import user_profile
+import test_applications_e2e as fixtures
+from answering_fixtures import is_judge_prompt, judge_reply
+from test_answering_agent import PACKET_MARKER, entry
+
+DEPENDENCIES = all(importlib.util.find_spec(name) for name in ("fastapi", "httpx"))
+if DEPENDENCIES:
+    from fastapi.testclient import TestClient
+    import dashboard
+
+PORT = 47823
+SECRET = "test-token-value"
+ORIGIN = {"origin": f"http://127.0.0.1:{PORT}"}
+CONFIG = {"application_answering": {"enabled": True, "timeout_seconds": 5}}
+
+EXPORT_CHOICES = ["A United States citizen or national.",
+                  "A person lawfully admitted for permanent resident of the United States (IE. a green card holder).",
+                  "A person admitted as a refugee to the united states under 8 U.S.C. 1157.",
+                  "A person admitted as an asylee to the United States under 8 U.S.C 1158.",
+                  "None of the above."]
+EXPORT = {"id": None, "required": True, "semantic": "export_control_protected_individual_status", "answer_type": "choice",
+          "label": "Are you any of the following (export control): select the one that applies", "choices": EXPORT_CHOICES}
+GITHUB = {"id": None, "required": True, "semantic": "github_profile", "answer_type": "text", "choices": [],
+          "label": "GitHub profile *"}
+TWITTER = {"id": None, "required": True, "semantic": "twitter_profile", "answer_type": "text", "choices": [],
+           "label": "Twitter / X profile *"}
+
+
+class Model:
+    """The answering AI and its judge. The AI answers a question from an owner answer kept for its
+    semantic (as the real AI reads /policy/answers), else UNKNOWN; the judge returns `verdict` for an
+    UNKNOWN (ACCEPT for ASI, CANNOT_ANSWER for InsForge) and accepts every answer."""
+
+    def __init__(self, verdict="ACCEPT", error=None, values=None):
+        self.verdict, self.error, self.packets = verdict, error, []
+        self.values = values or {}   # {semantic: value} the AI answers outright (fitting its control or not)
+
+    def __call__(self, prompt):
+        if self.error is not None:
+            raise self.error
+        if is_judge_prompt(prompt):
+            return judge_reply(prompt, lambda item, packet: (
+                "ACCEPT" if item["answer"]["status"] == "ANSWERED"
+                or self.verdict == "ACCEPT" else (self.verdict, "The packet records no answer to this.", None, False)))
+        packet = json.loads(prompt.split(PACKET_MARKER, 1)[1])
+        self.packets.append(packet)
+        answers = []
+        for question in packet["questions"]:
+            kept = [answer for answer in packet["policy"]["answers"].values() if answer.get("semantic") == question["semantic"]]
+            if question["semantic"] in self.values:
+                answers.append(entry(question, status="ANSWERED", unknown_reason=None, value=self.values[question["semantic"]],
+                                     derivation="fixture"))
+            elif kept:
+                answers.append(entry(question, status="ANSWERED", unknown_reason=None, value=kept[-1]["value"],
+                                     derivation="The owner answered this on Approvals."))
+            else:
+                answers.append(entry(question, unknown_reason="The packet does not record this."))
+        return json.dumps({"packet_sha256": packet["packet_sha256"], "answers": answers})
+
+
+@unittest.skipUnless(DEPENDENCIES, "dashboard packages (fastapi, httpx) are not installed")
+class OwnerQuestions(fixtures.ApplicationEndToEndTests):
+    # Only this class's tests run here (the inherited end-to-end tests run in their own module).
+    def run(self, result=None):
+        if not self._testMethodName.startswith("test_owner_"):
+            return result
+        return super().run(result)
+
+    def setUp(self):
+        super().setUp()
+        for name in ("answering-prompt.md", "answering-schema.json", "answering-judge-prompt.md", "answering-judge-schema.json"):
+            (self.root / name).write_text((orchestrator.ROOT / name).read_text())
+        self.dashboard()
+        self.clock = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+    def dashboard(self):
+        self.home = user_profile.home()
+        app = dashboard.create_app(SECRET, PORT, home=self.home, root=self.root, config={},
+                                   browser=mock.Mock(is_open=lambda: False), relay_url="https://relay.test")
+        self.client = TestClient(app, base_url=f"http://127.0.0.1:{PORT}", follow_redirects=False)
+        self.client.get("/", params={"t": SECRET})
+
+    def form(self, questions_by_employer):
+        def customize(result, job):
+            result["questions"].extend(questions_by_employer.get(job["employer"], []))
+        self.adapter.customize = customize
+
+    def run_cycle(self, model, days=0):
+        now = (self.clock + dt.timedelta(days=days)).isoformat()
+        self.adapter.now = now
+        self.adapter.answering_executor = model
+        applications.cycle(self.database, CONFIG, self.root, self.adapter, now)
+        self.assertFalse(self.database.in_transaction)
+
+    def page(self, path="/approvals"):
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        return html.unescape(response.text)
+
+    def card(self, page, text):
+        cards = [card.split("</article>")[0] for card in page.split('<article class="approval-card')[1:] if text in card]
+        self.assertEqual(len(cards), 1, text)
+        return cards[0]
+
+    def pending(self, key=None):
+        sql = "SELECT * FROM user_decisions WHERE state='PENDING'" + (" AND job_key=?" if key else "")
+        return [dict(row) for row in self.database.execute(sql, (key,) if key else ())]
+
+    def answer(self, decision, value):
+        response = self.client.post("/approvals/questions/answer", headers=ORIGIN, data={
+            "decision_id": decision["id"], "payload_hash": decision["payload_hash"], "answer": value})
+        self.assertEqual(response.status_code, 200)
+        return html.unescape(response.text)
+
+    # --- ASI: a required choice question --------------------------------------------------------------
+
+    def test_owner_asi_choice_question_is_asked_with_its_options_answered_kept_and_reused(self):
+        asi = self.discover(fixtures.role("ASI", "asi-1"))
+        self.form({"asi": [EXPORT], "later co": [EXPORT]})
+        self.run_cycle(Model("ACCEPT"))
+        job = self.job(asi)
+        field = applications.question_field(EXPORT)
+        # An owner hold: no try spent, nothing submitted, not due again until answered or expired.
+        self.assertEqual((job["state"], job["blocker"], job["attempts"]), ("BLOCKED", "UNKNOWN_REQUIRED_ANSWERS:" + field, 0))
+        [decision] = self.pending(asi)
+        self.assertEqual(job["next_at"], dt.datetime.fromtimestamp(decision["expires_at"] / 1000, dt.timezone.utc).isoformat())
+        self.assertEqual(self.submissions(), [])
+        # The read was saved complete, so waiting never counts toward the inspect cap.
+        self.assertEqual(self.database.execute("SELECT complete FROM application_requisition_records WHERE job_key=?",
+                                               (asi,)).fetchone()[0], 1)
+        # A cycle meanwhile does not read the page again.
+        reads = len([call for call in self.adapter.calls if call[0] == "inspect"])
+        self.run_cycle(Model("ACCEPT"), days=1)
+        self.assertEqual(len([call for call in self.adapter.calls if call[0] == "inspect"]), reads)
+
+        # What the owner sees: the card with the question as the form asks it and all five options.
+        page = self.page()
+        card = self.card(page, EXPORT["label"])
+        for choice in EXPORT_CHOICES:
+            self.assertIn('type="radio" name="answer" value="%s"' % choice, card)
+        self.assertIn("Questions for you", page)
+        import test_dashboard_overview
+        test_dashboard_overview.finished_home(self.home)
+        overview = self.page("/")
+        self.assertIn("/approvals#questions", overview)
+        applications_page = self.page("/applications")
+        self.assertIn("Answer Sidedoor's question about this application on Approvals.", applications_page)
+        failures = self.page("/failures")
+        self.assertNotIn("UNKNOWN_REQUIRED_ANSWERS", failures)
+
+        # A wrong answer type gets a way forward: the question is asked again.
+        self.assertIn("does not fit this question", self.answer(decision, "Something else"))
+        [decision] = self.pending(asi)
+        green_card = EXPORT_CHOICES[1]
+        self.assertIn("Answer saved.", self.answer(decision, green_card))
+        self.assertIsNone(self.job(asi)["next_at"])                                  # due again now
+        [(key, kept)] = setup_steps.owner_answers(self.home)
+        self.assertEqual((kept["value"], kept["semantic"], kept["question"], kept["employer"], kept["choices"]),
+                         (green_card, EXPORT["semantic"], EXPORT["label"], "asi", EXPORT_CHOICES))
+
+        # Settings shows it: question, where first asked, the answer, its date, Edit with the options, Remove.
+        settings = self.page("/settings")
+        section = settings.split('id="answers"', 1)[1].split("</section>", 1)[0]
+        self.assertIn("Your saved answers", section)
+        self.assertIn(EXPORT["label"], section)
+        self.assertIn("First asked for asi, Staff Software Engineer", section)
+        self.assertIn("Your answer: " + green_card, section)
+        self.assertIn("answered " + kept["recorded_at"][:10], section)
+        self.assertIn('<option value="None of the above."', section)
+        self.assertIn("Remove", section)
+
+        # Its next try uses it: the job is submitted with the chosen option.
+        self.run_cycle(Model("ACCEPT"), days=1)
+        self.assertEqual(self.job(asi)["state"], "SUBMITTED")
+        evidence = json.loads(self.database.execute("SELECT evidence FROM application_attempts WHERE job_key=?", (asi,)).fetchone()[0])
+        self.assertEqual(evidence["answers"][field], green_card)
+
+        # A later job asking the same thing gets the saved answer through the answering AI: no new card.
+        later = self.discover(fixtures.role("Later Co", "later-1"))
+        model = Model("ACCEPT")
+        self.run_cycle(model, days=1)
+        self.assertEqual(self.job(later)["state"], "SUBMITTED")
+        self.assertEqual(self.pending(), [])
+        self.assertIn(key, model.packets[0]["policy"]["answers"])
+
+        # Remove: the next job that needs it asks again.
+        response = self.client.post("/settings/answers/remove", data={"key": key}, headers=ORIGIN)
+        self.assertEqual(response.status_code, 303)
+        third = self.discover(fixtures.role("Third Co", "third-1"))
+        self.form({"third co": [EXPORT]})
+        self.run_cycle(Model("ACCEPT"), days=1)
+        self.assertEqual(len(self.pending(third)), 1)
+
+    def test_owner_expired_question_is_asked_again_never_given_up(self):
+        asi = self.discover(fixtures.role("ASI", "asi-2"))
+        self.form({"asi": [EXPORT]})
+        self.run_cycle(Model("ACCEPT"))
+        [first] = self.pending(asi)
+        self.run_cycle(Model("ACCEPT"), days=8)                                      # past the 7-day deadline
+        job = self.job(asi)
+        self.assertEqual((job["state"], job["attempts"]), ("BLOCKED", 0))
+        self.assertTrue(job["blocker"].startswith("UNKNOWN_REQUIRED_ANSWERS:"))
+        self.assertEqual(self.database.execute("SELECT state FROM user_decisions WHERE id=?", (first["id"],)).fetchone()[0], "EXPIRED")
+        [second] = self.pending(asi)
+        self.assertGreater(second["expires_at"], first["expires_at"])
+
+    def test_owner_a_failed_answering_call_stays_a_retry_and_asks_nobody(self):
+        asi = self.discover(fixtures.role("ASI", "asi-3"))
+        self.form({"asi": [EXPORT]})
+        self.run_cycle(Model(error=TimeoutError("model timeout")))
+        self.assertTrue(self.job(asi)["blocker"].startswith("ANSWERING_RETRY:"))
+        self.assertEqual(self.pending(), [])
+
+    # --- Review round 1 -------------------------------------------------------------------------------
+
+    def test_owner_q1_mixed_case_is_one_owner_hold_no_reread_then_the_rest_is_answered(self):
+        office = {"id": None, "required": True, "semantic": "preferred_office", "answer_type": "choice",
+                  "label": "Preferred office", "choices": ["Austin", "Denver"]}
+        asi = self.discover(fixtures.role("ASI", "asi-4"))
+        self.form({"asi": [EXPORT, office]})
+        self.run_cycle(Model("ACCEPT", values={"preferred_office": "Paris"}))     # does not fit: the AI's retry
+        job = self.job(asi)
+        self.assertEqual((job["blocker"], job["attempts"]), ("UNKNOWN_REQUIRED_ANSWERS:" + applications.question_field(EXPORT), 0))
+        [decision] = self.pending(asi)
+        self.assertEqual(job["next_at"], dt.datetime.fromtimestamp(decision["expires_at"] / 1000, dt.timezone.utc).isoformat())
+        self.assertEqual(self.database.execute("SELECT complete FROM application_requisition_records WHERE job_key=?",
+                                               (asi,)).fetchone()[0], 1)
+        reads = len([call for call in self.adapter.calls if call[0] == "inspect"])
+        for day in (1, 2, 3):
+            self.run_cycle(Model("ACCEPT", values={"preferred_office": "Paris"}), days=day)
+        self.assertEqual(len([call for call in self.adapter.calls if call[0] == "inspect"]), reads)
+        self.assertIn("Answer saved.", self.answer(decision, EXPORT_CHOICES[1]))
+        self.run_cycle(Model("ACCEPT", values={"preferred_office": "Austin"}), days=3)
+        self.assertEqual(self.job(asi)["state"], "SUBMITTED")
+
+    def test_owner_q1_drifted_options_supersede_the_old_card(self):
+        self.policy["answers"].pop("github", None)
+        profile_home.use(self, self.policy)
+        self.dashboard()
+        asi = self.discover(fixtures.role("ASI", "asi-5"))
+        self.form({"asi": [EXPORT, GITHUB]})
+        self.run_cycle(Model("ACCEPT"))
+        cards = {decision["field"]: decision for decision in self.pending(asi)}
+        old = cards[applications.question_field(EXPORT)]
+        self.assertIn("Answer saved.", self.answer(cards[applications.question_field(GITHUB)], "https://github.com/example-user"))
+        drifted = dict(EXPORT, choices=EXPORT_CHOICES + ["Prefer not to say."])
+        self.form({"asi": [drifted, GITHUB]})
+        self.run_cycle(Model("ACCEPT"), days=1)
+        [current] = self.pending(asi)
+        self.assertEqual(json.loads(current["choices"]), drifted["choices"])
+        self.assertEqual(self.database.execute("SELECT state,last_error FROM user_decisions WHERE id=?", (old["id"],)).fetchone()[:],
+                         ("SUPERSEDED", "QUESTION_REASKED"))
+        self.assertEqual(self.card(self.page(), EXPORT["label"]).count('type="radio"'), 6)
+
+    def test_owner_q2_a_question_no_longer_missing_closes_its_card(self):
+        self.policy["answers"].pop("github", None)
+        profile_home.use(self, self.policy)
+        self.dashboard()
+        asi = self.discover(fixtures.role("ASI", "asi-6"))
+        self.form({"asi": [EXPORT, GITHUB]})
+        self.run_cycle(Model("ACCEPT"))
+        cards = {decision["field"]: decision for decision in self.pending(asi)}
+        self.assertIn("Answer saved.", self.answer(cards[applications.question_field(GITHUB)], "https://github.com/example-user"))
+        self.form({"asi": [GITHUB]})                                                 # the re-read form dropped it
+        self.run_cycle(Model("ACCEPT"), days=1)
+        self.assertEqual(self.job(asi)["state"], "SUBMITTED")
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.database.execute("SELECT state,last_error FROM user_decisions WHERE id=?",
+                                               (cards[applications.question_field(EXPORT)]["id"],)).fetchone()[:],
+                         ("SUPERSEDED", "QUESTION_NO_LONGER_MISSING"))
+        self.assertNotIn(EXPORT["label"], self.page())
+
+    def test_owner_q3_an_answer_on_a_database_without_the_label_column_is_kept(self):
+        asi = self.discover(fixtures.role("ASI", "asi-7"))
+        self.form({"asi": [EXPORT]})
+        self.run_cycle(Model("ACCEPT"))
+        [decision] = self.pending(asi)
+        with self.database:
+            self.database.execute("ALTER TABLE user_decisions DROP COLUMN label")
+        with mock.patch("decision_transport.initialize"):        # as a dashboard that never re-initializes
+            self.assertIn("Answer saved.", self.answer(decision, EXPORT_CHOICES[0]))
+        [(_key, kept)] = setup_steps.owner_answers(self.home)
+        self.assertEqual(kept["value"], EXPORT_CHOICES[0])
+
+    # --- InsForge: required text questions --------------------------------------------------------------
+
+    def test_owner_insforge_text_questions_get_a_text_box_and_the_answers_are_used(self):
+        # Like the owner's install, this profile records no GitHub link (the example profile does).
+        self.policy["answers"].pop("github", None)
+        profile_home.use(self, self.policy)
+        self.dashboard()
+        insforge = self.discover(fixtures.role("InsForge (InstaCloud)", "insforge-1"))
+        self.form({"insforge (instacloud)": [GITHUB, TWITTER]})
+        self.run_cycle(Model("CANNOT_ANSWER"))
+        job = self.job(insforge)
+        self.assertTrue(job["blocker"].startswith("UNKNOWN_REQUIRED_ANSWERS:"))
+        self.assertEqual(job["attempts"], 0)
+        page = self.page()
+        for question in (GITHUB, TWITTER):
+            card = self.card(page, question["label"])
+            self.assertIn('<textarea id="answer-', card)
+            self.assertNotIn('type="radio"', card)
+        by_field = {decision["field"]: decision for decision in self.pending(insforge)}
+        self.assertIn("Answer saved.", self.answer(by_field[applications.question_field(GITHUB)], "https://github.com/example-user"))
+        self.assertEqual(self.job(insforge)["state"], "BLOCKED")
+        # One answer makes the job due; the other question is still open, so it holds again on its own card.
+        self.run_cycle(Model("CANNOT_ANSWER"), days=1)
+        self.assertEqual([decision["field"] for decision in self.pending(insforge)], [applications.question_field(TWITTER)])
+        self.assertIn("Answer saved.", self.answer(self.pending(insforge)[0], "https://x.com/example_user"))
+        self.run_cycle(Model("CANNOT_ANSWER"), days=1)
+        self.assertEqual(self.job(insforge)["state"], "SUBMITTED")
+        saved = {answer["semantic"]: answer["value"] for _key, answer in setup_steps.owner_answers(self.home)}
+        self.assertEqual(saved, {"github_profile": "https://github.com/example-user", "twitter_profile": "https://x.com/example_user"})
+
+
+if __name__ == "__main__":
+    unittest.main()

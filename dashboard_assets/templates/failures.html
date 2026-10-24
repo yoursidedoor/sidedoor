@@ -1,4 +1,23 @@
 {% extends "base.html" %}
+{% from "failures_older.html" import older_control %}
+{% macro paging(key, p, title) %}
+<nav class="fail-paging" aria-label="{{ title }} pages">
+  {% if p.page > 1 %}<a href="{{ link(anchor=key, section=key, page=p.page - 1) }}">Previous</a>{% endif %}
+  <span class="muted">Page {{ p.page }} of {{ p.pages }} ({{ p.total }})</span>
+  {% if p.page < p.pages %}<a href="{{ link(anchor=key, section=key, page=p.page + 1) }}">Next</a>{% endif %}
+  <a href="{{ link(anchor=key, section=None, page=None) }}">Back to the summary</a>
+</nav>
+{% endmacro %}
+{#- Pages of one of a run's lists or of one part of the Runs list: `param` is its page parameter and
+    `extra` the other parameters its links set (failures_page.KEPT_PARAMS). -#}
+{% macro pager(p, anchor, title, param, extra={}) %}
+<nav class="fail-paging" aria-label="{{ title }} pages">
+  {% if p.page > 1 %}<a href="{{ link(anchor=anchor, changes=extra, more={param: p.page - 1}) }}">Previous</a>{% endif %}
+  <span class="muted">Page {{ p.page }} of {{ p.pages }} ({{ p.total }})</span>
+  {% if p.page < p.pages %}<a href="{{ link(anchor=anchor, changes=extra, more={param: p.page + 1}) }}">Next</a>{% endif %}
+</nav>
+{% endmacro %}
+{% macro more(key, count) %}<p class="muted">And {{ count }} more. <a href="{{ link(anchor=key, section=key, page=2) }}">See them</a></p>{% endmacro %}
 {% macro failure(f, v) %}
 <li class="card fail-item{% if f.you %} fail-you{% endif %}">
   <p class="fail-text">{{ f.text }} <span class="fail-todo{% if f.you %} fail-todo-you{% endif %}">{{ f.todo }}</span></p>
@@ -32,6 +51,8 @@
   <h2 id="needs-you-title">Needs you</h2>
   {% if v.needs_you %}
   <ul class="fail-list">{% for f in v.needs_you %}{{ failure(f, v) }}{% endfor %}</ul>
+  {% if v.needs_more %}{{ more("needs-you", v.needs_more) }}{% endif %}
+  {% if v.needs_paging %}{{ paging("needs-you", v.needs_paging, "Needs you") }}{% endif %}
   {% else %}
   <p class="muted">Nothing needs you right now.</p>
   {% endif %}
@@ -48,7 +69,9 @@
   {% if s.unavailable %}<p class="muted">Some of these records are not available right now.</p>{% endif %}
   {% if s.entries %}
   <ul class="fail-list">{% for f in s.entries %}{{ failure(f, v) }}{% endfor %}</ul>
-  {% if s.more %}<p class="muted">And {{ s.more }} more.{% if s.key == "applications" %} <a href="/applications">See Applications</a>{% endif %}</p>{% endif %}
+  {% if s.more %}{{ more(s.key, s.more) }}{% endif %}
+  {% if s.key == "applications" and (s.more or s.paging) %}<p class="muted"><a href="/applications">See Applications</a></p>{% endif %}
+  {% if s.paging %}{{ paging(s.key, s.paging, s.title) }}{% endif %}
   {% elif not s.unavailable %}
   <p class="muted">Nothing failed here.</p>
   {% endif %}
@@ -76,13 +99,17 @@
   <p class="muted">What Sidedoor recorded for this run, newest first, with secrets removed. <a href="/failures#logs">Back to all logs</a></p>
   {% if rv.records %}<pre class="log-lines run-records">{% for r in rv.records %}{% if r.at %}{{ rv.when(r.at) }}  {% endif %}{{ r.text }}
 {% endfor %}</pre>{% endif %}
+  {% if rv.records_paging and rv.records_paging.pages > 1 %}{% if rv.records_paging.page == 1 %}<p class="muted">And {{ rv.records_paging.total - rv.records | length }} older records.</p>{% endif %}{{ pager(rv.records_paging, "run", "Records", "records_page") }}{% endif %}
   {% for file in rv.files %}
   <details class="card log-stream" open>
-    <summary>{{ file.name }} <span class="muted">({% if file.state == "missing" %}gone{% elif file.state == "unreadable" %}can't be read{% elif file.lines %}last {{ file.lines | length }} line{{ "s" if file.lines | length != 1 }}{% if file.at %}, {{ rv.when(file.at) }}{% endif %}{% else %}empty{% endif %})</span></summary>
+    <summary>{{ file.name }} <span class="muted">({% if file.state == "missing" %}gone{% elif file.state == "unreadable" %}can't be read{% elif file.lines %}{% if file.before is not none %}an older part, {{ file.lines | length }} line{{ "s" if file.lines | length != 1 }}{% else %}last {{ file.lines | length }} line{{ "s" if file.lines | length != 1 }}{% endif %}{% if file.at %}, {{ rv.when(file.at) }}{% endif %}{% else %}empty{% endif %})</span></summary>
+    {% if file.before is not none %}<p class="log-older"><a href="{{ file.newest_href }}">Back to its newest lines</a></p>{% endif %}
+    {{ older_control(file) }}
     {% if file.lines %}<pre class="log-lines">{% for line in file.lines %}{{ line }}
 {% endfor %}</pre>{% endif %}
   </details>
   {% endfor %}
+  {% if rv.files_paging and rv.files_paging.pages > 1 %}{% if rv.files_paging.page == 1 %}<p class="muted">And {{ rv.files_paging.total - rv.files | length }} more files.</p>{% endif %}{{ pager(rv.files_paging, "run", "Files", "files_page", {"file": None, "file_before": None}) }}{% endif %}
   {% if rv.tagged %}
   <details class="card log-stream" open>
     <summary>Its lines in the logs <span class="muted">(tagged {{ rv.tag }})</span></summary>
@@ -98,7 +125,7 @@
 <section id="logs" class="fail-section" aria-labelledby="logs-title">
   {% set l = logs %}
   <h2 id="logs-title">Logs</h2>
-  <p class="muted">The last {{ l.tail_bytes // 1024 }} KB of each log file, newest at the bottom.</p>
+  <p class="muted">The last {{ l.tail_bytes // 1024 }} KB of each log file, newest at the bottom. Older lines load {{ l.tail_bytes // 1024 }} KB at a time; search and day apply to the lines shown.</p>
   <form class="log-filters" method="get" action="/failures#logs">
     <label>Part
       <select name="component">
@@ -124,10 +151,16 @@
   <h3 id="runs-title">Runs</h3>
   {% if runs %}
   <ul class="fail-runs">{% for r in runs %}<li><a href="{{ r.href }}">{{ r.label }}</a> <span class="muted">{{ r.component_label }}, {{ v.when(r.at) if v else r.at }}</span></li>{% endfor %}</ul>
+  {% for part in runs_parts %}
+  {% if part.more %}<p class="muted">And {{ part.more }} more {{ part.label }} runs. <a href="{{ link(anchor="runs-title", runs_part=part.component, runs_page=2) }}">See them</a></p>
+  {% else %}{{ pager(part.paging, "runs-title", part.label + " runs", "runs_page", {"runs_part": part.component}) }}{% endif %}
+  {% endfor %}
   {% else %}<p class="muted">No run files are kept{% if l.day or l.component != "all" %} for this choice{% endif %}.</p>{% endif %}
   {% for s in l.streams %}
-  <details class="card log-stream" id="{{ s.id }}"{% if s.lines and (l.query or s.name.endswith("stderr.log")) %} open{% endif %}>
-    <summary>{{ s.label }} <span class="muted">({% if s.state == "missing" %}no log yet{% elif s.state == "unreadable" %}can't be read{% elif s.lines %}{{ s.lines | length }} line{{ "s" if s.lines | length != 1 }}{% elif l.query %}no matches{% else %}empty{% endif %})</span></summary>
+  <details class="card log-stream" id="{{ s.id }}"{% if s.before is not none or (s.lines and (l.query or s.name.endswith("stderr.log"))) %} open{% endif %}>
+    <summary>{{ s.label }} <span class="muted">({% if s.state == "missing" %}no log yet{% elif s.state == "unreadable" %}can't be read{% elif s.lines %}{% if s.before is not none %}an older part, {% endif %}{{ s.lines | length }} line{{ "s" if s.lines | length != 1 }}{% elif l.query or l.day %}no matches{% else %}empty{% endif %})</span></summary>
+    {% if s.before is not none %}<p class="log-older"><a href="{{ s.newest_href }}">Back to the newest lines</a></p>{% endif %}
+    {{ older_control(s) }}
     {% if s.lines %}<pre class="log-lines">{% for line in s.lines %}{{ line }}
 {% endfor %}</pre>{% endif %}
   </details>

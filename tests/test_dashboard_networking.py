@@ -51,6 +51,10 @@ def url(slug):
     return "https://www.linkedin.com/in/" + slug
 
 
+def by_profile_position(found, profile):
+    return next(person["position"] for person in found["people"] if person["profile"] == profile)
+
+
 class Records:
     """Rows written the way the product's own writers write them."""
 
@@ -182,6 +186,76 @@ class NetworkingPageTest(Page, unittest.TestCase):
         self.assertEqual(len(self.entries(show="referral_agreed")), 1)
         self.assertEqual(len(self.entries(show="replied")), 1)
         self.assertEqual(len(self.entries(show="waiting")), 0)
+
+    def test_sequence_position_from_sequence_view_on_the_entry_and_in_status(self):
+        """E3.T3: sequence_view's place in the sequence, one line per contact (Unipile and HeyReach-era)."""
+        import sequence
+        self.open_store(self.root)
+        self.invited("jane-doe", "Hi Jane, I would value your view of the platform team.", 0)
+        self.event("jane-doe", "accepted", 20, source_id="acceptance:jane")
+        self.event("jane-doe", "followup_sent", 91, source_id="receipt-follow-1", purpose="FOLLOWUP")
+        self.message("jane-doe", "CORRESPONDENT", "Happy to talk", 100)
+        # HeyReach era: the invitation is an INITIAL send with its campaign, then a FIRST_MESSAGE after acceptance
+        self.action("hr-1", "omar-hr", "INITIAL", "CONFIRMED_SENT", "Hi Omar.", claimed=at(0))
+        self.event("omar-hr", "initial_sent", 0, source="heyreach", source_id="hr-invite", purpose="INITIAL",
+                   campaign_id=900001)
+        self.event("omar-hr", "accepted", 30, source="heyreach", source_id="hr-accept")
+        self.event("omar-hr", "initial_sent", 45, source="heyreach", source_id="hr-first", purpose="FIRST_MESSAGE")
+        self.invited("pat-new", "Hi Pat.", 2)   # invited, not accepted yet
+        self.action("invite-quinn", "quinn-q", "INVITE", "PENDING", "Hi Quinn.")   # queued, nothing sent
+        self.action("invite-rae", "rae-r", "INVITE", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", "Hi Rae.", claimed=at(3))
+        self.db.execute("INSERT INTO rw_aliases VALUES ('contact','linkedin.com/in/jane-old','linkedin.com/in/jane-doe','test')")
+        self.event("jane-old", "inbound", 99, source_id="old-spelling")   # a second spelling: still one line
+        self.db.commit()
+        now = START + dt.timedelta(hours=60)
+        lines = {entry["name"]: entry["sequence"] for entry in self.entries(now=now)}
+        self.assertEqual(lines["Jane Example"], "Invited 10-15 · Accepted 10-16 · Follow-up 10-19 · Replied 10-19")
+        omar_due = sequence.sequence_view(self.db, url("omar-hr"), now)["due"]
+        self.assertEqual(omar_due["label"], "Follow-up due")
+        due_day = dt.datetime.fromisoformat(omar_due["at"]).astimezone(ZoneInfo("America/Los_Angeles")).strftime("%m-%d")
+        self.assertEqual(lines["Omar Example"], "Invited 10-15 · Accepted 10-16 · First message 10-17 · Follow-up due " + due_day)
+        self.assertTrue(lines["Pat Example"].startswith("Invited 10-15 · Follow-up due "), lines["Pat Example"])
+        self.assertTrue(lines["Pat Example"].endswith(" (once they accept)"))
+        self.assertIsNone(lines["Quinn Example"])   # listed; "Invitation queued" is its chip, not repeated
+        self.assertEqual(lines["Rae Example"], "Invitation sent, delivery not confirmed")
+        page = self.get()   # the page renders the same line (dates do not depend on the clock once sent)
+        self.assertIn("Invited 10-15 · Accepted 10-16 · Follow-up 10-19 · Replied 10-19", page)
+        found = sequence.positions(self.db, ZoneInfo("America/Los_Angeles"), now)
+        self.assertEqual(found["total"], 5)
+        self.assertEqual(by_profile_position(found, "linkedin.com/in/quinn-q"), "Invitation queued")
+        by_profile = {person["profile"]: person for person in found["people"]}
+        self.assertEqual(by_profile["linkedin.com/in/jane-doe"]["position"], lines["Jane Example"])
+        self.assertEqual(by_profile["linkedin.com/in/omar-hr"]["stage"], "ACCEPTED")
+
+    def test_queued_invitations_are_listed_in_waiting_only(self):
+        """Owner, 2026-10-24: everyone in the pipeline is on the page, queued invitations too."""
+        self.open_store(self.root)
+        for number in range(6):   # the owner's shape: six queued invitations, one unconfirmed, two sent
+            self.action("invite-q%d" % number, "queued-%d" % number, "INVITE", "PENDING", "Hi.")
+        self.action("invite-u", "unsure-u", "INVITE", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", "Hi.", claimed=at(3))
+        self.invited("sent-a", "Hi A.", 1)
+        self.invited("sent-b", "Hi B.", 2)
+        self.action("follow-q", "sent-a", "FOLLOWUP", "PENDING", "A queued follow-up is not an invitation.")
+        self.db.commit()
+        view = self.view()
+        self.assertEqual(view["list"]["total"], 9)
+        counts = view["list"]["counts"]
+        self.assertEqual((counts["all"], counts["waiting"], counts["sending"], counts["needs_you"], counts["replied"],
+                          counts["closed"], counts["referral_agreed"]), (9, 9, 1, 0, 0, 0, 0))
+        queued = [entry for entry in self.entries() if entry["status"] == "Invitation queued"]
+        self.assertEqual(len(queued), 6)
+        self.assertEqual({entry["tone"] for entry in queued}, {"muted"})
+        statuses = sorted(entry["status"] for entry in self.entries() if entry["status"] != "Invitation queued")
+        self.assertEqual(statuses, ["Invited, waiting for acceptance"] * 2 + ["Sending…"])   # a PENDING follow-up changes nothing
+        page = self.get()
+        self.assertEqual(page.count('class="card net-row"'), 9)
+        self.assertEqual(page.count(">Invitation queued<"), 6)
+        self.assertIn("Invitation sent, delivery not confirmed", page)
+        for show in ("waiting", "sending", "needs_you", "replied", "replied_today", "referral_agreed", "closed"):
+            self.get(show=show)   # every filter renders
+        self.assertEqual(self.get(show="sending").count('class="card net-row"'), 1)
+        approvals = self.get("/approvals")
+        self.assertNotIn("queued-0", approvals)
 
     def test_example_2_a_note_shows_on_its_entry_and_mark_done_closes_it_everywhere(self):
         self.open_store(self.root)

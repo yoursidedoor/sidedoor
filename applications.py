@@ -2040,8 +2040,10 @@ def resolve_answers(questions, policy):
         # populated every required field, and Apply stayed disabled because the consent radios
         # were never answered - they were skipped right here, before the answering step ever saw
         # them. What an optional question may NOT do is join `missing`: that list holds the job
-        # for an hour (ANSWERING_RETRY, :2749) and refuses the submit gate, so a voluntary field
-        # nobody recorded an answer for would park every form forever.
+        # (ANSWERING_RETRY, or the owner-question hold) and refuses the submit gate, so a voluntary field
+        # nobody recorded an answer for would park every form forever. (`missing` is retried by the
+        # AI as ANSWERING_RETRY, or asked on Approvals when only the owner can answer it: see
+        # `owner_questions` in `process`.)
         optional = not question.get("required")
         field = question_field(question)
         semantic = question.get("semantic")
@@ -3656,10 +3658,14 @@ def unreadable_form_evidence(job, review):
 def escalate_unreadable_form(database, job, policy, review, now, reads):
     """Turn the spent private hold into one user-visible request through the existing path.
 
+    Not called today: the all-questions-found check that fed it was deleted (owner, 2026-09-27,
+    item 17), so `process` never escalates an unreadable form; a legacy pending request is
+    superseded once the form is read (FORM_NOW_ENUMERATED). Kept for the record and its tests.
+
     `hold` records the user-owned blocker and its notification; `decision_transport.
-    request_fact` - the same call the missing-required-answer hold uses - carries the
-    actual message, so the notification is superseded rather than sent beside it, exactly
-    as at the `UNKNOWN_REQUIRED_ANSWERS:<fields>` hold. `request_fact` returns the existing
+    request_fact` - the same call `ask_owner` makes for a required question only the owner can
+    answer (`UNKNOWN_REQUIRED_ANSWERS:<fields>`) - carries the actual message, so the
+    notification is superseded rather than sent beside it. `request_fact` returns the existing
     identifier while one is PENDING, so repeated cycles re-assert the same single request
     instead of queuing another.
     """
@@ -3674,6 +3680,104 @@ def escalate_unreadable_form(database, job, policy, review, now, reads):
                    previous_blocker=job["blocker"]), now)
     return identifier
 
+
+
+OWNER_QUESTION_EVENT = "OWNER_QUESTIONS_ASKED"
+OWNER_QUESTION_ACTION = ("Answer the application's questions on Approvals (Questions for you); the application "
+                         "goes on at its next turn after the last answer")
+
+
+def owner_questions(outcome, questions, missing):
+    """{field: question} of the still-missing REQUIRED questions whose last answering verdict is that
+    no truthful answer exists in the owner's records: the judge returned CANNOT_ANSWER (InsForge's
+    "GitHub profile", 2026-10-23), or the answering AI said UNKNOWN and the judge accepted that
+    (ASI's export-control status). A verdict from a failed judge or repair call, a round limit or a
+    value that does not fit its control carries no judge verdict of that kind and stays the AI's
+    retry. Python reads only the verdict codes, never the question text."""
+    verdicts = {}
+    for verdict in ((outcome if isinstance(outcome, dict) else {}).get("audit") or {}).get("verdicts") or ():
+        if isinstance(verdict, dict) and verdict.get("question_key"):
+            verdicts[verdict["question_key"]] = verdict   # the last verdict per question wins
+    by_field = {}
+    for question in questions:
+        if isinstance(question, dict) and question.get("required"):
+            by_field.setdefault(question_field(question), question)
+    asked = {}
+    for field in missing:
+        verdict, question = verdicts.get(field) or {}, by_field.get(field)
+        judge = verdict.get("judge") if isinstance(verdict.get("judge"), dict) else {}
+        if question is None or verdict.get("outcome") != "UNKNOWN" or verdict.get("judge_failed"):
+            continue
+        if (judge.get("verdict") == "CANNOT_ANSWER"
+                or (judge.get("verdict") == "ACCEPT" and verdict.get("status") in ("UNKNOWN", "WITHHELD_BY_POLICY"))):
+            asked[field] = question
+    return asked
+
+
+BOOLEAN_ANSWER_TYPES = frozenset({"boolean", "bool", "yes_no", "yesno"})
+
+
+def owner_question(field, question):
+    """The question as `decision_transport.request_fact` files it: the form's label and its own
+    options. A question with options is a choice (the card shows them as radio buttons); a yes/no
+    control without options is yes/no; anything else is free text."""
+    choices = [choice.strip() for choice in question.get("choices") or () if isinstance(choice, str) and choice.strip()]
+    kind = str(question.get("answer_type") or "").strip().casefold()
+    answer_type = "choice" if choices else "boolean" if kind in BOOLEAN_ANSWER_TYPES else "text"
+    label = question.get("label") if isinstance(question.get("label"), str) and question["label"].strip() else None
+    return {"id": field, "semantic": question.get("semantic") or field, "label": label,
+            "answer_type": answer_type, "choices": list(dict.fromkeys(choices))}
+
+
+def ask_owner(database, job, asked, policy, now):
+    """One "Questions for you" card per question (`request_fact` returns the open one when it is
+    already asked, so a re-run never asks twice). A question of this job whose deadline passed is
+    closed EXPIRED first, so it is asked again with a fresh one. Caller holds the transaction.
+    The hold's deadline is read back with `open_cards`."""
+    milliseconds = int(dt.datetime.fromisoformat(now).timestamp() * 1000)
+    for field in asked:
+        for (event_key,) in database.execute("SELECT event_key FROM user_decisions WHERE job_key=? AND field=? "
+                                             "AND state='PENDING' AND expires_at<=?", (job["job_key"], field, milliseconds)).fetchall():
+            database.execute("UPDATE user_decisions SET state='EXPIRED' WHERE event_key=? AND state='PENDING'", (event_key,))
+            database.execute("UPDATE notification_outbox SET state='CANCELLED' WHERE event_key=? "
+                             "AND state IN ('PENDING','WAITING_TRANSPORT','WAITING_OWNER')", (event_key,))
+    for field, question in asked.items():
+        identifier = decision_transport.request_fact(database, job, owner_question(field, question), policy, now)
+        # A re-read whose options drifted gives the same question a new card: the older card for the
+        # same question is superseded, never left beside it.
+        _close_cards(database, job["job_key"], "QUESTION_REASKED", now,
+                     "field=? AND id<>?", (field, identifier))
+
+
+def _close_cards(database, job_key, reason, now, where, parameters):
+    """Supersede this job's PENDING owner-question cards matching `where` (the form-not-readable
+    note excepted) and cancel their notifications. Caller holds the transaction."""
+    rows = database.execute("SELECT id,event_key FROM user_decisions WHERE job_key=? AND kind='fact' AND state='PENDING' "
+                            "AND field<>? AND " + where, (job_key, decision_transport.FORM_NOT_READABLE_FIELD) + tuple(parameters)).fetchall()
+    for identifier, event_key in rows:
+        database.execute("UPDATE user_decisions SET state='SUPERSEDED',last_error=? WHERE id=? AND state='PENDING'", (reason, identifier))
+        database.execute("UPDATE notification_outbox SET state='CANCELLED',updated_at=? WHERE event_key=? "
+                         "AND state IN ('PENDING','WAITING_TRANSPORT','WAITING_OWNER')", (now, event_key))
+
+
+def close_settled_cards(database, job, missing, now):
+    """Q2 (review round 1): a card whose question is no longer missing - answered on a later pass, or
+    gone from (or reworded on) the re-read form - is superseded, so Approvals shows only what is still
+    needed. Caller holds the transaction."""
+    marks = ",".join("?" * len(missing))
+    _close_cards(database, job["job_key"], "QUESTION_NO_LONGER_MISSING", now,
+                 ("field NOT IN (%s)" % marks) if missing else "1=1", missing)
+
+
+def open_cards(database, job, missing, now):
+    """{field: deadline ms} of this job's unexpired PENDING owner-question cards among `missing`."""
+    if not missing:
+        return {}
+    milliseconds = int(dt.datetime.fromisoformat(now).timestamp() * 1000)
+    rows = database.execute("SELECT field,MIN(expires_at) FROM user_decisions WHERE job_key=? AND kind='fact' AND state='PENDING' "
+                            "AND expires_at>? AND field IN (%s) GROUP BY field" % ",".join("?" * len(missing)),
+                            (job["job_key"], milliseconds) + tuple(missing)).fetchall()
+    return {field: expires for field, expires in rows}
 
 
 def same_posting_duplicate(database, job, adapter, root, config, now, before_submit=False):
@@ -4083,7 +4187,8 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     # It is off unless `config["application_answering"]["enabled"] is True`, it is
     # contractually non-raising, and every failure - disabled, compute exhausted, timeout,
     # malformed output - writes nothing, so the question stays open and the ANSWERING_RETRY
-    # hold below retries it on a later cycle; the owner is not asked. `adapter` is the
+    # hold below retries it on a later cycle; the owner is asked only a required question the
+    # AI and its judge found no truthful answer to (`owner_questions`, owner 2026-10-24). `adapter` is the
     # browser adapter and is passed through only so an offline validation harness can inject
     # an executor; `answering_agent.injected_executor` ignores anything that is not one.
     outcome = {}
@@ -4104,9 +4209,34 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
                   still_missing=missing), now)
         return
     if missing:
-        # Owner, 2026-09-19: every form question is answered by the AI and nothing is sent to
-        # him. A question the answering step left open is retried by the AI on a later cycle;
-        # no fact request is raised.
+        # A required question the AI and its judge agree has no truthful answer in the owner's
+        # records (owner, 2026-10-24: "If the required question has 'options' ... Those should be
+        # displayed too, so a user can pass in their answer") is asked on Approvals' "Questions for
+        # you", with the form's own choices. Everything else the answering step left open - a
+        # failed or malformed call, a round limit, an answer that does not fit its control - is
+        # the AI's to retry on a later cycle (ANSWERING_RETRY below), and the owner is not asked.
+        asked = owner_questions(outcome, questions, missing)
+        with database:
+            close_settled_cards(database, job, missing, now)
+            if asked:
+                ask_owner(database, job, asked, policy, now)
+            cards = open_cards(database, job, missing, now)
+        if cards:
+            # While any of this job's questions waits for the owner, the whole job is the owner's
+            # hold (review round 1, Q1), even when the AI could retry other questions: no try is
+            # spent, the read (saved complete above) is not marked inconclusive, so nothing counts
+            # toward the inspect cap, and the job is not picked up again until the owner answers
+            # (`decision_transport._apply_answer` makes it due; the next pass answers the rest as
+            # usual) or the questions expire, when the next pass reads, answers and asks again.
+            blocker = "UNKNOWN_REQUIRED_ANSWERS:" + ",".join(field for field in missing if field in cards)
+            expires = dt.datetime.fromtimestamp(min(cards.values()) / 1000, dt.timezone.utc).isoformat()
+            with database:
+                hold(database, job, blocker, OWNER_QUESTION_ACTION, now, "BLOCKED", expires, route="OWNER")
+                database.execute("UPDATE notification_outbox SET state='SUPERSEDED_BY_FACT_REQUEST' WHERE event_key=? "
+                                 "AND state IN ('PENDING','WAITING_TRANSPORT')", (job["job_key"] + ":" + blocker,))
+                event(database, job["job_key"], OWNER_QUESTION_EVENT,
+                      {"questions": sorted(cards), "ai_retry": sorted(set(missing) - set(cards)), "expires_at": expires}, now)
+            return
         blocker = "ANSWERING_RETRY:" + ",".join(missing)
         retry_at = (dt.datetime.fromisoformat(now) + dt.timedelta(hours=1)).isoformat()
         with database:
@@ -4114,6 +4244,8 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
                  now, "BLOCKED", retry_at)
             remember_read(database, job, review, blocker, now, extra_missing=["answers/" + field for field in missing])
         return
+    with database:
+        close_settled_cards(database, job, [], now)   # every question answered: no card stays open (Q2)
     resume = root / policy["resume"]["path"]
     if not resume.is_file() or hashlib.sha256(resume.read_bytes()).hexdigest() != policy["resume"]["sha256"]:
         with database:

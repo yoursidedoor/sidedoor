@@ -2,6 +2,13 @@
 {# The Approvals page (E6.T4; E6.T0 spec section 6). `view` comes from approvals_page.gather; each card
    is its own template so an action (htmx) swaps that card alone. #}
 {% block content %}
+{% macro pager(v, name, label, word="") %}{% set p = v.paging[name] %}{% if p.pages > 1 %}
+  <nav class="approvals-pages" aria-label="Pages of {{ label }}">
+    <span class="muted">Page {{ p.page }} of {{ p.pages }} ({{ p.total }}{{ " " + word if word }})</span>
+    {% if p.page > 1 %}<a href="/approvals?{{ v.link(name, p.page - 1) }}#{{ name }}">Previous</a>{% endif %}
+    {% if p.page < p.pages %}<a href="/approvals?{{ v.link(name, p.page + 1) }}#{{ name }}">Next</a>{% endif %}
+  </nav>
+{% endif %}{% endmacro %}
 {% set v = view %}{% set cards = flash.cards or {} %}{% set top = flash.top %}
 <h1 class="title">Approvals</h1>
 <p class="muted approvals-mode">Mode: <strong>{{ "Review" if review else "Automatic" }}</strong>. <a href="/settings#mode">Change it in Settings</a>.</p>
@@ -20,20 +27,15 @@
   {% endif %}
   {% if v.unreadable %}<p class="note note-warning">{{ v.unreadable }} waiting message{{ "s" if v.unreadable != 1 }} could not be read, so {{ "they are" if v.unreadable != 1 else "it is" }} not shown. Nothing is sent while {{ "they wait" if v.unreadable != 1 else "it waits" }}.</p>{% endif %}
   {% for m in v.messages %}{% with item = m, f = cards.get(m.dom) %}{% include "approvals_message.html" %}{% endwith %}{% endfor %}
-  {% if v.pages > 1 %}
-  <nav class="approvals-pages" aria-label="Pages of messages">
-    <span class="muted">Page {{ v.page }} of {{ v.pages }} ({{ v.total }} waiting)</span>
-    {% if v.page > 1 %}<a href="/approvals?page={{ v.page - 1 }}#messages">Previous</a>{% endif %}
-    {% if v.page < v.pages %}<a href="/approvals?page={{ v.page + 1 }}#messages">Next</a>{% endif %}
-  </nav>
-  {% endif %}
+  {{ pager(v, "messages", "messages", "waiting") }}
 </section>
 
-{% if v.refused %}
+{% if v.refused or v.paging.refused.total %}
 <section class="card approvals-section" id="refused" aria-labelledby="refused-title">
   <h2 id="refused-title">Couldn't send</h2>
   <p class="muted">You approved these, then a sending rule stopped them.</p>
   {% for r in v.refused %}{% with item = r, f = cards.get(r.dom) %}{% include "approvals_refused.html" %}{% endwith %}{% endfor %}
+  {{ pager(v, "refused", "messages that couldn't send") }}
 </section>
 {% endif %}
 
@@ -41,12 +43,14 @@
   <h2 id="questions-title">Questions for you</h2>
   {% if not v.questions %}<p class="muted">No questions right now.</p>{% endif %}
   {% for q in v.questions %}{% with item = q, f = cards.get(q.dom) %}{% include "approvals_question.html" %}{% endwith %}{% endfor %}
+  {{ pager(v, "questions", "questions") }}
 </section>
 
 <section class="card approvals-section" id="notes" aria-labelledby="notes-title">
   <h2 id="notes-title">Notes for you</h2>
   {% if not v.notes %}<p class="muted">No notes right now.</p>{% endif %}
   {% for n in v.notes %}{% with item = n, f = cards.get(n.dom) %}{% include "approvals_note.html" %}{% endwith %}{% endfor %}
+  {{ pager(v, "notes", "notes") }}
 </section>
 
 <section class="card approvals-section" id="notices" aria-labelledby="notices-title">
@@ -54,6 +58,7 @@
   {% if not v.notices %}<p class="muted">No notices yet.</p>{% else %}
   <ul class="approvals-notices">{% for n in v.notices %}<li>{% if n.at %}<span class="muted">{{ v.when(n.at) }}</span> {% endif %}{{ n.text }}</li>{% endfor %}</ul>
   {% endif %}
+  {{ pager(v, "notices", "notices") }}
 </section>
 <script src="/static/approvals.js" defer></script>
 {% endblock %}

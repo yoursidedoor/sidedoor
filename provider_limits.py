@@ -396,18 +396,22 @@ def out_of_credit_shown(home=None):
     return _recorded(CREDIT_WAIT_FILE, home) is not None
 
 
-def banners(home=None, now=None, finished=False):
-    """The dashboard banners for the waits above, most urgent first. Each clears by itself."""
+def waits(home=None, now=None, finished=False):
+    """The waits in force, from the recorded wait files: {"codex_missing", "out_of_credit", "usage_limit"},
+    each None or {"banner": the dashboard banner, "health": Overview > Health's words for it}. The banners
+    and the Health list both come from here, so they never disagree. A ChatGPT wait whose reset passed is
+    over (its file is removed)."""
     now = _utc(now)
-    found = []
+    found = dict.fromkeys(("codex_missing", "out_of_credit", "usage_limit"))
     if codex_missing(home):
         words, label, href = codex_fix(finished)
-        found.append({"tone": "error", "text": words, "action_label": label, "action_href": href})
-    credit = _recorded(CREDIT_WAIT_FILE, home)
-    if credit:
-        found.append({"tone": "error", "text": "Your OpenRouter account is out of credits. Sidedoor's AI work is paused "
-                      "until you add credits.", "action_label": "Add credits", "action_href": CREDITS_URL,
-                      "external": True})
+        found["codex_missing"] = {"banner": {"tone": "error", "text": words, "action_label": label, "action_href": href},
+                                  "health": "Can't find Codex"}
+    if _recorded(CREDIT_WAIT_FILE, home):
+        found["out_of_credit"] = {"banner": {
+            "tone": "error", "text": "Your OpenRouter account is out of credits. Sidedoor's AI work is paused "
+            "until you add credits.", "action_label": "Add credits", "action_href": CREDITS_URL, "external": True},
+            "health": "Out of credits"}
     usage = _recorded(CHATGPT_WAIT_FILE, home)
     if usage:
         try:
@@ -415,9 +419,19 @@ def banners(home=None, now=None, finished=False):
         except (AttributeError, TypeError, ValueError):
             reset = None
         if reset is not None and reset > now:
-            found.append({"tone": "warning", "text": "Your ChatGPT usage limit is reached. Sidedoor pauses its AI work "
-                          "and picks up again at about %s." % _local_clock(reset.isoformat()),
-                          "action_label": "See your usage", "action_href": CHATGPT_USAGE_URL, "external": True})
+            until = _local_clock(reset.isoformat())
+            found["usage_limit"] = {"banner": {
+                "tone": "warning", "text": "Your ChatGPT usage limit is reached. Sidedoor pauses its AI work "
+                "and picks up again at about %s." % until,
+                "action_label": "See your usage", "action_href": CHATGPT_USAGE_URL, "external": True},
+                "health": "Usage limit reached until %s" % until}
         elif reset is not None:
             clear(CHATGPT_WAIT_FILE, home)   # the reset passed: the wait is over
     return found
+
+
+def banners(home=None, now=None, finished=False, found=None):
+    """The dashboard banners for the waits above (`waits`, or `found` when the caller already read
+    them), most urgent first. Each clears by itself."""
+    found = waits(home, now, finished) if found is None else found
+    return [found[name]["banner"] for name in ("codex_missing", "out_of_credit", "usage_limit") if found[name]]

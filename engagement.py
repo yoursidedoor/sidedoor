@@ -9,6 +9,7 @@ raise NotImplementedError. Cursors must be stable opaque strings, or None.
 
 import datetime as dt
 import contextlib
+import contextvars
 import copy
 import hashlib
 import json
@@ -411,12 +412,40 @@ def handoff_reviews(database, config, now=None):
     return {"state": "COMPLETE", "items": items}
 
 
+_ALIASES = contextvars.ContextVar("engagement_alias_rows", default=None)
+
+
+def _alias_rows(database):
+    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rw_aliases'").fetchone():
+        return None
+    return [tuple(row) for row in database.execute("SELECT alias,canonical FROM rw_aliases WHERE kind='contact'")]
+
+
+@contextlib.contextmanager
+def aliases_read_once(database, rows=None):
+    """While open, `identity_keys` on `database` reads the rw_aliases contact rows once (or uses `rows`, the
+    (alias, canonical) rows the caller already read). For a read-only request (a dashboard page): a
+    write made inside it would not be seen."""
+    token = _ALIASES.set((database, None if rows is None else [tuple(row) for row in rows], rows is not None))
+    try:
+        yield
+    finally:
+        _ALIASES.reset(token)
+
+
 def identity_keys(database, profile):
     identity = profile_key(profile if "://" in profile else "https://" + profile)
     identities = {identity}
-    if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rw_aliases'").fetchone():
-        aliases = [tuple(profile_key(value if "://" in value else "https://" + value) for value in row) for row in database.execute(
-            "SELECT alias,canonical FROM rw_aliases WHERE kind='contact'")]
+    cached = _ALIASES.get()
+    if cached is not None and cached[0] is database:
+        rows = cached[1]
+        if not cached[2]:
+            rows = _alias_rows(database)
+            _ALIASES.set((database, rows, True))
+    else:
+        rows = _alias_rows(database)
+    if rows is not None:
+        aliases = [tuple(profile_key(value if "://" in value else "https://" + value) for value in row) for row in rows]
         while True:
             previous = set(identities)
             for alias, canonical in aliases:

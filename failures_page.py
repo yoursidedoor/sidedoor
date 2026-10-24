@@ -1097,11 +1097,22 @@ def codex_failures(home=None, finished=False):
                   code="CODEX_NOT_FOUND")]
 
 
-def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=None, finished=False):
+NEEDS_YOU = "needs-you"
+
+
+def page_of(entries, number, size=LIST_LIMIT):
+    """(entries, paging) for page `number` (clamped) of `size` each: paging is {page, pages, total}."""
+    pages = max(1, -(-len(entries) // size))
+    number = min(max(1, number or 1), pages)
+    return entries[(number - 1) * size:number * size], {"page": number, "pages": pages, "total": len(entries)}
+
+
+def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=None, finished=False, section=None, page=1):
     """Everything the Failures page shows. `database` is a read-only connection or None (no file
     yet); `loop` is the scheduler loop's state (`overview_page.loop_state`); `log_tail(name)` returns
     the redacted tail of logs/<name>. A source that cannot be read marks its group unavailable and
-    the rest still render."""
+    the rest still render. Each list shows its first LIST_LIMIT entries and how many more there are;
+    `section` (a section key or NEEDS_YOU) shows page `page` of that list instead, with its paging."""
     now = now or dt.datetime.now(dt.timezone.utc)
     zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
     fmt = lambda moment: overview.when(moment, now, zone)
@@ -1140,14 +1151,20 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=Non
     newest_first = lambda entries: sorted(entries, key=lambda entry: entry["at"] or oldest, reverse=True)
     # What needs the user is listed once, under Needs you (Overview's needs-you link lands there).
     needs = newest_first(entry for section in sections.values() for entry in section["entries"] if entry["you"])
+    focus = section
     for section in sections.values():
         section["entries"] = newest_first(entry for entry in section["entries"] if not entry["you"])
-        section["more"] = max(0, len(section["entries"]) - LIST_LIMIT)
-        section["entries"] = section["entries"][:LIST_LIMIT]
+        section["total"] = len(section["entries"])
+        section["entries"], section["paging"] = page_of(section["entries"], page if section["key"] == focus else 1)
+        section["more"] = 0 if section["key"] == focus else max(0, section["total"] - LIST_LIMIT)
+        section["paging"] = section["paging"] if section["key"] == focus else None
+    needs_total = len(needs)
+    needs, needs_paging = page_of(needs, page if focus == NEEDS_YOU else 1)
     ordered = [sections["scheduler"]] + [sections[key] for key, _ in GROUPS]
     shown = [section for section in ordered if section["entries"] or section["unavailable"]]
-    return {"sections": shown, "needs_you": needs[:LIST_LIMIT], "nothing": not shown and not needs, "unreadable": reader.broken,
-            "when": fmt, "recent_days": RECENT_DAYS}
+    return {"sections": shown, "needs_you": needs, "nothing": not shown and not needs, "unreadable": reader.broken,
+            "when": fmt, "recent_days": RECENT_DAYS, "needs_paging": needs_paging if focus == NEEDS_YOU else None,
+            "needs_more": 0 if focus == NEEDS_YOU else max(0, needs_total - LIST_LIMIT), "needs_total": needs_total}
 
 
 # --- Logs ---------------------------------------------------------------------------------------------------------
@@ -1244,58 +1261,130 @@ def redact_text(text, secrets=()):
     return " ".join(lines) or "Not shown: it may contain a secret."
 
 
-def read_tail(path, limit=LOG_TAIL_BYTES):
-    """(state, text): "ok" with the last `limit` bytes (a partial first line dropped), "missing" or
-    "unreadable". Never follows a symlink and reads only a regular file; writes nothing."""
+def _read_bytes(path, end=None, limit=LOG_TAIL_BYTES):
+    """(state, data, start, size): the bytes [start, end) of a regular file, `end` clamped to its size
+    (its size when None) and start = end - limit (at least 0). Never follows a symlink and reads only a
+    regular file; writes nothing. `end` only ever reaches lseek, never a path."""
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
-            return "unreadable", ""   # a FIFO, device, directory or symlink is never opened (F14)
+            return "unreadable", b"", 0, 0   # a FIFO, device, directory or symlink is never opened (F14)
     except FileNotFoundError:
-        return "missing", ""
+        return "missing", b"", 0, 0
     except OSError:
-        return "unreadable", ""
+        return "unreadable", b"", 0, 0
     # O_NONBLOCK as well: a file swapped for a FIFO after the check still cannot block the page.
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError:
-        return "missing", ""
+        return "missing", b"", 0, 0
     except OSError:
-        return "unreadable", ""
+        return "unreadable", b"", 0, 0
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
-            return "unreadable", ""
-        start = max(0, info.st_size - limit)
+            return "unreadable", b"", 0, 0
+        size = info.st_size
+        end = size if end is None else min(max(0, int(end)), size)
+        start = max(0, end - limit)
         os.lseek(descriptor, start, os.SEEK_SET)
         data = b""
-        while len(data) < limit:
-            chunk = os.read(descriptor, limit - len(data))
+        while len(data) < end - start:
+            chunk = os.read(descriptor, end - start - len(data))
             if not chunk:
                 break
             data += chunk
     except OSError:
-        return "unreadable", ""
+        return "unreadable", b"", 0, 0
     finally:
         os.close(descriptor)
+    return "ok", data, start, size
+
+
+def read_tail(path, limit=LOG_TAIL_BYTES):
+    """(state, text): "ok" with the last `limit` bytes (a partial first line dropped), "missing" or
+    "unreadable". Never follows a symlink and reads only a regular file; writes nothing."""
+    state, data, start, _ = _read_bytes(path, None, limit)
+    if state != "ok":
+        return state, ""
     text = data.decode("utf-8", "replace")
     if start > 0:
         text = text.split("\n", 1)[1] if "\n" in text else ""
     return "ok", text
 
 
-def redacted_lines(text, secrets, limit=LOG_LINES):
+def read_range(path, end=None, limit=LOG_TAIL_BYTES):
+    """The whole lines of the `limit` bytes ending at byte `end` (the end of the file when None), as
+    {"state", "lines": [(byte offset, text)], "start", "begin", "end", "size"}: a partial first line is
+    dropped (as `read_tail` drops it) and so is a partial last line when `end` falls inside one, so a
+    secret cut in two is never shown in halves. `begin` is where the first whole line starts (`start`
+    when none does). Lines split as str.splitlines splits them, so each is the line `read_tail`'s text
+    gives."""
+    state, data, start, size = _read_bytes(path, end, limit)
+    end = start + len(data)
+    if state == "ok" and end < size and not data.endswith(b"\n"):
+        data = data[:data.rfind(b"\n") + 1]
+    begin = start
+    if state == "ok" and start > 0:
+        cut = data.find(b"\n")
+        data, begin = (data[cut + 1:], start + cut + 1) if cut >= 0 else (b"", start)
+    pieces = data.split(b"\n") if data else []
+    if data.endswith(b"\n"):
+        pieces.pop()
+    lines, offset = [], begin
+    for piece in pieces:
+        for line in piece.decode("utf-8", "replace").splitlines() or [""]:
+            lines.append((offset, line))
+        offset += len(piece) + 1
+    return {"state": state, "lines": lines, "start": start, "begin": begin, "end": end, "size": size}
+
+
+OFFSET = re.compile(r"[0-9]{1,18}\Z")
+
+
+def offset_of(value):
+    """A byte offset from the query string (digits only, at most 18 of them), else None."""
+    return int(value) if isinstance(value, str) and OFFSET.match(value) else None
+
+
+def _redacted_pairs(pairs, secrets):
+    """`redacted_lines` keeping each line's byte offset: [(offset, line)]."""
     import reply_worker
     fragments = _fragments(secrets)
     kept = []
-    for line in text.splitlines():
+    for offset, line in pairs:
         line = _ESCAPES.sub("", line).rstrip()
         if not line.strip():
             continue
         line = reply_worker.redact_line(line, secrets, fragments)
         if line is not None:
-            kept.append(line[:LINE_CHARACTERS])
-    return kept[-limit:]
+            kept.append((offset, line[:LINE_CHARACTERS]))
+    return kept
+
+
+def _shown(kept, limit, chunk):
+    """(lines, older): the last `limit` of `kept` and the byte offset the next older chunk ends at,
+    None once the start of the file is shown. Lines cut by `limit` are in that older chunk."""
+    shown = kept[-limit:]
+    older = chunk["begin"]
+    if len(kept) > limit:
+        older = next((offset for offset, _ in shown if offset is not None), older)
+    if older >= chunk["end"]:
+        older = chunk["start"]
+    return [line for _, line in shown], (older if older > 0 else None)
+
+
+def stream_chunk(path, secrets, end=None, limit=LOG_LINES):
+    """One log stream's lines ending at byte `end` (its tail when None): {"state", "lines", "older"}."""
+    chunk = read_range(path, end)
+    if chunk["state"] != "ok":
+        return {"state": chunk["state"], "lines": [], "older": None}
+    lines, older = _shown(_redacted_pairs(chunk["lines"], secrets), limit, chunk)
+    return {"state": "ok", "lines": lines, "older": older}
+
+
+def redacted_lines(text, secrets, limit=LOG_LINES):
+    return [line for _, line in _redacted_pairs(((None, line) for line in text.splitlines()), secrets)][-limit:]
 
 
 def tail(logs, name, secrets, limit=LOG_LINES):
@@ -1324,13 +1413,34 @@ def _line_day(line, zone):
         return None
 
 
-def logs_view(logs, secrets, component="all", level="all", query="", day="", zone=None):
+def stream_id(name):
+    """The page id of stream `name` ("research.stderr.log" -> "log-research-stderr")."""
+    return "log-" + name[:-len(".log")].replace(".", "-")
+
+
+def stream_names():
+    return ["%s.%s.log" % (key, stream) for key, _ in COMPONENTS for stream, _ in LEVELS]
+
+
+def filter_lines(lines, query="", day="", zone=None):
+    """The lines holding `query` (case-insensitive) and, with `day`, stamped on that local day."""
+    needle = (query or "").strip()[:SEARCH_CHARACTERS].casefold()
+    day = day if isinstance(day, str) and _DAY.match(day) else ""
+    if needle:
+        lines = [line for line in lines if needle in line.casefold()]
+    if day:   # the user's local date, as the page shows times (lines are stamped in UTC)
+        lines = [line for line in lines if _line_day(line, zone) == day]
+    return lines
+
+
+def logs_view(logs, secrets, component="all", level="all", query="", day="", zone=None, older=None):
     """Every stream under logs/ (log_retention.STREAMS), filtered by component and level, searched
     case-insensitively in the redacted lines; `day` (YYYY-MM-DD, UTC as the lines are stamped) keeps
-    only that day's lines."""
+    only that day's lines. `older` (stream name, byte offset) shows that stream's chunk ending there
+    instead of its tail. Each stream's `older` is where its next older chunk ends (None at the start
+    of the file); search and day apply to the lines shown."""
     component, level = _choice(component, COMPONENTS), _choice(level, LEVELS)
     query = (query or "").strip()[:SEARCH_CHARACTERS]
-    needle = query.casefold()
     day = day if isinstance(day, str) and _DAY.match(day) else ""
     streams = []
     for key, label in COMPONENTS:
@@ -1340,14 +1450,11 @@ def logs_view(logs, secrets, component="all", level="all", query="", day="", zon
             if level not in ("all", stream):
                 continue
             name = "%s.%s.log" % (key, stream)
-            state, text = read_tail(Path(logs) / name)
-            lines = redacted_lines(text, secrets) if state == "ok" else []
-            if needle:
-                lines = [line for line in lines if needle in line.casefold()]
-            if day:   # the user's local date, as the page shows times (lines are stamped in UTC)
-                lines = [line for line in lines if _line_day(line, zone) == day]
-            streams.append({"name": name, "label": "%s: %s" % (label, level_label.lower()), "state": state,
-                            "lines": lines, "id": "log-%s-%s" % (key, stream)})
+            end = older[1] if older and older[0] == name else None
+            found = stream_chunk(Path(logs) / name, secrets, end)
+            lines = filter_lines(found["lines"], query, day, zone)
+            streams.append({"name": name, "label": "%s: %s" % (label, level_label.lower()), "state": found["state"],
+                            "lines": lines, "id": stream_id(name), "older": found["older"], "before": end})
     return {"streams": streams, "component": component, "level": level, "query": query, "day": day,
             "components": COMPONENTS, "levels": LEVELS, "tail_bytes": LOG_TAIL_BYTES, "line_limit": LOG_LINES}
 
@@ -1355,9 +1462,9 @@ def logs_view(logs, secrets, component="all", level="all", query="", day="", zon
 # --- One run's own records and files (2026-10-23: "so users dont have to start running code") -----------
 
 RUN_LINES = 80          # lines shown per file of a run
-RUN_FILES = 12
-RUN_EVENTS = 40
-RUNS_LISTED = 30        # per component on the Runs list
+RUN_FILES = 12          # files per page of a run
+RUN_EVENTS = 40         # records per page of a run
+RUNS_LISTED = 30        # per component per page on the Runs list
 # Files of a session folder that are shown: what the run reported and printed. Never the prompt or the
 # request it was given (prompt.txt, request.json, schema.json), which carry the user's profile.
 RUN_FILE_NAMES = ("stderr.log", "executor.log", "output.json", "decision.json", "trace.jsonl")
@@ -1373,6 +1480,12 @@ FOLDER_COMPONENTS = {"application-browser": "applications", "application-recover
 FOLDER_WORDS = {"application-browser": "Browser session", "application-recovery": "Application recovery decision",
                 "application-connection-manual": "Manual check", "email-check": "Mailbox check",
                 "linkedin-contacts": "Contact finder run", "outreach-history": "Outreach history check"}
+
+
+# Per-session browser traces (owner, 2026-10-24): not listed under Runs. Each stays reachable from its
+# own run: an application's run view (job:) shows its last browser sessions, a contact finder run's
+# view (finder:) its session folder, and the dir: route still opens one.
+BROWSER_SESSION_FOLDERS = {"application-browser", "linkedin-contacts"}
 
 
 def _inside(path, base):
@@ -1391,24 +1504,32 @@ def codex_safe(text, truncated):
     keeps its stderr): the header before codex's "user" marker, then only codex's own ERROR/WARN lines
     (`reply_worker._CODEX_LEVEL`). A tail that began past the header (`truncated`) and shows no marker
     may be inside the echo, so only those level lines are kept from it too. Other text is unchanged."""
+    pairs = [(None, line) for line in text.splitlines()]
+    kept = codex_pairs(pairs, truncated)
+    return text if kept is pairs else "\n".join(line for _, line in kept)
+
+
+def codex_pairs(pairs, truncated):
+    """`codex_safe` over [(byte offset, line)], keeping each kept line's offset (None for a note);
+    returns `pairs` itself when it keeps everything."""
     import reply_worker
-    lines = text.splitlines()
+    lines = [line for _, line in pairs]
     marker = next((index for index, line in enumerate(lines) if line.strip() == "user"), None)
     gap = next((index for index, line in enumerate(lines) if line.strip() == GAP), None)
     if marker is not None and gap is not None and marker > gap:
         marker = None   # the header's own marker is not in the head: nothing before it is a known header
     if marker is None and not truncated:
-        return text
-    head = lines[:marker] if marker is not None else []
-    rest = lines[marker or 0:]
+        return pairs
+    head = pairs[:marker] if marker is not None else []
+    rest = pairs[marker or 0:]
     # Inside the echoed prompt (after "user" until codex's own "thinking"/"codex"/"exec" marker; and a
     # truncated tail with no marker, which may be inside it) only codex's ERROR:/WARN: lines are kept:
     # the prompt holds Sidedoor's instructions and the user's own text, some lines starting "Error".
     kept, transcript, echo = [], False, True
-    for index, line in enumerate(rest):
+    for index, (offset, line) in enumerate(rest):
         bare = line.strip()
         if bare == GAP:
-            kept.append(line)
+            kept.append((offset, line))
             transcript, echo = False, True      # the tail may begin anywhere: inside the echo until a marker
             continue
         if bare in reply_worker._TRANSCRIPT_MARKERS:
@@ -1418,10 +1539,10 @@ def codex_safe(text, truncated):
         elif bare == "user":
             transcript, echo = False, True
         if reply_worker._CODEX_LEVEL.match(bare):
-            kept.append(line)
+            kept.append((offset, line))
         elif not echo and _CAUSE_LINE.match(bare) and (not transcript or index >= len(rest) - 3):
-            kept.append(line)      # "Error: ...", a fatal or exit line: codex's own cause, or its last words
-    return "\n".join(head + [PROMPT_WITHHELD] + kept)
+            kept.append((offset, line))      # "Error: ...", a fatal or exit line: codex's own cause, or its last words
+    return head + [(None, PROMPT_WITHHELD)] + kept
 
 
 _CAUSE_LINE = re.compile(r"^(?:Error|error|fatal|Fatal|FATAL|panicked|thread '[^']*' panicked)\b[:\s]|^(?:exit|Exit|exited)\b")
@@ -1431,8 +1552,13 @@ TRACE_NOTE = "(Only this session's error events are shown: its reasoning, messag
 def trace_errors(text):
     """A codex --json trace's error events only (type error, turn.failed, or an item that failed), each
     "<type>: <message>"; reasoning, agent messages and tool arguments and results are dropped."""
-    kept = [TRACE_NOTE]
-    for line in text.splitlines():
+    return "\n".join(line for _, line in trace_pairs([(None, line) for line in text.splitlines()]))
+
+
+def trace_pairs(pairs):
+    """`trace_errors` over [(byte offset, line)], each kept event with its line's offset."""
+    kept = [(None, TRACE_NOTE)]
+    for offset, line in pairs:
         try:
             event = json.loads(line)
         except ValueError:
@@ -1451,8 +1577,8 @@ def trace_errors(text):
             message = (error.get("message") if isinstance(error, dict) else error) or "failed (%s)" % item.get("type")
             kind = "%s %s" % (kind, item.get("type") or "item")
         if message is not None:
-            kept.append("%s: %s" % (kind, str(message)[:ERROR_CHARACTERS]))
-    return "\n".join(kept)
+            kept.append((offset, "%s: %s" % (kind, str(message)[:ERROR_CHARACTERS])))
+    return kept
 
 
 HEAD_BYTES = 4096
@@ -1478,28 +1604,38 @@ def read_head(path, limit=HEAD_BYTES):
     return text.rsplit("\n", 1)[0] if len(data) >= limit and "\n" in text else text
 
 
-def _file(path, secrets, title=None):
-    state, text = read_tail(path)
+def _file(path, secrets, title=None, older=None):
+    """One file of a run: its redacted last RUN_LINES lines, or, when `older` is (its name, a byte offset),
+    the chunk ending there. A .log is a codex log: its prompt echo and transcript never show
+    (`codex_pairs`); an older chunk that does not begin the file may begin inside the echo, so it is
+    read as a truncated tail is (only codex's own level lines until a marker says otherwise)."""
+    name = title or path.name
+    end = older[1] if older and older[0] == name else None
+    chunk = read_range(path, end)
+    state, pairs = chunk["state"], chunk["lines"]
     if state == "ok" and path.name == "trace.jsonl":
-        text = trace_errors(text)
+        pairs = trace_pairs(pairs)
     elif state == "ok" and path.suffix == ".log":   # research step logs, a session's stderr / executor log
-        try:
-            truncated = os.lstat(path).st_size > LOG_TAIL_BYTES
-        except OSError:
-            truncated = True
-        if truncated:   # codex's header is at the start: a bounded head, the gap, then the tail
-            text = read_head(path) + "\n" + GAP + "\n" + text
-        text = codex_safe(text, truncated)
+        truncated = chunk["start"] > 0
+        if end is not None:
+            # An older chunk: never a head. One that starts mid-file starts in an unknown place, which the
+            # gap line marks as inside the echo; the gap itself is not shown.
+            kept = codex_pairs([(None, GAP)] + pairs if truncated else pairs, True)
+            pairs = [(offset, line) for offset, line in kept if not (offset is None and line == GAP)]
+        else:
+            if truncated:   # codex's header is at the start: a bounded head, the gap, then the tail
+                pairs = [(None, line) for line in read_head(path).splitlines()] + [(None, GAP)] + pairs
+            pairs = codex_pairs(pairs, truncated)
     try:
         at = dt.datetime.fromtimestamp(os.lstat(path).st_mtime, dt.timezone.utc)
     except OSError:
         at = None
-    return {"name": title or path.name, "state": state, "at": at,
-            "lines": redacted_lines(text, secrets, RUN_LINES) if state == "ok" else []}
+    lines, older_end = _shown(_redacted_pairs(pairs, secrets), RUN_LINES, chunk) if state == "ok" else ([], None)
+    return {"name": name, "state": state, "at": at, "lines": lines, "older": older_end, "before": end}
 
 
-def _folder_files(folder, secrets):
-    return [_file(folder / name, secrets, folder.name + "/" + name) for name in RUN_FILE_NAMES
+def _folder_files(folder, secrets, older=None):
+    return [_file(folder / name, secrets, folder.name + "/" + name, older) for name in RUN_FILE_NAMES
             if (folder / name).is_file() and not (folder / name).is_symlink()]
 
 
@@ -1519,11 +1655,13 @@ def _folder_of(root, value, base):
     return None
 
 
-def run_view(reader, root, logs, run, secrets, fmt=str):
+def run_view(reader, root, logs, run, secrets, fmt=str, older=None, records_page=1, files_page=1):
     """What one run recorded, for a failure's "See its log": its records in the database (task events,
     application events, a finder run's result) and its own files (research step logs and reports, a
     session folder's stderr / executor log / output / trace tail), redacted, bounded, newest first, plus
-    the stream lines tagged with it (`log.tagged`). None for a value that is not a run reference."""
+    the stream lines tagged with it (`log.tagged`). None for a value that is not a run reference.
+    `older` (a file's shown name, a byte offset) shows that file's chunk ending there (`_file`). Records
+    show RUN_EVENTS and files RUN_FILES a page (`records_page`, `files_page`, with their paging)."""
     import log as logging_module
     match = _RUN.match(run or "")
     if not match:
@@ -1539,8 +1677,8 @@ def run_view(reader, root, logs, run, secrets, fmt=str):
         tag = logging_module.run_tag("task", ident)
         task = reader.rows("SELECT worker,status,blocker,result FROM workflow_tasks WHERE task_id=?", (ident,), "workflow_tasks")
         title = "%s (task %s)" % (worker_words(task[0]["worker"])[1], ident[:12]) if task else "Task %s" % ident[:12]
-        for event in reader.rows("SELECT at,event,detail FROM workflow_task_events WHERE task_id=? ORDER BY id DESC LIMIT ?",
-                                 (ident, RUN_EVENTS), "workflow_task_events"):
+        for event in reader.rows("SELECT at,event,detail FROM workflow_task_events WHERE task_id=? ORDER BY id DESC",
+                                 (ident,), "workflow_task_events"):
             detail = overview._json(event["detail"]) or {}
             result = detail.get("result") if isinstance(detail.get("result"), dict) else detail
             record(event["at"], event["event"], detail.get("blocker") or _result_code(result, None), _error_text(result))
@@ -1560,7 +1698,7 @@ def run_view(reader, root, logs, run, secrets, fmt=str):
                 names = sorted(entry for entry in os.listdir(folder) if entry.startswith(prefix) and entry.endswith(suffix))
             except OSError:
                 names = []
-            files += [_file(folder / name, secrets) for name in names if not (folder / name).is_symlink()]
+            files += [_file(folder / name, secrets, None, older) for name in names if not (folder / name).is_symlink()]
         row = reader.rows("SELECT started_at,state,result FROM research WHERE id=?", (attempt,), "research")
         if row:
             result = overview._json(row[0]["result"]) or {}
@@ -1583,12 +1721,12 @@ def run_view(reader, root, logs, run, secrets, fmt=str):
             if value.get("research_failure_diagnosis"):
                 record(None, "Why research could not:", value["research_failure_diagnosis"])
             folder = _folder_of(root, value, "linkedin-contacts")
-            files += _folder_files(folder, secrets) if folder else []
+            files += _folder_files(folder, secrets, older) if folder else []
     elif kind == "job":
         tag = logging_module.run_tag("job", ident)
         title = "Application %s" % ident
-        for event in reader.rows("SELECT at,event,detail FROM application_events WHERE job_key=? ORDER BY id DESC LIMIT ?",
-                                 (ident, RUN_EVENTS), "application_events"):
+        for event in reader.rows("SELECT at,event,detail FROM application_events WHERE job_key=? ORDER BY id DESC",
+                                 (ident,), "application_events"):
             detail = overview._json(event["detail"]) or {}
             record(event["at"], event["event"], detail.get("code"), _error_text(detail))
         for question, why, moment in answering_causes(reader, ident):
@@ -1599,7 +1737,7 @@ def run_view(reader, root, logs, run, secrets, fmt=str):
             record(request["created_at"], "Browser %s request %s:" % (request["operation"], request["request_id"][:12]),
                    request["state"], _result_code(value.get("error") if isinstance(value.get("error"), dict) else value, None))
             folder = _folder_of(root, value, "application-browser")
-            files += _folder_files(folder, secrets) if folder else []
+            files += _folder_files(folder, secrets, older) if folder else []
     else:
         base, _, name = ident.partition("/")
         if base not in FOLDER_WORDS or not _FOLDER_NAME.match(name) or name in (".", ".."):
@@ -1608,9 +1746,10 @@ def run_view(reader, root, logs, run, secrets, fmt=str):
         if not _inside(folder, paths.reports(root) / base) or not folder.is_dir():
             return None
         title = "%s %s" % (FOLDER_WORDS[base], name)
-        files = _folder_files(folder, secrets)
+        files = _folder_files(folder, secrets, older)
     oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
-    files = sorted(files, key=lambda entry: entry["at"] or oldest, reverse=True)[:RUN_FILES]
+    files, files_paging = page_of(sorted(files, key=lambda entry: entry["at"] or oldest, reverse=True), files_page, RUN_FILES)
+    records, records_paging = page_of(records, records_page, RUN_EVENTS)
     tagged = []
     if tag:
         for stream in log_retention_streams():
@@ -1618,6 +1757,7 @@ def run_view(reader, root, logs, run, secrets, fmt=str):
             tagged += [stream + ": " + line for line in (redacted_lines(text, secrets) if state == "ok" else [])
                        if "[" + tag + "]" in line]
     return {"run": run, "title": title, "records": records, "files": files, "tagged": tagged[-LOG_LINES:], "tag": tag,
+            "records_paging": records_paging, "files_paging": files_paging,
             "when": fmt}
 
 
@@ -1628,7 +1768,14 @@ def log_retention_streams():
 
 def runs_list(root, logs, component="all", day="", zone=None):
     """The per-run files retention keeps, newest first, by component: research runs (their step logs)
-    and session folders (log_retention.TRACE_DIRECTORIES). Each opens its `run_view`."""
+    and session folders (log_retention.TRACE_DIRECTORIES). Each opens its `run_view`. The first
+    RUNS_LISTED of each component (`runs_paged` pages them)."""
+    return runs_paged(root, logs, component, day, zone)[0]
+
+
+def runs_paged(root, logs, component="all", day="", zone=None, part=None, page=1):
+    """(runs, parts): each component's first RUNS_LISTED runs, or page `page` of component `part`;
+    parts is [{component, label, more, paging}] for each component with more than one page."""
     import log_retention
     found = []
     try:
@@ -1648,7 +1795,7 @@ def runs_list(root, logs, component="all", day="", zone=None):
                "href": run_href("research", attempt)} for attempt, at in research.items()]
     for base, pattern in log_retention.TRACE_DIRECTORIES:
         folder = paths.reports(root) / base
-        if base not in FOLDER_WORDS or not folder.is_dir() or folder.is_symlink():
+        if base in BROWSER_SESSION_FOLDERS or base not in FOLDER_WORDS or not folder.is_dir() or folder.is_symlink():
             continue
         for entry in folder.glob(pattern):
             if entry.is_symlink() or not entry.is_dir():
@@ -1664,15 +1811,20 @@ def runs_list(root, logs, component="all", day="", zone=None):
     if isinstance(day, str) and _DAY.match(day):
         found = [entry for entry in found if local_day(entry["at"], zone) == day]
     found.sort(key=lambda entry: entry["at"], reverse=True)
-    counts, kept = {}, []
-    for entry in found:
-        counts[entry["component"]] = counts.get(entry["component"], 0) + 1
-        if counts[entry["component"]] <= RUNS_LISTED:
-            kept.append(entry)
     labels = dict(COMPONENTS)
-    for entry in kept:
+    by_part = {}
+    for entry in found:
         entry["component_label"] = labels.get(entry["component"], entry["component"])
-    return kept
+        by_part.setdefault(entry["component"], []).append(entry)
+    kept, parts = [], []
+    for key, entries in by_part.items():
+        shown, paging = page_of(entries, page if key == part else 1, RUNS_LISTED)
+        kept += shown
+        if paging["pages"] > 1:
+            parts.append({"component": key, "label": labels.get(key, key), "paging": paging if key == part else None,
+                          "more": 0 if key == part else paging["total"] - RUNS_LISTED})
+    kept.sort(key=lambda entry: entry["at"], reverse=True)
+    return kept, parts
 
 
 def download_text(logs, secrets, now=None):
@@ -1707,39 +1859,136 @@ def _redaction_complete(home):
         return False
 
 
+KEPT_PARAMS = ("component", "level", "q", "day", "run", "section", "page", "log", "before", "file", "file_before",
+               "records_page", "files_page", "runs_part", "runs_page")
+PAGE_NUMBER = re.compile(r"[0-9]{1,6}\Z")
+
+
+def href(params, path="/failures", anchor="", **changes):
+    """A Failures link keeping the page's own choices (`KEPT_PARAMS` only: never the dashboard token)
+    with `changes` applied (None removes one)."""
+    values = {key: str(params.get(key)) for key in KEPT_PARAMS if params.get(key) not in (None, "")}
+    for key, value in changes.items():
+        if value is None:
+            values.pop(key, None)
+        else:
+            values[key] = str(value)
+    for key in ("component", "level"):
+        if values.get(key) == "all":
+            values.pop(key)
+    query = urllib.parse.urlencode(values)
+    return path + ("?" + query if query else "") + ("#" + anchor if anchor else "")
+
+
+def older_links(entry, params, anchor, file=None):
+    """A stream's (or, with `file`, a run file's) Older lines links: the full page without JS, the
+    chunk alone for htmx, and the way back to the newest lines."""
+    if file is None:
+        changes, back = {"log": entry["name"], "before": entry["older"]}, {"log": None, "before": None}
+    else:
+        changes, back = {"file": file, "file_before": entry["older"]}, {"file": None, "file_before": None}
+    entry["older_href"] = href(params, anchor=anchor, **changes) if entry["older"] is not None else None
+    entry["older_hx"] = href(params, "/failures/older", **changes) if entry["older"] is not None else None
+    entry["newest_href"] = href(params, anchor=anchor, **back)
+    return entry
+
+
 def register(app, templates, layout, home, root, config, token, database, connect_read_only):
     """GET /failures and GET /failures/logs.txt. Both read only: the database through
     `overview_page.snapshot`, the logs through `read_tail`."""
     from fastapi import Request
-    from fastapi.responses import PlainTextResponse
+    from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
     import setup_steps
 
     logs = paths.logs(root)
 
+    def choices(request):
+        params = request.query_params
+        stream = params.get("log") if params.get("log") in stream_names() else None
+        before = offset_of(params.get("before")) if stream else None
+        file = params.get("file") if isinstance(params.get("file"), str) and params.get("file") else None
+        file_before = offset_of(params.get("file_before")) if file else None
+        return params, (stream, before) if before is not None else None, (file, file_before) if file_before is not None else None
+
+    def number(params, name):
+        value = params.get(name)
+        return int(value) if isinstance(value, str) and PAGE_NUMBER.match(value) else 1
+
+    def find_run(run, secrets, older=None, params=None):
+        zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+        now = dt.datetime.now(dt.timezone.utc)
+        params = params or {}
+        found = overview.snapshot(database, lambda connection: run_view(
+            overview.Reader(connection), root, logs, run, secrets, lambda moment: overview.when(moment, now, zone), older,
+            number(params, "records_page"), number(params, "files_page")),
+            connect_read_only)
+        return found if isinstance(found, dict) else None
+
     @app.get("/failures", name="failures")
-    def failures(request: Request, component: str = "all", level: str = "all", q: str = "", day: str = "", run: str = ""):
+    def failures(request: Request, component: str = "all", level: str = "all", q: str = "", day: str = "", run: str = "",
+                 section: str = "", page: str = "1"):
         context = layout("failures", "Failures and logs")
         if not _redaction_complete(home):
             context["hidden"] = DETAILS_HIDDEN
             return templates.TemplateResponse(request, "failures.html", context)
+        params, stream_older, file_older = choices(request)
         secrets = secrets_of(home, config, token)
         loop = overview.loop_state(setup_steps.scheduler_running(home))
+        focus = section if section in {key for key, _ in GROUPS} | {"scheduler", NEEDS_YOU} else None
+        section_page = int(page) if isinstance(page, str) and PAGE_NUMBER.match(page) else 1
         context["view"] = overview.snapshot(
             database, lambda connection: gather(connection, config, loop, secrets=secrets, home=home,
                                                 finished=setup_steps.progress(home)["finished"],
-                                                log_tail=lambda name: tail(logs, name, secrets, JOB_LOG_LINES)),
+                                                log_tail=lambda name: tail(logs, name, secrets, JOB_LOG_LINES),
+                                                section=focus, page=section_page),
             connect_read_only)
+        context["link"] = lambda anchor="", changes=None, more=None, **kw: href(
+            params, anchor=anchor, **{**(changes or {}), **(more or {}), **kw})
         zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
-        context["logs"] = logs_view(logs, secrets, component, level, q, day, zone)
-        context["runs"] = runs_list(root, logs, context["logs"]["component"], context["logs"]["day"], zone)
+        context["logs"] = logs_view(logs, secrets, component, level, q, day, zone, stream_older)
+        for stream in context["logs"]["streams"]:
+            older_links(stream, params, stream["id"])
+        context["runs"], context["runs_parts"] = runs_paged(
+            root, logs, context["logs"]["component"], context["logs"]["day"], zone, params.get("runs_part"),
+            number(params, "runs_page"))
         if run:
-            zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
-            now = dt.datetime.now(dt.timezone.utc)
-            found = overview.snapshot(database, lambda connection: run_view(
-                overview.Reader(connection), root, logs, run, secrets, lambda moment: overview.when(moment, now, zone)),
-                connect_read_only)
-            context["run_view"] = found if isinstance(found, dict) else {"run": run, "missing": True}
+            found = find_run(run, secrets, file_older, params)
+            for entry in (found or {}).get("files") or []:
+                older_links(entry, params, "run", file=entry["name"])
+            context["run_view"] = found or {"run": run, "missing": True}
         return templates.TemplateResponse(request, "failures.html", context)
+
+    @app.get("/failures/older")
+    def failures_older(request: Request, q: str = "", day: str = "", run: str = ""):
+        """The older chunk of one stream (log, before) or one run file (run, file, file_before), for htmx:
+        the next Older lines control and the chunk's lines, to replace the control it came from. Without
+        htmx, the full page showing that chunk."""
+        params, stream_older, file_older = choices(request)
+        if request.headers.get("hx-request") != "true":
+            return RedirectResponse(href(params, anchor="run" if file_older else (
+                stream_id(stream_older[0]) if stream_older else "logs")), status_code=303)
+        if not _redaction_complete(home):
+            return HTMLResponse(templates.get_template("failures_older.html").render(fragment={"note": DETAILS_HIDDEN}))
+        secrets = secrets_of(home, config, token)
+        entry = None
+        if stream_older:
+            entry = stream_chunk(logs / stream_older[0], secrets, stream_older[1])
+            entry.update(name=stream_older[0])
+            matched = filter_lines(entry["lines"], q, day, ZoneInfo(config.get("timezone") or "America/Los_Angeles"))
+            if entry["lines"] and not matched:
+                entry["note"] = "No matching lines in this older part."
+            entry["lines"] = matched
+            older_links(entry, params, stream_id(stream_older[0]))
+        elif file_older and run:
+            found = find_run(run, secrets, file_older, params)
+            entry = next((item for item in (found or {}).get("files") or [] if item["name"] == file_older[0]), None)
+            if entry is not None:
+                older_links(entry, params, "run", file=entry["name"])
+        if entry is None:
+            entry = {"note": "Nothing older can be shown here."}
+        elif not entry["lines"] and not entry.get("note"):
+            entry["note"] = "Nothing in this older part can be shown."
+        return HTMLResponse(templates.get_template("failures_older.html").render(fragment=entry))
 
     @app.get("/failures/logs.txt")
     def failures_download(request: Request):

@@ -695,7 +695,7 @@ def browser_offscreen():
         return False
 
 
-def health(home, progress, scheduler, cycle, pause=None, fmt=None):
+def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     state = progress["state"]
     steps = state["steps"]
     items = []
@@ -728,15 +728,30 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None):
         items.append(_item("LinkedIn", "error", linkedin.get("message") or "Needs you",
                            fix={"label": label, "href": SETTINGS_CONNECTIONS}, checked=_utc(linkedin.get("at"))))
 
+    import provider_limits  # the waits the banners show, read through the same function (never disagree)
+    waits = provider_limits.waits(home, now, finished=bool(progress.get("finished")))
+
+    def wait_fix(wait):
+        return {"label": wait["banner"]["action_label"], "href": wait["banner"]["action_href"]}
+
     openrouter = steps.get("openrouter", {})
-    if openrouter.get("status") == "done":
+    if waits["out_of_credit"]:  # the same fix as the "out of credits" banner
+        items.append(_item("OpenRouter", "error", waits["out_of_credit"]["health"], fix=wait_fix(waits["out_of_credit"]),
+                           timed=False))
+    elif openrouter.get("status") == "done":
         items.append(_item("OpenRouter", "success", "Key works", _good_at(openrouter)))
     else:
         items.append(_item("OpenRouter", "error", openrouter.get("message") or NOT_CHECKED,
                            fix={"label": "Replace key", "href": SETTINGS_CONNECTIONS}, checked=_utc(openrouter.get("at"))))
 
     codex = steps.get("codex", {})
-    if progress["done"][6]:
+    if waits["codex_missing"]:  # the same fix as the "can't find Codex" banner
+        items.append(_item("Codex", "error", waits["codex_missing"]["health"], fix=wait_fix(waits["codex_missing"]),
+                           timed=False))
+    elif progress["done"][6] and waits["usage_limit"]:  # the same link as the ChatGPT usage banner
+        items.append(_item("Codex", "warning", waits["usage_limit"]["health"], fix=wait_fix(waits["usage_limit"]),
+                           timed=False))
+    elif progress["done"][6]:
         items.append(_item("Codex", "success", "Signed in with ChatGPT", _good_at(codex)))
     else:  # the same fix as the "Codex stopped working." banner
         failed = codex.get("message") if codex.get("status") == "failed" else None
@@ -863,7 +878,7 @@ def gather(database, config, home, progress, scheduler, now=None, root=None):
                          "resets": workflow_tasks.next_day_start(now, zone_name, hour)},
              "runs": section(reader, job_runs, config, now, scheduler, pause,
                              paths.reports(root, home) if (root is not None or home is not None) else None),
-             "health": health(home, progress, scheduler, cycle, pause, fmt),
+             "health": health(home, progress, scheduler, cycle, pause, fmt, now),
              "day_start": when(start, now, zone),
              "unreadable": reader.broken,
              "unavailable": UNAVAILABLE}

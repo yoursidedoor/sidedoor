@@ -349,5 +349,28 @@ class Lifecycle(Base):
         self.assertNotEqual(stopped["next"].get("state"), "DUE")
 
 
+class InviteStageWordsTest(unittest.TestCase):
+    """Every state written to an INVITE action has its own words before anything is on record as sent."""
+
+    def test_each_state_written_to_an_invite_action_maps(self):
+        from zoneinfo import ZoneInfo
+        expected = {"PENDING": "Invitation queued", "AWAITING_APPROVAL": "Invitation waiting for your approval",
+                    "BLOCKED": "Invitation on hold", "REQUEST_STARTED": "Invitation sending",
+                    "DISPATCHING": "Invitation sending",
+                    "ACKNOWLEDGED_DELIVERY_UNCONFIRMED": "Invitation sent, delivery not confirmed",
+                    "ACKNOWLEDGED_UNCONFIRMED": "Invitation sent, delivery not confirmed",
+                    "INVITE_RETRY_WAIT": "Invitation will be tried again", "RETRY_WAIT": "Invitation will be tried again",
+                    "WRITE_RETRY_WAIT": "Invitation will be tried again", "CONFIRMED_SENT": "Invitation sent",
+                    "PREPARED": "Invitation prepared, not sent yet", "CONFIRMED_NOT_SENT": "Invitation did not go out",
+                    "WRITE_FAILED": "Invitation could not be sent",
+                    "UNCERTAIN_NO_RETRY": "Couldn't confirm the invitation went out",
+                    "CANCELLED_BEFORE_SEND": "Invitation cancelled before sending",
+                    "CANCELLED": "Invitation cancelled before sending", "CLOSED": "Closed, no invitation sent"}
+        zone = ZoneInfo("America/Los_Angeles")
+        for state, words in expected.items():
+            self.assertEqual(sequence.position({"stage": "INVITE_" + state, "steps": [], "due": None}, zone), words, state)
+        self.assertEqual(set(sequence.INVITE_STAGE_WORDS), set(expected))
+
+
 if __name__ == "__main__":
     unittest.main()

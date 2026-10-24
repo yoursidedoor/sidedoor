@@ -388,6 +388,101 @@ def gmail_account_url(source, mailbox_email):
         return None
 
 
+
+# Receipt and mailbox reads happen in the user's own webmail, whatever the provider (owner invariant,
+# 2026-10-16, BACKLOG E0.T2.S1: "supersedes the plan's Gmail-only wording"; owner 2026-10-24 "1:
+# Critical. Please fix"). Setup's "Your webmail" (setup_steps.webmail_choice; the pick list
+# dashboard_assets/picklists.json "webmail") says which; this is the ONE list of the hosts a mailbox
+# read's message URL may be on for each listed provider. Matched exactly (urlsplit's lower-cased
+# hostname), so a lookalike such as mail.google.com.evil.example never matches. "Other" binds only
+# its own saved address's host. No choice saved (installs before Setup asked): Gmail, as before.
+WEBMAIL_HOSTS = {
+    "Gmail": ("mail.google.com",),
+    "Outlook.com": ("outlook.live.com", "outlook.office.com", "outlook.office365.com"),
+    "Outlook (work or school)": ("outlook.office.com", "outlook.office365.com", "outlook.live.com"),
+    "Yahoo Mail": ("mail.yahoo.com",),
+    "iCloud Mail": ("www.icloud.com",),
+    "Proton Mail": ("mail.proton.me",),
+    "AOL Mail": ("mail.aol.com",),
+    "Zoho Mail": ("mail.zoho.com", "mail.zoho.eu", "mail.zoho.in", "mail.zoho.com.au"),
+    "Fastmail": ("app.fastmail.com",),
+}
+DEFAULT_WEBMAIL = {"label": "Gmail", "url": "https://mail.google.com/"}
+
+
+def chosen_webmail(home=None):
+    """Setup's saved webmail ({label, url}); Gmail when none is saved or the setup state is unreadable."""
+    try:
+        import setup_steps
+        choice = setup_steps.load_state(home).get("webmail")
+    except Exception:
+        choice = None
+    if not isinstance(choice, dict) or not isinstance(choice.get("label"), str) or not choice["label"]:
+        return dict(DEFAULT_WEBMAIL)
+    return {"label": choice["label"], "url": choice.get("url") if isinstance(choice.get("url"), str) else ""}
+
+
+def webmail_hosts(choice):
+    """The hosts a message URL in this webmail may be on: the listed provider's, or an Other
+    webmail's own https host; () when there is none (nothing then binds)."""
+    label = (choice or {}).get("label")
+    if label in WEBMAIL_HOSTS:
+        return WEBMAIL_HOSTS[label]
+    try:
+        parsed = urllib.parse.urlsplit(str((choice or {}).get("url") or ""))
+        host = parsed.hostname
+    except ValueError:
+        return ()
+    if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+        return ()
+    return (host,)
+
+
+def webmail_context(choice, mailbox_email):
+    """The mailbox a browser session reads, as its request context carries it (context.webmail).
+
+    Gmail is addressed by the candidate's email exactly as before (gmail_url: authuser, with a
+    URL-addressable search); every other provider is opened at its saved address and has no
+    search URL. Without a usable candidate email the mailbox fields are None (as context.gmail was
+    None before); the host list is always there, so the binding never falls back to another set."""
+    choice = choice or dict(DEFAULT_WEBMAIL)
+    gmail = choice.get("label") == "Gmail"
+    entry = {"provider": choice.get("label"), "hosts": list(webmail_hosts(choice)), "mailbox_email": None,
+             "mailbox_url": None, "search_url_prefix": None}
+    if not isinstance(mailbox_email, str) or "@" not in mailbox_email or any(ch.isspace() for ch in mailbox_email):
+        return entry
+    entry["mailbox_email"] = mailbox_email
+    if gmail:
+        entry.update(mailbox_url=gmail_url(mailbox_email, "inbox"), search_url_prefix=gmail_url(mailbox_email, "search/"))
+    else:
+        entry["mailbox_url"] = choice.get("url") or None
+    return entry
+
+
+def record_hosts(source):
+    """The host a saved history record's message is re-read on: its own https source's host, or none."""
+    try:
+        parsed = urllib.parse.urlsplit(str(source or ""))
+        host = parsed.hostname
+    except ValueError:
+        return frozenset()
+    if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+        return frozenset()
+    return frozenset({host})
+
+
+def request_webmail_hosts(context):
+    """The host set a mailbox read's source_url is bound to, from the request's own context: the
+    chosen webmail's (context.webmail.hosts), or Gmail's for a request made before context.webmail
+    existed. A context.webmail without a well-formed host list binds nothing."""
+    webmail = (context or {}).get("webmail", DEFAULT_WEBMAIL) if isinstance(context, dict) else DEFAULT_WEBMAIL
+    if webmail is DEFAULT_WEBMAIL:
+        return frozenset(WEBMAIL_HOSTS["Gmail"])
+    hosts = webmail.get("hosts") if isinstance(webmail, dict) else None
+    if not isinstance(hosts, list) or not all(isinstance(host, str) and host for host in hosts):
+        return frozenset()
+    return frozenset(host.casefold() for host in hosts)
+
 def main():
     import applications
     import orchestrator

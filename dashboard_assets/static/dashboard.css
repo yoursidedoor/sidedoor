@@ -323,7 +323,7 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 .net-row summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 16px 20px; cursor: pointer; }
 .net-head { flex: 1 1 260px; min-width: 0; }
 .net-role { display: block; color: var(--muted); }
-.net-times { flex: 1 1 100%; font-size: 0.875rem; }
+.net-times, .net-sequence { flex: 1 1 100%; font-size: 0.875rem; }
 .net-body { padding: 0 20px 16px; border-top: 1px solid var(--border); min-width: 0; }
 .net-body h3 { font-size: 1rem; margin: 16px 0 6px; }
 .net-why ul { margin: 4px 0 8px; padding-left: 20px; }

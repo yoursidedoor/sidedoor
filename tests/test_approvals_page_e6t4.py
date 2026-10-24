@@ -484,6 +484,51 @@ class NotesForYou(PageBase):
         self.assertIn('href="/approvals#notes"><strong>1</strong> note for you', page)
 
 
+class EveryListPages(PageBase):
+    """Every list on Approvals pages like the messages list (owner, 2026-10-24): its own page parameter
+    and #anchor, the real total counted, and paging one list never resets another."""
+
+    flag, needs = NotesForYou.flag, NotesForYou.needs
+
+    def questions(self, count):
+        decision_transport.initialize(self.db)
+        expires = int(NOW.timestamp() * 1000) + 30 * 86400000
+        with self.db:
+            for index in range(count):
+                self.db.execute("INSERT INTO user_decisions(id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,"
+                                "policy_hash,expires_at,state,summary,event_key,label) VALUES (?,?,?,?,'text','[]','h','j','p',?,"
+                                "'PENDING','s',?,?)", ("q%02d" % index, "job:%02d" % index, "f", "github_profile",
+                                                       expires + index, "decision:q%02d" % index, "Question %02d?" % index))
+
+    def test_sixty_questions_page_by_twenty_five_with_the_real_total(self):
+        self.questions(60)
+        page = self.page()
+        section = page.split('id="questions"', 1)[1].split("</section>", 1)[0]
+        self.assertEqual(section.count('<article class="approval-card"'), 25)
+        self.assertIn("Page 1 of 3 (60)", section)
+        self.assertIn('href="/approvals?questions_page=2#questions">Next</a>', section)
+        self.assertNotIn(">Previous</a>", section)
+        last = self.page("/approvals?questions_page=3").split('id="questions"', 1)[1].split("</section>", 1)[0]
+        self.assertEqual(last.count('<article class="approval-card"'), 10)
+        self.assertIn("Question 59?", last)
+        self.assertIn('action="/approvals/questions/answer?questions_page=3"', last)   # a plain post comes back here
+        self.assertEqual(self.needs()["questions"], 60)
+
+    def test_sixty_notes_page_and_paging_one_list_keeps_the_other(self):
+        for index in range(60):
+            self.flag("task-n%02d" % index, "Note %02d." % index)
+        self.questions(30)
+        page = self.page("/approvals?notes_page=2&questions_page=2")
+        notes = page.split('id="notes"', 1)[1].split("</section>", 1)[0]
+        self.assertEqual(notes.count('<article class="approval-card"'), 25)
+        self.assertIn("Page 2 of 3 (60)", notes)
+        self.assertIn('href="/approvals?questions_page=2&notes_page=3#notes">Next</a>', notes)
+        questions = page.split('id="questions"', 1)[1].split("</section>", 1)[0]
+        self.assertIn("Page 2 of 2 (30)", questions)
+        self.assertEqual(questions.count('<article class="approval-card"'), 5)
+        self.assertEqual(self.needs()["notes"], 60)
+
+
 class SettingsModeQuestion(PageBase):
     def held_ids(self):
         return [row[0] for row in self.db.execute("SELECT action_id FROM outreach_actions WHERE state=? ORDER BY action_id",
@@ -583,7 +628,7 @@ class SettingsModeQuestion(PageBase):
         setup_steps.save_owner_answer("d1", "relocation_city", "Austin, for this role", "Your answer to \"Relocation city\" for Acme",
                                       self.home)
         page = self.page("/settings")
-        self.assertIn("Answers you gave on Approvals", page)
+        self.assertIn("Your saved answers", page)
         self.assertIn('Your answer to "Relocation city" for Acme', page)
         response = self.post("/settings/answers/change", {"key": "owner-answer:d1", "value": "Denver"}, HTMX)
         self.assertTrue(response.lstrip().startswith('<div class="kept-answer"'))
@@ -644,7 +689,7 @@ if DEPENDENCIES:
 
         def test_example_3_dashboard_answer_is_processed_like_a_telegram_reply(self):
             page = html.unescape(self.client.get("/approvals").text)
-            self.assertIn("Active secret clearance", page)
+            self.assertIn("Do you hold an active Secret clearance?", page)   # the form's own label (2026-10-24)
             self.assertIn('name="decision_id" value="%s"' % self.decision_id, page)
             self.assertIn("Answer saved.", self.answer(self.decision_id, "No"))
             saved = self.database.execute("SELECT value,source FROM application_answers WHERE field=?", (self.decision["field"],)).fetchone()

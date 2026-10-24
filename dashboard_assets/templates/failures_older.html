@@ -1,0 +1,10 @@
+{#- Older lines of one log stream or run file (failures_page.older_links): the control sits above the lines
+    shown; with htmx it is replaced by the next control and the older chunk, so chunks stack above. -#}
+{% macro older_control(o) -%}
+{% if o.older_href %}<p class="log-older"><a href="{{ o.older_href }}" hx-get="{{ o.older_hx }}" hx-target="closest .log-older" hx-swap="outerHTML">Older lines</a></p>
+{%- elif o.state == "ok" %}<p class="log-older muted">Start of file</p>{% endif %}
+{%- endmacro %}
+{% if fragment %}{{ older_control(fragment) }}
+{% if fragment.lines %}<pre class="log-lines">{% for line in fragment.lines %}{{ line }}
+{% endfor %}</pre>{% elif fragment.note %}<p class="muted log-older-note">{{ fragment.note }}</p>{% endif %}
+{% endif %}

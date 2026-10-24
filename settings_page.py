@@ -40,7 +40,7 @@ import credentials
 import setup_steps
 import paths
 
-SECTIONS = ("profile", "resume", "mode", "connections", "license", "login")
+SECTIONS = ("profile", "answers", "resume", "mode", "connections", "license", "login")
 BUSY = "Sidedoor is busy with another task. Try again in a moment."
 PORTAL_LINE = "Sign in with the email you subscribed with to update your card, see invoices or cancel."
 NO_PORTAL = "To update your card, see invoices or cancel, email"
@@ -210,10 +210,12 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         if name == "profile":
             saved = steps.get("profile", {})
             result.update(form=setup_steps.profile_form(home), errors=saved.get("errors") or {},
-                          saved=saved, self_id=setup_steps.picklists()["self_identification"],
-                          kept_answers=setup_steps.owner_answers(home))   # E6.T4: answers given on Approvals
-            result["overrides"], result["kept_over"] = setup_steps.kept_overrides(home)   # E6.T4 A3
-            result["kept_status"] = setup_steps.kept_status(home)                          # E6.T4 item 5
+                          saved=saved, self_id=setup_steps.picklists()["self_identification"])
+            result["overrides"] = setup_steps.kept_overrides(home)[0]   # E6.T4 A3
+        elif name == "answers":
+            # Your saved answers (owner, 2026-10-24): every answer given on Approvals, kept for later jobs.
+            result.update(kept_answers=setup_steps.owner_answers(home), kept_over=setup_steps.kept_overrides(home)[1],
+                          kept_status=setup_steps.kept_status(home))   # E6.T4 A3, item 5
         elif name == "resume":
             profile = setup_steps.read_profile(home)
             raw = profile.get("resume_raw") if isinstance(profile.get("resume_raw"), dict) else None
@@ -314,7 +316,8 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         state, errors = setup_steps.save_profile(values, home)
         # The browser part shows the saved application email.
         return respond(request, "profile", {"saved_now": not errors},
-                       also=("browser",) if setup_steps.saved_email(home) != before else ())
+                       # A Setup change can retire a saved answer that contradicts it (profile_document).
+                       also=(("browser",) if setup_steps.saved_email(home) != before else ()) + ("answers",))
 
     # --- Résumé (Setup step 2) ---------------------------------------------------------------------
 
@@ -465,7 +468,7 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
 
     def kept_answer(request, key, notice):
         if not htmx(request):
-            return RedirectResponse("/settings#kept-answers", status_code=303)
+            return RedirectResponse("/settings#answers", status_code=303)
         return HTMLResponse(kept_fragment(key, notice))
 
     @app.post("/settings/answers/use-setup")
@@ -501,14 +504,14 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         form = await request.form()
         key = form.get("key") or ""
         changed = await run_in_threadpool(setup_steps.change_owner_answer, key, form.get("value"), home)
-        return kept_answer(request, key, "Saved the answer." if changed else "Write an answer (Yes or No for a yes/no one), or remove it.")
+        return kept_answer(request, key, "Saved the answer." if changed else "Write an answer (Yes or No for a yes/no one, one of the options for a question that had them), or remove it.")
 
     @app.post("/settings/answers/remove")
     async def kept_answer_remove(request: Request):
         form = await request.form()
         key = form.get("key") or ""
         removed = await run_in_threadpool(setup_steps.remove_owner_answer, key, home)
-        return kept_answer(request, key, "Removed. Sidedoor no longer uses it for later applications."
+        return kept_answer(request, key, "Removed. The next application that needs this asks you again on Approvals."
                            if removed else "That answer was already removed.")
 
     # --- Start at login (Setup step 10, E5.T2) -------------------------------------------------------

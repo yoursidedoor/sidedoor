@@ -22,7 +22,7 @@
   <p class="approval-label">The message now reads:</p>
   <blockquote class="approval-text approval-current">{{ m.text }}</blockquote>
   {% endif %}
-  <form method="post" action="/approvals/messages/send" hx-post="/approvals/messages/send" hx-target="closest article" hx-swap="outerHTML" class="approval-edit">
+  <form method="post" action="/approvals/messages/send{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/messages/send{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML" class="approval-edit">
     <input type="hidden" name="action_id" value="{{ m.action_id }}"><input type="hidden" name="payload_hash" value="{{ m.payload_hash }}">
     <input type="hidden" name="recipient" value="{{ m.recipient }}"><input type="hidden" name="shown_text" value="{{ m.text }}">
     <label for="text-{{ m.dom }}">{{ "Your edit" if f.kept is string and f.kept != m.text else "Message (edit it here if you like)" }}</label>
@@ -35,14 +35,14 @@
   <blockquote class="approval-text">{{ m.text }}</blockquote>
   <p class="approval-count">{{ m.length }}{% if m.limit %} / {{ m.limit }}{% endif %} characters</p>
   {% if m.stage == "LAUNCH" %}<p class="muted">This invitation is already in a prepared campaign, so it cannot be edited here. Approve it or reject it.</p>{% endif %}
-  <form method="post" action="/approvals/messages/approve" hx-post="/approvals/messages/approve" hx-target="closest article" hx-swap="outerHTML" class="approval-inline">
+  <form method="post" action="/approvals/messages/approve{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/messages/approve{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML" class="approval-inline">
     <input type="hidden" name="action_id" value="{{ m.action_id }}"><input type="hidden" name="payload_hash" value="{{ m.payload_hash }}">
     <input type="hidden" name="recipient" value="{{ m.recipient }}">
     <button class="button button-highlight" type="submit">Approve and send</button>
   </form>
   {% endif %}
   <details class="approval-reject"{% if f.kept_reason %} open{% endif %}><summary>Reject</summary>
-    <form method="post" action="/approvals/messages/reject" hx-post="/approvals/messages/reject" hx-target="closest article" hx-swap="outerHTML">
+    <form method="post" action="/approvals/messages/reject{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/messages/reject{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
       <input type="hidden" name="action_id" value="{{ m.action_id }}"><input type="hidden" name="payload_hash" value="{{ m.payload_hash }}">
       <input type="hidden" name="recipient" value="{{ m.recipient }}">
       <label for="reason-{{ m.dom }}">Why (optional, only for you)</label>
