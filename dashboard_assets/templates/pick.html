@@ -1,9 +1,11 @@
 {# One searchable pick list (prefix matching). Needs `pick` = pick_view(field, chosen) and `label`. #}
 <div class="picklist{% if error %} has-error{% endif %}" id="pick-{{ pick.field }}">
   <label for="q-{{ pick.field }}">{{ label }}</label>
+  <div class="pick-row">{# the chips, then the search box on the same line, wrapping (owner, 2026-10-24) #}
   {% include "pick_chosen.html" %}
   <input id="q-{{ pick.field }}" type="search" name="q_{{ pick.field }}" placeholder="Type to search{% if pick.custom %}, or type your own{% endif %}{% if pick.several %} (one or more){% endif %}" autocomplete="off"
          hx-get="/setup/pick/{{ pick.field }}" hx-trigger="input changed delay:150ms, focus once" hx-target="#pick-{{ pick.field }}-options" hx-swap="innerHTML">
+  </div>
   <div class="options" id="pick-{{ pick.field }}-options"></div>
   {% if error %}<p class="field-error">{{ error }}</p>{% endif %}
 </div>

@@ -216,7 +216,7 @@ class NetworkingPageTest(Page, unittest.TestCase):
         self.assertEqual(lines["Omar Example"], "Invited 10-15 · Accepted 10-16 · First message 10-17 · Follow-up due " + due_day)
         self.assertTrue(lines["Pat Example"].startswith("Invited 10-15 · Follow-up due "), lines["Pat Example"])
         self.assertTrue(lines["Pat Example"].endswith(" (once they accept)"))
-        self.assertIsNone(lines["Quinn Example"])   # listed; "Invitation queued" is its chip, not repeated
+        self.assertTrue(lines["Quinn Example"].startswith("Invitation queued · "), lines["Quinn Example"])   # N3: when it goes
         self.assertEqual(lines["Rae Example"], "Invitation sent, delivery not confirmed")
         page = self.get()   # the page renders the same line (dates do not depend on the clock once sent)
         self.assertIn("Invited 10-15 · Accepted 10-16 · Follow-up 10-19 · Replied 10-19", page)
@@ -241,19 +241,19 @@ class NetworkingPageTest(Page, unittest.TestCase):
         self.assertEqual(view["list"]["total"], 9)
         counts = view["list"]["counts"]
         self.assertEqual((counts["all"], counts["waiting"], counts["sending"], counts["needs_you"], counts["replied"],
-                          counts["closed"], counts["referral_agreed"]), (9, 9, 1, 0, 0, 0, 0))
+                          counts["closed"], counts["referral_agreed"]), (9, 9, 0, 0, 0, 0, 0))
         queued = [entry for entry in self.entries() if entry["status"] == "Invitation queued"]
         self.assertEqual(len(queued), 6)
         self.assertEqual({entry["tone"] for entry in queued}, {"muted"})
         statuses = sorted(entry["status"] for entry in self.entries() if entry["status"] != "Invitation queued")
-        self.assertEqual(statuses, ["Invited, waiting for acceptance"] * 2 + ["Sending…"])   # a PENDING follow-up changes nothing
+        self.assertEqual(statuses, ["Invitation sent"] + ["Invited, waiting for acceptance"] * 2)   # a PENDING follow-up changes nothing
         page = self.get()
         self.assertEqual(page.count('class="card net-row"'), 9)
         self.assertEqual(page.count(">Invitation queued<"), 6)
         self.assertIn("Invitation sent, delivery not confirmed", page)
         for show in ("waiting", "sending", "needs_you", "replied", "replied_today", "referral_agreed", "closed"):
             self.get(show=show)   # every filter renders
-        self.assertEqual(self.get(show="sending").count('class="card net-row"'), 1)
+        self.assertEqual(self.get(show="sending").count('class="card net-row"'), 0)   # acknowledged: "Invitation sent"
         approvals = self.get("/approvals")
         self.assertNotIn("queued-0", approvals)
 
@@ -326,10 +326,11 @@ class NetworkingPageTest(Page, unittest.TestCase):
                     result={"attempts": [{"started_at": at(5), "outcome": "ACKNOWLEDGED"}]})
         self.db.commit()
         kim = self.entries()[0]
-        self.assertEqual(kim["status"], "Sending…")
+        self.assertEqual(kim["status"], "Invitation sent")   # N2 (owner, 2026-10-24): LinkedIn took it
         self.assertTrue(kim["conversation"][0]["pending"])
         page = self.get()
-        self.assertIn("Sending…", page)
+        self.assertIn(">Invitation sent<", page)
+        self.assertIn("Invitation sent, delivery not confirmed", page)
         self.assertNotIn("Invited, waiting for acceptance", page)
         self.assertEqual(len(self.entries(show="waiting")), 1)
         with self.db:
@@ -588,12 +589,14 @@ class ReviewFixesTest(Page, unittest.TestCase):
     def test_n10_overview_waiting_link_lists_exactly_the_invitations_it_counts(self):
         self.open_store(self.root)
         self.action("invite-k", "kim-l", "INVITE", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", "Hi Kim.", claimed=at(5))
+        self.action("invite-b", "bo-b", "INVITE", "REQUEST_STARTED", "Hi Bo.", claimed=at(4))
         self.invited("ann-a", "Hi Ann.", 1)                                   # invited, waiting for acceptance
         self.db.commit()
         overview = self.get("/")
-        self.assertIn('href="/sent?show=sending#conversations">1 waiting for confirmation', overview)
-        self.assertEqual([entry["name"] for entry in self.entries(show="sending")], ["Kim Example"])
-        self.assertEqual(len(self.entries(show="waiting")), 2)
+        self.assertIn('href="/sent?show=sending#conversations">1 still sending', overview)
+        self.assertEqual([entry["name"] for entry in self.entries(show="sending")], ["Bo Example"])
+        self.assertEqual([entry["status"] for entry in self.entries(show="sending")], ["Sending…"])
+        self.assertEqual(len(self.entries(show="waiting")), 3)
 
     def test_n11_overview_replies_count_the_people_the_page_lists(self):
         self.open_store(self.root)
@@ -669,6 +672,95 @@ class ReviewFixesTest(Page, unittest.TestCase):
 
 
 @unittest.skipUnless(DEPENDENCIES, "dashboard packages (fastapi, httpx) are not installed")
+@unittest.skipUnless(DEPENDENCIES, "dashboard packages (fastapi, httpx) are not installed")
+class PolishTest(Page, unittest.TestCase):
+    """Owner, 2026-10-24: N1 (who they are), N2 (an acknowledged invitation), N3 (when a queued one
+    goes), N4 (empty filters hidden), N5 (the wider page)."""
+
+    def test_n1_title_at_company_else_the_company_once(self):
+        line = networking_page.role_line
+        self.assertEqual(line("Upwind", "Upwind"), "Works at Upwind")
+        self.assertEqual(line("InsForge", "InsForge (InstaCloud)"), "Works at InsForge (InstaCloud)")
+        self.assertEqual(line(None, "Writer"), "Works at Writer")
+        self.assertEqual(line("Together AI founder and CEO", "Together AI"), "Founder and CEO at Together AI")
+        self.assertEqual(line("Co-Founder and CTO, Cognition", "Cognition"), "Co-Founder and CTO at Cognition")
+        self.assertEqual(line("Staff Engineer", "Acme"), "Staff Engineer at Acme")
+        self.assertEqual(line("Staff Engineer", None), "Staff Engineer")
+        self.assertIsNone(line(None, None))
+        self.open_store(self.root)
+        self.invited("lee-n", "Hi Lee.", 0)
+        page = self.get()
+        self.assertIn('<span class="net-role">Works at Acme</span>', page)
+        self.assertNotIn("Acme · Acme", page)
+
+    def test_n2_only_an_acknowledged_invitation_says_sent(self):
+        self.open_store(self.root)
+        self.action("invite-a", "ack-a", "INVITE", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", "Hi.", claimed=at(1))
+        self.action("invite-b", "busy-b", "INVITE", "REQUEST_STARTED", "Hi.", claimed=at(2))
+        statuses = {entry["name"]: entry["status"] for entry in self.entries()}
+        self.assertEqual(statuses, {"Ack Example": "Invitation sent", "Busy Example": "Sending…"})
+        self.assertEqual(len(self.entries(show="waiting")), 2)
+        self.assertEqual([entry["name"] for entry in self.entries(show="sending")], ["Busy Example"])   # by the badge
+
+    def test_n3_a_queued_invitation_says_when_it_goes(self):
+        import scheduler_control
+        self.open_store(self.root)
+        self.action("invite-q", "queued-q", "INVITE", "PENDING", "Hi.")
+        now = dt.datetime(2026, 10, 22, 20, 10, tzinfo=dt.timezone.utc)   # 13:10 Pacific
+        [entry] = self.entries(now=now)
+        self.assertEqual(entry["sequence"], "Invitation queued · goes out around 14:00")
+        self.action("invite-r", "queued-r", "INVITE", "PENDING", "Hi.")
+        self.assertEqual({entry["sequence"] for entry in self.entries(now=now)},
+                         {"Invitation queued · the next of 2 queued invitations goes out around 14:00"})
+        for number in range(20):   # the first week's daily cap, all in the last 24 hours
+            started = (now - dt.timedelta(hours=20) + dt.timedelta(minutes=number)).isoformat()
+            self.action("invite-s%d" % number, "sent-%d" % number, "INVITE", "CONFIRMED_SENT", "Hi.", claimed=started,
+                        result={"attempts": [{"started_at": started, "outcome": "ACKNOWLEDGED"}]})
+        lines = {entry["sequence"] for entry in self.entries(now=now) if entry["status"] == "Invitation queued"}
+        self.assertEqual(lines, {"Invitation queued · after today's limit resets 17:10"})
+        self.assertEqual({entry["sequence"] for entry in self.entries(now=now, running=False)
+                          if entry["status"] == "Invitation queued"},
+                         {"Invitation queued · goes out once Sidedoor is running again"})
+        with self.db:
+            scheduler_control.initialize(self.db)
+            self.db.execute("UPDATE scheduler_control SET user_paused_at=? WHERE id=1", (now.isoformat(),))
+        self.assertEqual({entry["sequence"] for entry in self.entries(now=now) if entry["status"] == "Invitation queued"},
+                         {"Invitation queued · on hold while Sidedoor is paused"})
+
+    def test_n3_a_unipile_install_goes_out_on_the_15_minute_invitation_step(self):
+        import pacing
+        self.open_store(self.root)
+        self.action("invite-q", "queued-q", "INVITE", "PENDING", "Hi.")
+        now = dt.datetime(2026, 10, 22, 20, 10, tzinfo=dt.timezone.utc)   # 13:10 Pacific
+        zone = ZoneInfo("America/Los_Angeles")
+        reader = overview_page.Reader(self.db)
+        unipile = dict(CONFIG, linkedin_provider="unipile")
+        self.assertEqual(networking_page.queued_timing(reader, unipile, now, zone), "goes out around 13:17")
+        self.assertEqual(networking_page.queued_timing(reader, CONFIG, now, zone), "goes out around 14:00")
+        wait = {"go": False, "wait_until": "2026-10-22T20:40:00+00:00", "reason": "JITTER"}
+        with mock.patch.object(pacing, "check", return_value=wait):
+            self.assertEqual(networking_page.queued_timing(reader, unipile, now, zone), "goes out around 13:47")
+            self.assertEqual(networking_page.queued_timing(reader, CONFIG, now, zone), "goes out around 14:00")
+
+    def test_n4_empty_filters_are_hidden_except_all_and_the_chosen_one(self):
+        self.open_store(self.root)
+        self.invited("one-o", "Hi.", 0)
+        page = self.get()
+        nav = page.split('class="net-filters"')[1].split("</nav>")[0]
+        self.assertIn(">All <", nav)
+        self.assertIn(">Waiting <", nav)
+        for hidden in ("Replied", "Closed", "Needs you", "Referral agreed", "Invitations sending"):
+            self.assertNotIn(">" + hidden + " <", nav)
+        nav = self.get(show="closed").split('class="net-filters"')[1].split("</nav>")[0]
+        self.assertIn(">Closed <", nav)
+
+    def test_n5_the_page_is_as_wide_as_overview(self):
+        self.assertIn('<div class="net-page">', self.get())
+        css = CSS.read_text()
+        self.assertIn(".page { max-width: 1600px;", css)   # one wide container for every page
+        self.assertNotIn(".page:has(", css)
+
+
 class CalendarEdgeTest(Page, unittest.TestCase):
     """NL1: a UTC time at the calendar's ends cannot be shown in local time; it is no time, never a 500."""
 

@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -326,8 +327,78 @@ class MessagesWaiting(PageBase):
             self.db.execute("INSERT INTO notification_outbox(event_key,message,state,delivery,updated_at) VALUES (?,?,?,?,?)",
                             ("other", "Sent by Telegram.", "DELIVERED", json.dumps({"provider": "telegram"}), NOW.isoformat()))
         page = self.page()
-        self.assertIn("A human check is waiting on Acme's form.", page)
+        self.assertIn("Sidedoor's browser asked for a human check (a CAPTCHA) and waited for you to tick it.", page)
         self.assertNotIn("Sent by Telegram.", page)
+
+    def test_a1_notices_read_in_plain_words_with_a_link(self):
+        """Owner, 2026-10-24 (A1): the Telegram-era rows, shaped as the writers write them, read as
+        plain words with the job's company and role and a link; what is stored never changes."""
+        import reporting
+        applications.initialize(self.db)
+        reporting.initialize(self.db)
+        applications.ingest(self.db, {"company": "Nimbus Labs", "role": "Platform Engineer",
+                                            "url": "https://jobs.example.test/nimbus/platform"}, NOW.isoformat())
+        key = self.db.execute("SELECT job_key FROM application_jobs").fetchone()[0]
+        self.db.execute("UPDATE application_jobs SET payload=json_set(payload,'$.company','Nimbus Labs') WHERE job_key=?", (key,))
+        self.db.execute("INSERT INTO daily_reports(day,generated_at,notification_key,payload) VALUES (?,?,?,?)",
+                        ("2026-10-21", NOW.isoformat(), "daily-report:2026-10-21", json.dumps(
+            {"outcomes_24h": {"submitted": [{"job": "x"}], "discovered": {"research": 16}, "invitations": [], "inbound": []}})))
+        rows = [(key + ":AUTHENTICATION_REQUIRED", "Job search: nimbus labs / " + key.split(":", 1)[1] + ": AUTHENTICATION_REQUIRED. "
+                 "Attempts: 0. Owner: user. Next: Sign in. Deadline: 2026-10-23T06:57:57.151191+00:00."),
+                (key + ":submitted", "Application verified: nimbus labs / x. Receipt: 9516eca4-da18-4ec4-8aa9-40bb11d4c39b"),
+                (key + ":HUMAN_CHECK:530a7330-7969-4bfe-b48e-52aa7cbd04b7", "Job search: the nimbus labs application is waiting on a CAPTCHA."),
+                ("daily-report:2026-10-21", "Job search, last 24 hours (2026-10-21)\nTelegram API receipt does not prove human read"),
+                ("mystery:abc", "Something odd at 2026-10-23T06:57:57+00:00 for 0d6a1b86156205b01cf22a37 SOME_CODE_HERE")]
+        with self.db:
+            for number, (event_key, message) in enumerate(rows):
+                self.db.execute("INSERT INTO notification_outbox(event_key,message,state,delivery,updated_at) VALUES (?,?,?,?,?)",
+                                (event_key, message, "DELIVERED", json.dumps({"provider": "dashboard"}),
+                                 (NOW + dt.timedelta(minutes=number)).isoformat()))
+        before = self.db.execute("SELECT event_key,message FROM notification_outbox ORDER BY event_key").fetchall()
+        page = self.page()
+        notices = page.split('id="notices"')[1].split("</section>")[0]
+        self.assertIn("Nimbus Labs (Platform Engineer): The application site asked for a sign-in.", notices)
+        self.assertIn("Nimbus Labs (Platform Engineer): Application submitted and confirmed.", notices)
+        self.assertIn("Nimbus Labs (Platform Engineer): Sidedoor's browser asked for a human check", notices)
+        self.assertIn("Daily summary for Oct 21: 1 application submitted, 16 new jobs found, 0 invitations sent, "
+                      "0 messages received.", notices)
+        self.assertIn('<a href="/">See Overview</a>', notices)
+        self.assertIn('href="/applications?job=' + urllib.parse.quote_plus(key) + '"', html.unescape(notices))
+        self.assertIn("Something odd some code here", notices)
+        for raw in ("AUTHENTICATION_REQUIRED", "Attempts:", "Owner: user", "2026-10-23T", "Receipt:", "unresolved:",
+                    "0d6a1b86", "Telegram API receipt", "9516eca4"):
+            self.assertNotIn(raw, notices)
+        self.assertEqual(self.db.execute("SELECT event_key,message FROM notification_outbox ORDER BY event_key").fetchall(), before)
+        response = self.client.get("/applications", params={"job": key})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Platform Engineer", html.unescape(response.text))
+
+    def test_a_reply_card_reads_the_conversation_under_the_profile_key(self):
+        """A reply action carries the inbox's profile URL; engagement_events store the profile key."""
+        import engagement
+        engagement.record_event(self.db, {"source": "unipile", "source_id": "m1", "profile": "https://www.linkedin.com/in/ines",
+                                          "kind": "inbound", "occurred_at": NOW.isoformat(), "observed_at": NOW.isoformat(),
+                                          "verified": True, "evidence": "test", "raw": {"text": "Would Tuesday work?"}})
+        self.db.commit()
+        thread = approvals_page.conversation(self.db, {"profile": "https://www.linkedin.com/in/ines"})
+        self.assertEqual([(line["who"], line["text"]) for line in thread], [("Them", "Would Tuesday work?")])
+
+    def test_question_controls_fit_the_question(self):
+        """Owner, 2026-10-24: radios for yes/no and a few choices, a select for many, one line for a short
+        value, a three-row box only for prose (a long question or a long-text type)."""
+        control = approvals_page.answer_control
+        self.assertEqual(control("boolean", ["Yes", "No"], "US citizen?"), "radio")
+        self.assertEqual(control("choice", ["a", "b", "c"], "Pick"), "radio")
+        self.assertEqual(control("choice", list("abcdef"), "Pick"), "select")
+        self.assertEqual(control("text", [], "GitHub profile URL"), "text")
+        self.assertEqual(control("long_text", [], "Why us?"), "textarea")
+        self.assertEqual(control("text", [], "Describe a time you led a migration end to end, what went wrong and what you learned."), "textarea")
+        self.assertEqual(control("text", [], "x", operational=True), "textarea")
+
+    def test_a2_empty_lists_are_one_compact_line(self):
+        page = self.page()
+        for name in ("questions", "notes", "notices", "messages"):
+            self.assertRegex(page, r'class="card approvals-section approvals-empty" id="%s"' % name)
 
     # D3
     def test_d3_an_approved_message_a_rule_refused_shows_why_and_can_be_dismissed(self):
@@ -480,8 +551,10 @@ class NotesForYou(PageBase):
         self.hold("invite-u", "uma", note(100))
         self.flag("task-4", "Call Pat.")
         page = html.unescape(self.client.get("/").text)
-        self.assertIn('href="/approvals#messages"><strong>1</strong> message waiting for you', page)
-        self.assertIn('href="/approvals#notes"><strong>1</strong> note for you', page)
+        for count, what, href, label in (("1", "message to approve", "/approvals#messages", "Review"),
+                                         ("1", "note for you", "/approvals#notes", "Read")):
+            self.assertRegex(page, r'<span class="overview-number">%s</span>\s*<span class="overview-needs-what">%s</span>'
+                                   r'\s*<a class="button overview-needs-go" href="%s">%s</a>' % (count, what, href, label))
 
 
 class EveryListPages(PageBase):
@@ -624,6 +697,29 @@ class SettingsModeQuestion(PageBase):
         newest = page.split('id="kept-owner-answer-d3"', 1)[1].split('class="kept-answer"', 1)[0]
         self.assertNotIn("Not used", newest)
 
+    def test_kept_answer_names_the_company_as_its_posting_writes_it(self):
+        # Owner, 2026-10-24: "insforge (instacloud)" is the stored employer key; the posting says
+        # "InsForge (InstaCloud)", as Applications shows it. An answer whose job is gone keeps the key.
+        for decision_id, employer in (("d1", "insforge (instacloud)"), ("d2", "asi")):
+            setup_steps.save_owner_answer(decision_id, "github_profile", "x", "Your answer", self.home,
+                                          asked_for={"question": "GitHub profile", "employer": employer, "role": "Engineer"})
+        import applications
+        import decision_transport
+        applications.initialize(self.db)
+        decision_transport.initialize(self.db)
+        self.db.execute("INSERT INTO application_jobs(job_key,employer,requisition,payload,state,updated_at) "
+                        "VALUES ('j1','insforge (instacloud)','r',?, 'BLOCKED','2026-10-24T00:00:00Z')",
+                        (json.dumps({"company": "InsForge (InstaCloud)"}),))
+        self.db.execute("INSERT INTO user_decisions(id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,"
+                        "policy_hash,expires_at,state,summary,event_key) VALUES ('d1','j1','f','s','text','[]','h','h','h',0,"
+                        "'APPLIED','','e')")
+        self.db.commit()
+        page = self.page("/settings")
+        self.assertIn("First asked for InsForge (InstaCloud), Engineer", page)
+        self.assertIn("First asked for asi, Engineer", page)
+        response = self.post("/settings/answers/change", {"key": "owner-answer:d1", "value": "y"}, HTMX)
+        self.assertIn("First asked for InsForge (InstaCloud), Engineer", response)
+
     def test_r13_kept_answer_save_and_remove_swap_only_that_answer(self):
         setup_steps.save_owner_answer("d1", "relocation_city", "Austin, for this role", "Your answer to \"Relocation city\" for Acme",
                                       self.home)
@@ -732,7 +828,8 @@ if DEPENDENCIES:
             other = self.ask(self.job(), dict(WHY, id=applications.question_field(WHY)))
             page = self.answer(other, "Because of the mission.", shown="not-the-shown-one")
             self.assertIn("This question changed since it was shown", page)
-            self.assertIn(">Because of the mission.</textarea>", page)
+            self.assertIn('name="answer" maxlength="4000" aria-labelledby="label-', page)
+            self.assertIn('value="Because of the mission." required>', page)   # a short question: one line
             self.assertEqual(self.row(other)["state"], "PENDING")
             self.assertEqual(setup_steps.owner_answers(self.home), [])
 
@@ -944,3 +1041,16 @@ class SetupChangeWins(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NamesLikeNetworking(unittest.TestCase):
+    """Owner, 2026-10-24: message cards say "Title at Company" / "Works at Company" (never "Upwind, Upwind"),
+    and question cards keep the posting's spelling of the company."""
+
+    def test_message_and_couldnt_send_lines_and_question_company(self):
+        import approvals_page
+        self.assertEqual(approvals_page._role_line("Upwind", "Upwind"), "Works at Upwind")
+        self.assertEqual(approvals_page._role_line("Quarry Staff SRE", "Quarry"), "Staff SRE at Quarry")
+        self.assertEqual(approvals_page._role_line(None, "Velo"), "Works at Velo")
+        self.assertEqual(approvals_page.job_names("harborai", {"company": "HarborAI", "role": "AI Engineer"}),
+                         ("HarborAI", "AI Engineer"))

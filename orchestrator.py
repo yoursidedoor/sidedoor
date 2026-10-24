@@ -785,6 +785,73 @@ def new_contact_execution_cycle(root, database, config, port=None):
     return result
 
 
+# The invitation tick (owner, 2026-10-24, option c: "run the invitation step every 15 minutes instead
+# of hourly"). Invitations are paced 4-12 minutes apart (pacing.py), so the hourly round alone sends
+# about one an hour; the scheduler also starts `sidedoor job invites` every 15 minutes
+# (scheduler_loop.INVITE_INTERVAL_SECONDS) and it runs only the round's own invitation pieces, the
+# same calls in the same order: `sequence.reconcile_invites` (earlier invitations read before any new
+# one is sent, and an uncertain one retried under its pacing) and the INVITE pass of `outreach.cycle`
+# (pacing.check, inspection, gates, Review-mode hold, claim, `sequence.send_invite`). It takes
+# state/runner.lock non-blocking (`single_instance`, the lock the whole hourly round and daily
+# research hold), so it never runs beside the round, research or another tick; busy, it skips quietly.
+# Nothing else of the round runs here: no research, inbox, follow-ups, replies, first messages or
+# applications.
+INVITE_RECONCILE_STATES = ("ACKNOWLEDGED_DELIVERY_UNCONFIRMED", "INVITE_RETRY_WAIT", "DISPATCHING",
+                           "REQUEST_STARTED", "UNCERTAIN_NO_RETRY")
+
+
+def invite_tick(root, config, database, port=None):
+    """One invitation tick. The caller holds state/runner.lock. Returns {"state": ...}; "logged" is
+    True only when the tick read or sent something (a quiet tick writes no log line)."""
+    if (not unipile_install(config) or config.get("scope") == "monitor_existing_pipeline"
+            or config.get("outreach_actions_enabled") is not True
+            or config.get("outreach_agent", {}).get("enabled") is not True):
+        return {"state": "DISABLED"}
+    if scheduler_control.paused(database):
+        return {"state": "PAUSED"}
+    if research_holds_turn(config, database):
+        database.commit()
+        return {"state": "YIELDED_TO_DAILY_RESEARCH"}
+    import outreach
+    import pacing
+    outreach.initialize_actions(database)
+    database.commit()
+    reconcile = database.execute(
+        "SELECT COUNT(*) FROM outreach_actions WHERE json_extract(payload,'$.purpose')='INVITE' AND state IN (%s)"
+        % ",".join("?" * len(INVITE_RECONCILE_STATES)), INVITE_RECONCILE_STATES).fetchone()[0]
+    queued = database.execute("SELECT COUNT(*) FROM outreach_actions WHERE json_extract(payload,'$.purpose')='INVITE' "
+                              "AND state IN ('PENDING','BLOCKED')").fetchone()[0]
+    # Nothing due: no invitation awaiting a read, and none queued that pacing lets go now. The INVITE
+    # pass would only answer PACING_WAIT for each, so no port is built and nothing is written.
+    if not reconcile and not (queued and pacing.check(database, config)["go"]):
+        return {"state": "NOTHING_DUE", "queued": queued}
+    import outreach_agent
+    import sequence
+    try:
+        port = unipile_ready(config, port)
+    except Exception as error:
+        if license_hold(error):   # the hourly round records the hold; the tick only waits
+            return {"state": "HELD", "blocker": getattr(error, "code", type(error).__name__)}
+        raise
+    result = {"state": "PROCESSED"}
+    if reconcile:
+        result["invites"] = sequence.reconcile_invites(database, port, config=config)
+    adapter = outreach_agent.Adapter(root, database, config, heyreach_for(config), port=port)
+    result["actions"] = outreach.cycle(database, config, adapter, purpose="INVITE")
+    result["logged"] = True
+    return result
+
+
+def invite_summary(result):
+    """One log line for a tick that did something: invitations sent and reads settled."""
+    actions = result.get("actions") or {}
+    items = actions.get("items") or []
+    waits = sum(1 for item in items if item.get("state") == "PACING_WAIT")
+    reads = (result.get("invites") or {}).get("items") or []
+    return ("Invitation tick: %d invitation request(s) made, %d queued waiting for pacing, %d earlier invitation(s) read."
+            % (actions.get("attempts", 0), waits, len(reads)))
+
+
 def reply_execution_cycle(root, database, config):
     import champion_reporting
     import reply_execution
@@ -1185,7 +1252,7 @@ def research_inputs(root, config, database, pipeline, observation, output_path, 
         context["candidate_resume"] = {"state": "UNAVAILABLE", "reason": str(error)}
     context["company_origin"] = "Current industry-discovery result, not existing pipeline or opportunity seeds"
     context["industry"] = industry
-    context["policy"] = policy
+    context["policy"] = applications.policy_for_model(policy)   # the answer in force per semantic
     context["discovery_evidence"] = discovery_evidence
     import research_sources
     context["source_observations"] = research_sources.load(root, plan, utcnow())
@@ -1512,7 +1579,7 @@ def run(root, config, database, pipeline, local_only=False):
     return 0 if result["state"] == "COMPLETE" else 1
 
 
-JOB_COMMANDS = ("run", "research", "applications")
+JOB_COMMANDS = ("run", "research", "applications", "invites")
 
 
 def main(argv=None):
@@ -1545,11 +1612,11 @@ def main(argv=None):
     # `research` and `applications` enter, with the same locks and outputs.
     if argv[:1] == ["job"]:
         if len(argv) < 2 or argv[1] not in JOB_COMMANDS:
-            print("usage: sidedoor job run|research|applications", file=sys.stderr)
+            print("usage: sidedoor job run|research|applications|invites", file=sys.stderr)
             return 2
         argv = argv[1:]
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["init", "run", "check", "status", "research", "applications", "transport-test", "outreach", "validate", "enqueue-campaign", "close-outreach", "expire-outreach", "dashboard", "setup", "serve", "supervise", "doctor"])
+    parser.add_argument("command", choices=["init", "run", "check", "status", "research", "applications", "invites", "transport-test", "outreach", "validate", "enqueue-campaign", "close-outreach", "expire-outreach", "dashboard", "setup", "serve", "supervise", "doctor"])
     parser.add_argument("campaign_file", nargs="?")
     parser.add_argument("--profile")
     parser.add_argument("--reason")
@@ -1570,7 +1637,7 @@ def main(argv=None):
     # Diagnostics carry this job's name (log.py, E2.T6), set after --home so their secrets are this
     # home's; the scheduler's job commands keep their INFO status lines on stdout, as always.
     log.configure(job="serve" if args.command in ("dashboard", "setup", "serve", "supervise") else args.command,
-                  stdout_info=args.command in ("run", "check", "research", "applications"))
+                  stdout_info=args.command in ("run", "check", "research", "applications", "invites"))
     if args.at_login:
         import login_item
         login_item.mark_started_at_login()
@@ -1673,6 +1740,23 @@ def main(argv=None):
                 # Machine contract (E2.T6): the command's JSON result; stays print.
                 print(json.dumps(applications.report(database), indent=2))
             return 0
+    if args.command == "invites":
+        # The invitation tick (owner, 2026-10-24; `invite_tick`): state/runner.lock, non-blocking. A
+        # round, research or another tick holding it makes this one skip, quietly.
+        with single_instance(root) as acquired:
+            if not acquired:
+                return 0
+            with contextlib.closing(connect(root)) as database:
+                with log.tagged("invites", uuid.uuid4().hex):
+                    try:
+                        result = invite_tick(root, config, database)
+                    except Exception as error:
+                        LOG.warning("Invitation tick stopped (%s); the hourly round sends invitations as before.",
+                                    type(error).__name__)
+                        return 1
+                    if result.get("logged"):
+                        LOG.info("%s", invite_summary(result))
+        return 0
     if args.command in {"run", "research"}:
         log_retention.startup(root)
     if args.command == "applications":

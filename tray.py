@@ -1,6 +1,10 @@
 """E5.T3: the tray icon (macOS menu bar, Windows notification area) of the Sidedoor process.
 
-Icon `assets/brand/yoursidedoor-icon-512.png` (D33). Menu (E6.T0 sections 1 and 5):
+Icon (D33, variant C 2026-10-24, tools/make_brand.py): on macOS the menu bar shows
+`assets/brand/yoursidedoor-tray-template.png`, a black-and-alpha glyph of the cube with its open door set
+as a template image (`template_image`), so AppKit tints it for a light or dark menu bar and draws it
+sharp on Retina (44 px for the 22 pt bar); on Windows the notification area shows the simplified
+`yoursidedoor-icon-win-32.png`. The Dock from source shows `yoursidedoor-icon-1024.png`. Menu (E6.T0 sections 1 and 5):
 - **Open dashboard**: the tokened link in the browser, the way `sidedoor serve` reopens a dashboard
   already running (`dashboard.announce`).
 - **Pause** / **Resume**: the user's pause through the same function as Overview's buttons
@@ -44,14 +48,49 @@ import log
 LOG = log.get(__name__)
 
 
-ICON = "yoursidedoor-icon-512.png"
+ICON = "yoursidedoor-icon-win-32.png"           # Windows (and any other) tray
+TEMPLATE_ICON = "yoursidedoor-tray-template.png"  # macOS menu bar, a template image
+DOCK_ICON = "yoursidedoor-icon-1024.png"         # the Dock from source (`brand_source_dock`)
 STATE_FILE = "tray-state.json"
 TITLE = "Your Sidedoor"
 REFRESH_SECONDS = 3  # how often a pause set elsewhere (Overview, the license) reaches the menu
 
 
-def icon_path():
-    return resources.path("assets/brand") / ICON
+def icon_path(platform=None):
+    """The tray picture for this platform."""
+    platform = platform or sys.platform
+    return resources.path("assets/brand") / (TEMPLATE_ICON if platform == "darwin" else ICON)
+
+
+def dock_icon_path():
+    return resources.path("assets/brand") / DOCK_ICON
+
+
+def template_image(icon, path=None, appkit=None):
+    """macOS: replace the bitmap pystray makes (the picture reduced to the bar's height in pixels,
+    blurry on Retina, black on a dark bar) with the glyph at full resolution, sized to the bar in
+    points and set as a template image. pystray redraws through `_assert_image` (show, a new
+    picture), so that is wrapped. True when installed; never raises."""
+    try:
+        appkit = appkit or __import__("AppKit")
+        path = str(path or icon_path("darwin"))
+        original = icon._assert_image
+
+        def assert_image():
+            original()
+            picture = appkit.NSImage.alloc().initWithContentsOfFile_(path)
+            if picture is None:
+                return
+            thickness = icon._status_bar.thickness()
+            picture.setSize_((thickness, thickness))
+            picture.setTemplate_(True)
+            icon._icon_image = picture
+            icon._status_item.button().setImage_(picture)
+
+        icon._assert_image = assert_image
+        return True
+    except Exception:
+        return False
 
 
 def unavailable(platform=None, environ=None, gui_session=None):
@@ -100,7 +139,7 @@ def brand_source_dock(appkit=None, foundation=None, frozen=None):
         pass
     try:
         appkit = appkit or __import__("AppKit")
-        picture = appkit.NSImage.alloc().initWithContentsOfFile_(str(icon_path()))
+        picture = appkit.NSImage.alloc().initWithContentsOfFile_(str(dock_icon_path()))
         if picture is None:
             return False
         appkit.NSApplication.sharedApplication().setApplicationIconImage_(picture)
@@ -152,6 +191,8 @@ class Tray:
         self.actions = actions
         # The Dock's reopen and quit (macOS, the real backend only; tests inject fake modules).
         self.dock = dock if dock is not None else (modules is None and sys.platform == "darwin")
+        # The menu-bar template image (macOS, the real backend only).
+        self.template = modules is None and sys.platform == "darwin"
         self._dock_delegate = None
         self.pystray, self.image = modules if modules is not None else load()
         self.call_on_main = call_on_main or _call_on_main
@@ -210,6 +251,8 @@ class Tray:
         with self.image.open(icon_path()) as picture:
             picture.load()
             self.icon = self.pystray.Icon("sidedoor", picture.copy(), TITLE, self.menu())
+        if self.template:
+            template_image(self.icon)
         if self.dock:
             try:
                 opening = self._do(lambda: self.actions.open_dashboard())

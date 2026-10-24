@@ -286,8 +286,49 @@ class UnavailableTest(unittest.TestCase):
         self.assertIsNone(tray.unavailable(platform="win32"))
 
     def test_the_icon_is_the_brand_icon(self):
-        self.assertTrue(tray.icon_path().is_file())
-        self.assertEqual(tray.icon_path().name, "yoursidedoor-icon-512.png")
+        self.assertEqual(tray.icon_path("darwin").name, "yoursidedoor-tray-template.png")
+        self.assertEqual(tray.icon_path("win32").name, "yoursidedoor-icon-win-32.png")
+        self.assertEqual(tray.dock_icon_path().name, "yoursidedoor-icon-1024.png")
+        from PIL import Image
+        for path, size in ((tray.icon_path("darwin"), 44), (tray.icon_path("win32"), 32), (tray.dock_icon_path(), 1024)):
+            with Image.open(path) as picture:
+                self.assertEqual(picture.size, (size, size))
+        with Image.open(tray.icon_path("darwin")) as glyph:  # a template image: black, the shape in alpha
+            rgba = glyph.convert("RGBA")
+            self.assertEqual([rgba.getchannel(band).getextrema() for band in "RGB"], [(0, 0)] * 3)
+            self.assertEqual(rgba.getchannel("A").getextrema(), (0, 255))
+
+    def test_the_menu_bar_glyph_is_a_template_image(self):
+        class Picture:
+            def __init__(self, path):
+                self.path, self.size, self.template = path, None, False
+            def setSize_(self, size):
+                self.size = size
+            def setTemplate_(self, flag):
+                self.template = flag
+
+        class AppKit:
+            class NSImage:
+                @staticmethod
+                def alloc():
+                    return AppKit.NSImage
+                @staticmethod
+                def initWithContentsOfFile_(path):
+                    return Picture(path)
+
+        button = mock.Mock()
+        icon = mock.Mock(_status_bar=mock.Mock(thickness=lambda: 24.0))
+        icon._status_item.button.return_value = button
+        pystray_drew = []
+        icon._assert_image = lambda: pystray_drew.append(True)
+        self.assertTrue(tray.template_image(icon, appkit=AppKit))
+        icon._assert_image()
+        self.assertEqual(pystray_drew, [True])
+        picture = button.setImage_.call_args[0][0]
+        self.assertEqual((picture.path, picture.size, picture.template),
+                         (str(tray.icon_path("darwin")), (24.0, 24.0), True))
+        self.assertIs(icon._icon_image, picture)
+        self.assertFalse(tray.template_image(object(), appkit=AppKit))  # not pystray's macOS icon: left alone
 
 
 if __name__ == "__main__":
@@ -336,6 +377,7 @@ class DockEventsTest(unittest.TestCase):
                       modules=(mock.MagicMock(), mock.MagicMock())).run()
         brand.assert_not_called()
         self.assertFalse(tray.Tray(mock.Mock(), modules=(mock.Mock(), mock.Mock())).dock)
+        self.assertFalse(tray.Tray(mock.Mock(), modules=(mock.Mock(), mock.Mock())).template)
 
 
 class SourceDockBrandingTest(unittest.TestCase):
@@ -352,7 +394,7 @@ class SourceDockBrandingTest(unittest.TestCase):
         info, foundation, appkit = self.fakes()
         self.assertTrue(tray.brand_source_dock(appkit, foundation, frozen=False))
         self.assertEqual(info["CFBundleName"], "Sidedoor")
-        appkit.NSImage.alloc.return_value.initWithContentsOfFile_.assert_called_once_with(str(tray.icon_path()))
+        appkit.NSImage.alloc.return_value.initWithContentsOfFile_.assert_called_once_with(str(tray.dock_icon_path()))
         appkit.NSApplication.sharedApplication.return_value.setApplicationIconImage_.assert_called_once_with(
             appkit.NSImage.alloc.return_value.initWithContentsOfFile_.return_value)
 

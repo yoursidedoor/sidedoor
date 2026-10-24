@@ -1,14 +1,13 @@
-{# An approved message a sending rule then refused (approvals_page.refused; owner D3). #}
+{# An approved message a sending rule then refused (approvals_page.refused; owner D3). Tight lines
+   (owner, 2026-10-24): who · works at company (the Networking rule) and the chips; why it was not sent; the text; Dismiss. #}
 {% set r = item %}{% set f = f or {} %}
 <article class="approval-card approval-refused" id="{{ r.dom }}">
-  <header class="approval-head"><span class="chip chip-warning">Couldn't send</span><span class="chip chip-info">{{ r.kind }}</span></header>
-  <h3 class="approval-who">{% if r.linkedin %}<a href="{{ r.linkedin }}" rel="noopener noreferrer" target="_blank">{{ r.recipient or "Someone" }}</a>{% else %}{{ r.recipient or "Someone" }}{% endif %}</h3>
-  <p class="muted">{{ r.company or "" }}{% if r.approved %} · approved {{ v.when(r.approved) }}{% endif %}</p>
-  <p><strong>Why it was not sent:</strong></p>
-  <ul>{% for line in r.reasons %}<li>{{ line }}</li>{% endfor %}</ul>
+  <p class="approval-m-head"><strong class="approval-who">{% if r.linkedin %}<a href="{{ r.linkedin }}" rel="noopener noreferrer" target="_blank">{{ r.recipient or "Someone" }}</a>{% else %}{{ r.recipient or "Someone" }}{% endif %}</strong>{% if r.role %} <span class="muted">· {{ r.role }}</span>{% endif %}
+    <span class="chip chip-warning">Couldn't send</span> <span class="chip chip-info">{{ r.kind }}</span></p>
+  <p class="approval-judge"><span class="muted">Why it was not sent:</span> {{ r.reasons|join(" ") }}{% if r.approved %} <span class="muted">· approved {{ v.when(r.approved) }}</span>{% endif %}</p>
   <blockquote class="approval-text">{{ r.message }}</blockquote>
   {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
-  <form method="post" action="/approvals/refused/dismiss{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/refused/dismiss{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
+  <form class="approval-actions" method="post" action="/approvals/refused/dismiss{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/refused/dismiss{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
     <input type="hidden" name="action_id" value="{{ r.action_id }}"><input type="hidden" name="payload_hash" value="{{ r.payload_hash }}">
     <button class="button button-quiet" type="submit">Dismiss</button>
   </form>

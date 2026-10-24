@@ -124,7 +124,10 @@ class UpdateBannerPageTest(unittest.TestCase):
         client = self.client()
         page = client.get("/applications").text
         self.assertIn("Sidedoor 999.0.0 is available.", page)
-        self.assertIn("<summary>What's new</summary>", page)
+        self.assertIn('<label class="banner-link" for="update-notes-toggle">What\'s new</label>', page)
+        self.assertIn('<p class="banner-notes-panel">', page)  # below the row, full width
+        self.assertIn('class="button" href="https://yoursidedoor.com/download"', page)  # Windows: Download stays the button
+        self.assertEqual(page.count(">Dismiss</button>"), 1)
         self.assertIn("&lt;b&gt;bold&lt;/b&gt;", page)  # notes are escaped
         self.assertGreater(page.index("Sidedoor 999.0.0"), page.index("Setup is not finished"))
         response = client.post("/update/dismiss", data={"version": "999.0.0", "next": "/applications"},

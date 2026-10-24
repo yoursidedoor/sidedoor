@@ -19,15 +19,16 @@
 {% endmacro %}
 {% macro more(key, count) %}<p class="muted">And {{ count }} more. <a href="{{ link(anchor=key, section=key, page=2) }}">See them</a></p>{% endmacro %}
 {% macro failure(f, v) %}
-<li class="card fail-item{% if f.you %} fail-you{% endif %}">
-  <p class="fail-text">{{ f.text }} <span class="fail-todo{% if f.you %} fail-todo-you{% endif %}">{{ f.todo }}</span></p>
+<li class="card fail-item{% if f.calm %} fail-calm fail-calm-{{ f.calm }}{% elif f.you %} fail-you{% endif %}">
+  <p class="fail-text">{{ f.text }} <span class="fail-todo{% if f.you and not f.calm %} fail-todo-you{% endif %}">{{ f.todo }}</span></p>
   <p class="muted fail-meta">
     {% if f.at %}{{ v.when(f.at) }}{% endif %}{% if f.count > 1 %}{% if f.at %} · {% endif %}{{ f.count }} times in the last {{ v.recent_days }} days{% endif %}
   </p>
   {% if f.reasons %}
   <ul class="fail-reasons">
     {% for r in f.reasons %}
-    <li class="fail-reason">{% if r.where %}<strong>{{ r.where }}:</strong> {% endif %}{% if r.words %}{{ r.words }} {% endif %}<code>{{ r.code }}</code>{% if r.error %} <span class="fail-error">{{ r.error }}</span>{% endif %}
+    {#- Owner 2026-10-24: plain words first; the code stays, small and grey, for support. -#}
+    <li class="fail-reason">{% if r.where %}<strong>{{ r.where }}:</strong> {% endif %}{% if r.words %}{{ r.words }} {% endif %}{% if r.error %}<span class="fail-error">{{ r.error }}</span> {% endif %}<code class="fail-code">{{ r.code }}</code>
       <span class="muted">({% if r.count > 1 %}{{ r.count }} times, last {% endif %}{% if r.at %}{{ v.when(r.at) }}{% else %}time not recorded{% endif %})</span>
       {% if r.log_href %}<a href="{{ r.log_href }}">See its log</a>{% endif %}</li>
     {% endfor %}
@@ -49,10 +50,16 @@
 
 <section id="needs-you" class="fail-section" aria-labelledby="needs-you-title">
   <h2 id="needs-you-title">Needs you</h2>
+  {% if v.needs_you or v.needs_calm %}
   {% if v.needs_you %}
   <ul class="fail-list">{% for f in v.needs_you %}{{ failure(f, v) }}{% endfor %}</ul>
   {% if v.needs_more %}{{ more("needs-you", v.needs_more) }}{% endif %}
   {% if v.needs_paging %}{{ paging("needs-you", v.needs_paging, "Needs you") }}{% endif %}
+  {% endif %}
+  {% if v.needs_calm %}
+  <ul class="fail-list fail-calm-list">{% for f in v.needs_calm %}{{ failure(f, v) }}{% endfor %}</ul>
+  {% if v.needs_calm_more %}<p class="muted">And {{ v.needs_calm_more }} more. <a href="/approvals#questions">See them on Approvals</a></p>{% endif %}
+  {% endif %}
   {% else %}
   <p class="muted">Nothing needs you right now.</p>
   {% endif %}
@@ -68,7 +75,14 @@
   <h2 id="{{ s.key }}-title">{{ s.title }}</h2>
   {% if s.unavailable %}<p class="muted">Some of these records are not available right now.</p>{% endif %}
   {% if s.entries %}
-  <ul class="fail-list">{% for f in s.entries %}{{ failure(f, v) }}{% endfor %}</ul>
+  {% if s.recent %}<ul class="fail-list">{% for f in s.recent %}{{ failure(f, v) }}{% endfor %}</ul>
+  {% else %}<p class="muted">Nothing new in the last day.</p>{% endif %}
+  {% if s.earlier %}
+  <details class="fail-earlier">
+    <summary>Earlier <span class="muted">({{ s.earlier_total }}, more than a day ago)</span></summary>
+    <ul class="fail-list">{% for f in s.earlier %}{{ failure(f, v) }}{% endfor %}</ul>
+  </details>
+  {% endif %}
   {% if s.more %}{{ more(s.key, s.more) }}{% endif %}
   {% if s.key == "applications" and (s.more or s.paging) %}<p class="muted"><a href="/applications">See Applications</a></p>{% endif %}
   {% if s.paging %}{{ paging(s.key, s.paging, s.title) }}{% endif %}
@@ -125,7 +139,7 @@
 <section id="logs" class="fail-section" aria-labelledby="logs-title">
   {% set l = logs %}
   <h2 id="logs-title">Logs</h2>
-  <p class="muted">The last {{ l.tail_bytes // 1024 }} KB of each log file, newest at the bottom. Older lines load {{ l.tail_bytes // 1024 }} KB at a time; search and day apply to the lines shown.</p>
+  <p class="muted">Showing the most recent lines of each log, newest at the bottom. Use Older lines to go further back.</p>
   <form class="log-filters" method="get" action="/failures#logs">
     <label>Part
       <select name="component">
@@ -150,13 +164,14 @@
   <p><a class="button button-quiet" href="/failures/logs.txt" download>Download for a support issue</a></p>
   <h3 id="runs-title">Runs</h3>
   {% if runs %}
-  <ul class="fail-runs">{% for r in runs %}<li><a href="{{ r.href }}">{{ r.label }}</a> <span class="muted">{{ r.component_label }}, {{ v.when(r.at) if v else r.at }}</span></li>{% endfor %}</ul>
+  <ul class="fail-runs">{% for r in runs %}<li><a href="{{ r.href }}">{{ r.label }}</a> <span class="muted">· {{ v.when(r.at) if v else r.at }}</span></li>{% endfor %}</ul>
   {% for part in runs_parts %}
   {% if part.more %}<p class="muted">And {{ part.more }} more {{ part.label }} runs. <a href="{{ link(anchor="runs-title", runs_part=part.component, runs_page=2) }}">See them</a></p>
   {% else %}{{ pager(part.paging, "runs-title", part.label + " runs", "runs_page", {"runs_part": part.component}) }}{% endif %}
   {% endfor %}
   {% else %}<p class="muted">No run files are kept{% if l.day or l.component != "all" %} for this choice{% endif %}.</p>{% endif %}
-  {% for s in l.streams %}
+  {% for line in l.quiet %}<p class="muted log-quiet">{{ line }}</p>{% endfor %}
+  {% for s in l.boxes %}
   <details class="card log-stream" id="{{ s.id }}"{% if s.before is not none or (s.lines and (l.query or s.name.endswith("stderr.log"))) %} open{% endif %}>
     <summary>{{ s.label }} <span class="muted">({% if s.state == "missing" %}no log yet{% elif s.state == "unreadable" %}can't be read{% elif s.lines %}{% if s.before is not none %}an older part, {% endif %}{{ s.lines | length }} line{{ "s" if s.lines | length != 1 }}{% elif l.query or l.day %}no matches{% else %}empty{% endif %})</span></summary>
     {% if s.before is not none %}<p class="log-older"><a href="{{ s.newest_href }}">Back to the newest lines</a></p>{% endif %}

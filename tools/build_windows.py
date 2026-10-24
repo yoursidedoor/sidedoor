@@ -40,7 +40,9 @@ version in the names, as on macOS):
     pystray\\, fpdf\\              the LGPL-3.0 libraries' own .py sources, NOT compiled (owner TR1 a,
                                  AP1 a: separate and replaceable; imported from there at run time)
     licenses\\                    their licence texts and notices, THIRD-PARTY-NOTICES.txt
-The icon is assets\\brand\\yoursidedoor-icon-512.png made into a multi-size .ico (Pillow).
+The icon is a multi-size .ico (Pillow) from assets\\brand\\yoursidedoor-icon-win-256.png and, at 16, 20, 24
+and 32 px, the simplified yoursidedoor-icon-win-<size>.png (tools/make_brand.py). Windows icons get no
+macOS shadow margin: the tile fills 984 of 1024.
 
 Signing is opt-in: without --sign the build signs nothing and never runs signtool. Releases are signed
 with `--sign azure` (owner, 2026-10-23: Azure Artifact Signing, account sidedoorsigning, certificate
@@ -97,7 +99,8 @@ import version  # noqa: E402
 APP = "Sidedoor"
 EXE = "sidedoor.exe"
 ENTRY = build_macos.ENTRY
-ICON = build_macos.ICON
+ICON = build_macos.BRAND / "yoursidedoor-icon-win-256.png"   # the Windows master
+SMALL_ICONS = {size: build_macos.BRAND / ("yoursidedoor-icon-win-%d.png" % size) for size in (16, 20, 24, 32)}
 NUITKA_VERSION = build_macos.NUITKA_VERSION
 UNCOMPILED = build_macos.UNCOMPILED
 # PE machine types (winnt.h IMAGE_FILE_MACHINE_*).
@@ -194,12 +197,19 @@ def check_arch(folder, arch):
     return found
 
 
-def make_ico(png, folder):
-    """A multi-size .ico from the brand PNG (Pillow, a pystray dependency on Windows)."""
+def make_ico(png, folder, small=None):
+    """A multi-size .ico (Pillow, a pystray dependency on Windows): every size in ICO_SIZES reduced
+    from the 256 master `png`, except those drawn as simplified art in `small` ({pixels: png})."""
     from PIL import Image
+    small = SMALL_ICONS if small is None else small
     ico = Path(folder) / "sidedoor.ico"
+    extra = []
+    for size in sorted(small):
+        with Image.open(small[size]) as picture:
+            extra.append(picture.convert("RGBA"))
     with Image.open(png) as image:
-        image.convert("RGBA").save(ico, format="ICO", sizes=[(size, size) for size in ICO_SIZES])
+        image.convert("RGBA").save(ico, format="ICO", sizes=[(size, size) for size in ICO_SIZES],
+                                   append_images=extra)
     return ico
 
 

@@ -155,10 +155,15 @@ class BannerTest(Base):
         mac_update._set(state="working", version="2.0.0", message="Downloading and checking Sidedoor 2.0.0…")
         banner = self.banner()
         self.assertNotIn("forms", banner)
-        self.assertEqual(banner["action_href"], "https://yoursidedoor.com/download")  # never a dead end
-        mac_update._set(state="failed", version="2.0.0", message="Sidedoor 2.0.0 didn't install: X.")
+        self.assertEqual((banner["update_phase"], banner["text"]), ("working", "Updating to 2.0.0…"))
+        mac_update._set(state="replacing", version="2.0.0", message="Sidedoor is updating to 2.0.0 and opens again by itself.")
         banner = self.banner()
-        self.assertEqual((banner["text"], banner["forms"][0]["label"]), ("Sidedoor 2.0.0 didn't install: X.", "Update now"))
+        self.assertNotIn("forms", banner)
+        self.assertEqual((banner["update_phase"], banner["tone"], banner["poll"]), ("restarting", "success", True))
+        mac_update._set(state="failed", version="2.0.0", message="Sidedoor 2.0.0 didn't install. X.")
+        banner = self.banner()
+        self.assertEqual((banner["text"], banner["forms"][0]["label"]), ("Sidedoor 2.0.0 didn't install. X.", "Try again"))
+        self.assertEqual(banner["download_href"], "https://yoursidedoor.com/download")  # never a dead end
 
     def test_helper_notice_stays_until_dismissed(self):
         (self.home / mac_update.NOTICE_FILE).write_text("Sidedoor 2.0.0 didn't install: why.\n")
@@ -172,8 +177,8 @@ class BannerTest(Base):
         self.store()
         (self.home / mac_update.NOTICE_FILE).write_text("Sidedoor 2.0.0 didn't install: why.\n")
         banner = self.banner()
-        self.assertTrue(banner["text"].startswith("Sidedoor 2.0.0 didn't install: why. "))
-        self.assertEqual((banner["dismiss"], banner["dismiss_notice"]), ("2.0.0", True))  # two separate buttons
+        self.assertEqual((banner["lead"], banner["text"]), ("Sidedoor 2.0.0 didn't install: why.", "Sidedoor 2.0.0 is available."))
+        self.assertEqual((banner["dismiss"], banner["dismiss_notice"]), ("2.0.0", True))  # one Dismiss sends both
         update_check.dismiss_notice(self.home)
         banner = self.banner()
         self.assertEqual(banner["text"], "Sidedoor 2.0.0 is available.")
@@ -187,7 +192,7 @@ class BannerTest(Base):
                                or {"state": "failed", "message": "new why"}):
             self.assertTrue(mac_update.start_install("2.0.0", self.home))
             self.assertFalse((self.home / mac_update.NOTICE_FILE).exists())
-            self.assertEqual(self.banner()["text"], "Downloading and checking Sidedoor 2.0.0…")
+            self.assertEqual(self.banner()["text"], "Updating to 2.0.0…")
             for _ in range(100):
                 if mac_update.status().get("state") == "failed":
                     break
@@ -310,7 +315,8 @@ class InstallTest(Base):
         result = self.install(runner)
         self.assertEqual(result["state"], "failed")
         self.assertIn("notarized", result["message"])
-        self.assertIn("Use Download", result["message"])
+        self.assertIn("didn't install. MacOS", result["message"].replace("macOS", "MacOS"))
+        self.assertNotIn("Use Download", result["message"])
         self.assertEqual((runner.used("osascript"), self.spawned, self.quits), ([], [], []))
 
     def test_wrong_version_inside_the_zip_is_refused(self):
@@ -572,7 +578,7 @@ class DashboardTest(Base):
         return client
 
     def test_overview_shows_the_installed_version(self):
-        self.assertIn("Sidedoor 1.1.0</p>", self.client().get("/").text)
+        self.assertIn('title="Sidedoor 1.1.0">v1.1.0</span>', self.client().get("/").text)   # the tag beside the title
 
     def test_banner_renders_update_now_and_download(self):
         body = {"latest": "2.0.0", "download_url": "https://yoursidedoor.com/download", "notes": "",
@@ -586,6 +592,9 @@ class DashboardTest(Base):
             self.assertIn('action="/update/install"', page)
             self.assertIn(">Update now</button>", page)
             self.assertIn('href="https://yoursidedoor.com/download" target="_blank"', page)
+            self.assertIn(">or download it</a>", page)  # Update now is the only button (owner, 2026-10-24)
+            self.assertEqual(page.count('class="button" type="submit">'), 2)  # Update now + the page's Search
+            self.assertIn('href="#update-banner">v1.1.0 · 2.0.0 available</a>', client.get("/").text)
             response = client.post("/update/install", data={"version": "2.0.0", "next": "/applications"},
                                    headers={"origin": "http://127.0.0.1:54321"})
         self.assertEqual((response.status_code, response.headers["location"]), (303, "/applications"))
@@ -602,11 +611,19 @@ class DashboardTest(Base):
             client = self.client()
             page = client.get("/applications").text
             self.assertIn('name="notice" value="1"', page)
-            self.assertIn(">Hide the message</button>", page)
+            self.assertEqual(page.count(">Dismiss</button>"), 1)  # one hide control (owner, 2026-10-24)
+            self.assertNotIn("Hide the message", page)
             client.post("/update/dismiss", data={"notice": "1", "next": "/applications"}, headers=origin)
             page = client.get("/applications").text
-        self.assertNotIn("didn't install", page)
-        self.assertIn(">Update now</button>", page)  # the offer stays
+            self.assertNotIn("didn't install", page)
+            self.assertIn(">Update now</button>", page)  # a notice-only post keeps the offer
+            (self.home / mac_update.NOTICE_FILE).write_text("Sidedoor 2.0.0 didn't install: why.\n")
+            client.post("/update/dismiss", data={"version": "2.0.0", "notice": "1", "next": "/applications"}, headers=origin)
+            page = client.get("/applications").text
+            overview = client.get("/").text
+        self.assertNotIn("didn't install", page)  # the merged Dismiss does both jobs
+        self.assertNotIn('id="update-banner"', page)
+        self.assertIn('href="https://yoursidedoor.com/download" target="_blank" rel="noopener noreferrer">v1.1.0 · 2.0.0 available</a>', overview)
 
     def test_banner_polls_while_updating_and_stops_at_the_end(self):
         body = {"latest": "2.0.0", "download_url": "https://yoursidedoor.com/download", "notes": "",
@@ -625,7 +642,8 @@ class DashboardTest(Base):
             fragment = client.get("/update/banner", params={"next": "/applications"}).text
         self.assertNotIn("hx-trigger", fragment)  # the end state: polling stops
         self.assertIn("didn&#39;t install: &lt;b&gt;x&lt;/b&gt;.", fragment)  # escaped as before
-        self.assertIn(">Update now</button>", fragment)
+        self.assertIn(">Try again</button>", fragment)
+        self.assertIn(">or download it</a>", fragment)
         self.assertIn('name="next" value="/applications"', fragment)
         self.assertNotIn('class="banners"', fragment)  # the one banner only
         with mock.patch.object(mac_update, "can_install", return_value=True), \

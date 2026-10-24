@@ -36,44 +36,44 @@ class Desktop:
 
 
 class Keeper(unittest.TestCase):
-    def keeper(self, desktop, busy=False, suspended=None):
-        self.time, self.log = [0.0], []
-        flags = {"busy": busy, "suspended": False} if suspended is None else suspended
-        self.flags = flags
+    """Owner, 2026-10-24: no guessing; back to exactly the app the user was in, every time; windows
+    minimized as soon as they show."""
+
+    def keeper(self, desktop, shown=False):
+        self.time, self.log, self.hides = [0.0], [], []
+        self.flags = {"suspended": False, "shown": shown}
         return browser_guard.FocusKeeper(lambda: CHROME, desktop.front, desktop.activate,
-                                         busy=lambda now: flags["busy"], suspended=lambda: flags["suspended"],
-                                         log=lambda **entry: self.log.append(entry), clock=lambda: self.time[0])
+                                         suspended=lambda: self.flags["suspended"],
+                                         log=lambda **entry: self.log.append(entry), clock=lambda: self.time[0],
+                                         chrome_shown=lambda pid: self.flags["shown"],
+                                         hide=lambda: self.hides.append(self.time[0]), alive=lambda pid: True)
 
     def tick(self, keeper, seconds=browser_guard.FOCUS_POLL_SECONDS):
         self.time[0] += seconds
         keeper.poll()
 
-    def test_chrome_activating_itself_is_undone_within_one_poll(self):
-        desktop = Desktop(MAIL)
-        keeper = self.keeper(desktop, busy=True)
-        self.tick(keeper)                    # the user is in Mail
-        desktop.now = CHROME                 # a new page activates Sidedoor's Chrome
-        self.tick(keeper)
-        self.assertEqual(desktop.activated, [MAIL])
-        self.assertEqual(desktop.now, MAIL)
-        self.assertEqual([e["decision"] for e in self.log], ["FOCUS_RESTORED"])
-        self.assertEqual(self.log[0]["to_pid"], MAIL)
-        # Repeated activations during calls (a page created or selected every second) are undone each
-        # time; the log is rate-limited.
-        for _ in range(5):
-            desktop.now = CHROME
-            self.tick(keeper, 1.0)
-        self.assertEqual(desktop.activated, [MAIL] * 6)
-        self.assertFalse(keeper.watching)
-        self.assertEqual([e["decision"] for e in self.log], ["FOCUS_RESTORED"])
-        self.time[0] += browser_guard.FOCUS_LOG_SECONDS - 5.0
-        desktop.now = CHROME
-        keeper.poll()
-        self.assertEqual(self.log[-1]["count"], 6)   # the five unlogged ones plus this one
+    def test_the_poll_is_well_under_half_a_second(self):
+        self.assertLessEqual(browser_guard.FOCUS_POLL_SECONDS, 0.05)
+        for name in ("FOCUS_STAY_SECONDS", "FOCUS_RECLICK_SECONDS", "FOCUS_MAX_CORRECTIONS"):
+            self.assertFalse(hasattr(browser_guard, name), name)   # no "user is watching" guesses
 
-    def test_the_last_app_the_user_used_is_the_one_restored(self):
+    def test_every_activation_is_undone_at_once_and_each_one_is_recorded(self):
         desktop = Desktop(MAIL)
-        keeper = self.keeper(desktop, busy=True)
+        keeper = self.keeper(desktop, shown=True)
+        self.tick(keeper)                    # the user is in Mail
+        for _ in range(10):                  # Chrome comes forward again and again, the user clicking it too
+            desktop.now = CHROME
+            self.tick(keeper)
+        self.assertEqual(desktop.activated, [MAIL] * 10)
+        self.assertEqual(len(self.hides), 11)          # minimized each time (and once while the user was in Mail)
+        self.assertEqual([e["decision"] for e in self.log], ["FOCUS_RESTORED"] * 10)
+        self.assertEqual(self.log[0]["to_pid"], MAIL)
+        self.assertEqual(self.log[0]["seen_ms"], 50.0)   # Mail was seen in front one poll before
+        self.assertIn("correct_ms", self.log[0])
+
+    def test_the_app_in_front_just_before_chrome_is_the_one_restored(self):
+        desktop = Desktop(MAIL)
+        keeper = self.keeper(desktop)
         self.tick(keeper)
         desktop.now = NOTES
         self.tick(keeper)
@@ -81,81 +81,51 @@ class Keeper(unittest.TestCase):
         self.tick(keeper)
         self.assertEqual(desktop.activated, [NOTES])
 
-    def test_a_user_who_stays_on_chrome_is_not_fought(self):
+    def test_a_switch_back_that_does_not_take_is_retried_every_poll_and_logged_sparingly(self):
         desktop = Desktop(MAIL)
-        desktop.activate = lambda pid: desktop.activated.append(pid) and False   # the switch back does not take
-        keeper = self.keeper(desktop, busy=True)
+        desktop.activate = lambda pid: desktop.activated.append(pid) and False
+        keeper = self.keeper(desktop)
         self.tick(keeper)
         desktop.now = CHROME
-        self.tick(keeper)
-        self.assertEqual(desktop.activated, [MAIL])
-        for _ in range(int(browser_guard.FOCUS_STAY_SECONDS / browser_guard.FOCUS_POLL_SECONDS) + 1):
+        for _ in range(40):                  # two seconds
             self.tick(keeper)
-        self.assertTrue(keeper.watching)
-        self.assertEqual(desktop.activated, [MAIL])   # one correction, never a fight
-        self.assertIn("FOCUS_USER_WATCHING", [e["decision"] for e in self.log])
-        for _ in range(20):
-            self.tick(keeper)
-        self.assertEqual(desktop.activated, [MAIL])
-        # The user switches away: the keeper resumes.
-        desktop.now = NOTES
-        self.tick(keeper)
-        self.assertFalse(keeper.watching)
-        self.assertEqual(self.log[-1]["decision"], "FOCUS_KEEPER_RESUMED")
-        desktop.now = CHROME
-        self.tick(keeper)
-        self.assertEqual(desktop.activated, [MAIL, NOTES])
+        self.assertEqual(desktop.activated, [MAIL] * 40)   # never gives up
+        failed = [e for e in self.log if not e["restored"]]
+        self.assertLessEqual(len(failed), 3)
+        self.assertEqual(failed[0]["count"], 1)
 
-    def test_corrections_that_do_not_hold_stop_instead_of_fighting(self):
+    def test_a_window_that_shows_while_the_user_is_elsewhere_is_minimized_at_once(self):
         desktop = Desktop(MAIL)
-        desktop.activate = lambda pid: desktop.activated.append(pid) or True   # accepted, yet Chrome stays
-        keeper = self.keeper(desktop, busy=True)
+        keeper = self.keeper(desktop)
         self.tick(keeper)
-        desktop.now = CHROME
-        for _ in range(10):
-            self.tick(keeper)
-        self.assertEqual(len(desktop.activated), browser_guard.FOCUS_MAX_CORRECTIONS)
-        self.assertTrue(keeper.watching)
+        self.assertEqual(self.hides, [])
+        self.flags["shown"] = True           # Chrome un-minimized a window without coming forward
+        self.tick(keeper)
+        self.assertEqual(len(self.hides), 1)
+        self.assertEqual(desktop.activated, [])
 
-    def test_a_user_clicking_chrome_again_after_a_correction_keeps_it(self):
+    def test_no_correction_during_the_captcha_wait_and_one_at_once_after_it(self):
         desktop = Desktop(MAIL)
-        keeper = self.keeper(desktop, busy=False)
+        keeper = self.keeper(desktop, shown=True)
         self.tick(keeper)
-        desktop.now = CHROME              # the user clicks Chrome in the Dock
-        self.tick(keeper)
-        self.assertEqual(desktop.activated, [MAIL])
-        self.tick(keeper, 1.0)
-        desktop.now = CHROME              # and clicks it again: no call running, so it is the user
-        self.tick(keeper)
-        self.assertTrue(keeper.watching)
-        self.assertEqual(desktop.activated, [MAIL])
-        # Chrome's own repeated activation while a call runs is not taken for the user.
-        desktop2 = Desktop(MAIL)
-        keeper2 = self.keeper(desktop2, busy=True)
-        self.tick(keeper2)
-        for _ in range(3):
-            desktop2.now = CHROME
-            self.tick(keeper2)
-        self.assertFalse(keeper2.watching)
-        self.assertEqual(desktop2.activated, [MAIL] * 3)
-
-    def test_no_correction_during_the_captcha_wait_and_one_after_it(self):
-        desktop = Desktop(MAIL)
-        keeper = self.keeper(desktop, busy=False)
-        self.tick(keeper)
+        self.hides.clear()
         self.flags["suspended"] = True
         desktop.now = CHROME              # the CAPTCHA wait brings the window in front
-        for _ in range(100):              # 20 s with the owner on the window
+        for _ in range(100):
             self.tick(keeper)
-        self.assertEqual(desktop.activated, [])
-        self.assertFalse(keeper.watching)
-        self.flags["suspended"] = False   # the wait ended
+        desktop.now = NOTES               # the owner looks at Telegram meanwhile, then ticks
         self.tick(keeper)
-        self.assertEqual(desktop.activated, [MAIL])
+        desktop.now = CHROME
+        self.tick(keeper)
+        self.assertEqual(desktop.activated, [])
+        self.assertEqual(self.hides, [])  # never minimized during the wait
+        self.flags["suspended"] = False   # the wait ended
+        keeper.poll()
+        self.assertEqual(desktop.activated, [NOTES])
 
     def test_the_everyday_chrome_is_never_corrected(self):
         desktop = Desktop(MAIL)
-        keeper = self.keeper(desktop, busy=True)
+        keeper = self.keeper(desktop)
         self.tick(keeper)
         desktop.now = EVERYDAY_CHROME     # the user's own Chrome: a different process
         for _ in range(20):
@@ -166,17 +136,46 @@ class Keeper(unittest.TestCase):
         self.tick(keeper)
         self.assertEqual(desktop.activated, [EVERYDAY_CHROME])
 
-    def test_nothing_is_done_without_an_app_to_return_to_or_a_known_chrome(self):
+    def test_nothing_is_activated_without_an_app_to_return_to_or_a_known_chrome(self):
         desktop = Desktop(CHROME)
-        keeper = self.keeper(desktop, busy=True)
+        keeper = self.keeper(desktop)
         self.tick(keeper)
         self.assertEqual(desktop.activated, [])
+        self.assertEqual(self.hides, [])       # every window already minimized: no request
         keeper.chrome_pid = lambda: None   # Chrome not started yet, or the profile's lock names another program
         desktop.now = MAIL
         self.tick(keeper)
         desktop.now = CHROME
         self.tick(keeper)
         self.assertEqual(desktop.activated, [])
+
+    def test_a_quit_app_falls_back_to_the_one_before_it_that_still_runs(self):
+        desktop = Desktop(MAIL)
+        keeper = self.keeper(desktop)
+        running = {MAIL, NOTES}
+        keeper.alive = lambda pid: pid in running
+        self.tick(keeper)
+        desktop.now = NOTES
+        self.tick(keeper)
+        running.discard(NOTES)            # the user quit Notes; Chrome comes forward
+        desktop.now = CHROME
+        self.tick(keeper)
+        self.assertEqual(desktop.activated, [MAIL])
+        self.assertIsNone(self.log[-1]["seen_ms"])
+        running.clear()                   # nothing the user was in still runs: no activation, no guess
+        desktop.now = CHROME
+        self.tick(keeper)
+        self.assertEqual(desktop.activated, [MAIL])
+
+    def test_no_minimize_request_when_every_window_is_already_minimized(self):
+        desktop = Desktop(CHROME)
+        keeper = self.keeper(desktop, shown=False)
+        for _ in range(20):               # Chrome in front, nothing to return to, windows minimized
+            self.tick(keeper)
+        self.assertEqual(self.hides, [])
+        self.flags["shown"] = True
+        self.tick(keeper)
+        self.assertEqual(len(self.hides), 1)
 
     def test_a_failing_api_never_stops_the_guard(self):
         keeper = self.keeper(Desktop())
@@ -249,6 +248,7 @@ class GuardMinimizes(unittest.TestCase):
                                         stdout=io.StringIO(), offscreen=True, focus_keeper=False, **options)
         proxy.child_call = windows
         proxy.to_child = lambda message: None
+        proxy.initialized = True
         proxy.audit_path = directory / "guard.jsonl"
         return proxy
 
@@ -270,24 +270,85 @@ class GuardMinimizes(unittest.TestCase):
         self.assertEqual(windows.kinds(), ["min"])
         self.assertEqual([e["decision"] for e in self.audit(proxy)], ["WINDOW_MINIMIZED", "FORWARDED"])
 
+    def test_a_minimize_that_changes_nothing_is_logged_at_most_once_a_second(self):
+        now = [10.0]
+
+        def already(method, params):
+            return answer([{"windowId": 1, "state": "minimized", "was": "minimized"}])
+        proxy = self.proxy(already, clock=lambda: now[0])
+        for _ in range(8):
+            proxy.place_window()
+            now[0] += 0.25
+        entries = [e for e in self.audit(proxy) if e["decision"] == "WINDOW_MINIMIZED"]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[1]["unchanged"], 4)
+
+    def test_a_headed_launch_records_the_users_app_and_starts_the_keeper_before_chrome_starts(self):
+        # Real Mac, 2026-10-24: `open -g` Chrome came to the front ~0.05-0.4 s after launch and the keeper,
+        # started later, had nothing to return to.
+        order = []
+
+        class Keeper:
+            def record_front(self_inner):
+                order.append("record")
+
+            def poll(self_inner):
+                if "poll" not in order:
+                    order.append("poll")
+        keeper = Keeper()
+
+        def launch(path):
+            order.append("launch")
+            return "http://127.0.0.1:53111"
+        directory = scratch(self)
+        with mock.patch.object(browser_guard.subprocess, "Popen"), \
+                mock.patch.object(browser_guard, "FOCUS_POLL_SECONDS", 0.001):
+            proxy = browser_guard.Proxy("submit", ["node"], audit=directory / "guard.jsonl", stdin=io.StringIO(""),
+                                        stdout=io.StringIO(), offscreen=True, focus_keeper=keeper,
+                                        background_chrome=str(directory), launch_background=launch)
+        try:
+            self.assertEqual(order[:2], ["record", "launch"])
+            self.assertIsNotNone(proxy.keeper_thread)              # running before Chrome was started
+            self.assertIs(proxy.start_focus_keeper(), proxy.keeper_thread)   # run() starts no second one
+        finally:
+            proxy.stopped.set()
+            proxy.keeper_thread.join(2)
+
+    def test_the_keepers_minimize_waits_for_the_browser_server(self):
+        windows = Windows()
+        proxy = self.proxy(windows)
+        proxy.initialized = False
+        with mock.patch.object(browser_guard.threading, "Thread") as thread:
+            proxy.hide_now()
+        thread.assert_not_called()
+        self.assertEqual(windows.codes, [])
+
     def test_hide_code_leaves_minimized_windows_alone_and_never_brings_chrome_forward(self):
         code = browser_guard.hide_code(-32000, -32000, 1280, 900)
         self.assertIn("if (bounds.windowState === 'minimized') { placed.push", code)
         self.assertNotIn("bringToFront", code)
         self.assertNotIn("activateTarget", code)
 
-    def test_a_user_watching_gets_the_window_on_screen_once_and_never_minimized(self):
-        windows = Windows()
-        keeper = mock.Mock(watching=True)
-        proxy = self.proxy(windows)
-        proxy.focus_keeper = keeper
-        self.call(proxy, 1)
-        self.call(proxy, 2)
-        self.assertEqual(windows.kinds(), ["on"])            # on-screen, not in front: the user chose it
-        self.assertIn("WINDOW_SHOWN_FOR_USER", [e["decision"] for e in self.audit(proxy)])
-        keeper.watching = False                             # the user switched away
-        self.call(proxy, 3)
-        self.assertEqual(windows.kinds(), ["on", "min"])
+    def test_the_keepers_minimize_runs_on_its_own_thread_once_at_a_time_and_never_during_the_wait(self):
+        windows, now = Windows(), [10.0]
+        proxy = self.proxy(windows, clock=lambda: now[0])
+        threads = []
+        with mock.patch.object(browser_guard.threading, "Thread",
+                               side_effect=lambda target, daemon: threads.append(target) or mock.Mock()):
+            proxy.hide_now()
+            proxy.hide_now()                                  # one already running
+            self.assertEqual(len(threads), 1)
+            threads[0]()
+            self.assertEqual(windows.kinds(), ["min"])
+            proxy.hide_now()                                  # within HIDE_RETRY_SECONDS: not again
+            now[0] += browser_guard.HIDE_RETRY_SECONDS
+            proxy.hide_now()
+            self.assertEqual(len(threads), 2)
+            proxy.showing = True
+            now[0] += 1.0
+            proxy.hide_now()
+            self.assertEqual(len(threads), 2)
+        self.assertIn("ms", self.audit(proxy)[0])
 
     def test_the_captcha_wait_shows_the_window_and_the_keeper_is_suspended(self):
         windows = Windows()
@@ -299,8 +360,8 @@ class GuardMinimizes(unittest.TestCase):
                 return "RECHECK_NOW"
         proxy = self.proxy(windows, human_check_wait=Wait())
         desktop = Desktop(MAIL)
-        keeper = browser_guard.FocusKeeper(lambda: CHROME, desktop.front, desktop.activate, busy=proxy.busy,
-                                           suspended=lambda: proxy.showing)
+        keeper = browser_guard.FocusKeeper(lambda: CHROME, desktop.front, desktop.activate,
+                                           suspended=lambda: proxy.showing, alive=lambda pid: True)
         proxy.focus_keeper = keeper
         threads = []
         with mock.patch.object(browser_guard.threading, "Thread",
@@ -313,6 +374,7 @@ class GuardMinimizes(unittest.TestCase):
         threads[0]()
         self.assertEqual(seen, [(["front"], True)])        # un-minimized on-screen and in front for the tick
         self.assertEqual(windows.kinds(), ["front", "min"])   # minimized again after the wait
+        self.assertEqual(desktop.activated, [MAIL])        # and the front given back at once
 
     def test_the_session_chrome_is_found_by_its_profile_never_the_everyday_one(self):
         profile = scratch(self) / "profile"
@@ -346,19 +408,6 @@ class GuardMinimizes(unittest.TestCase):
         proxy.stopped.set()
         thread.join(2)
         self.assertFalse(thread.is_alive())
-
-    def test_busy_while_a_call_runs_and_just_after(self):
-        now = [10.0]
-        proxy = self.proxy(Windows(), clock=lambda: now[0])
-        self.assertFalse(proxy.busy(now[0]))
-        proxy.in_flight.add(1)
-        self.assertTrue(proxy.busy(now[0]))
-        proxy.in_flight.clear()
-        proxy.last_answer_at = now[0]
-        now[0] += 1.0
-        self.assertTrue(proxy.busy(now[0]))
-        now[0] += 1.0
-        self.assertFalse(proxy.busy(now[0]))
 
 
 if __name__ == "__main__":

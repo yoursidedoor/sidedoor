@@ -6,11 +6,10 @@
   {% if answer %}
   {% if answer.question %}
   <p><strong>{{ answer.question }}</strong></p>
-  <p class="muted">First asked for {{ answer.employer or "a job" }}{% if answer.role %}, {{ answer.role }}{% endif %}{% if answer.recorded_at %} · answered {{ answer.recorded_at[:10] }}{% endif %}</p>
+  <p class="muted">First asked for {{ (companies.get(key) if companies is defined else None) or answer.employer or "a job" }}{% if answer.role %}, {{ answer.role }}{% endif %}{% if answer.recorded_at %} · answered {{ answer.recorded_at[:10] }}{% endif %}</p>
   {% else %}
   <p class="muted">{{ answer.source.split(": ", 1)[1] if ": " in answer.source else "An answer you gave" }}{% if answer.recorded_at %} · answered {{ answer.recorded_at[:10] }}{% endif %}</p>
   {% endif %}
-  <p>Your answer: {{ "Yes" if answer.value is sameas true else "No" if answer.value is sameas false else answer.value }}</p>
   {% if status is defined and status.get(key) %}<p class="note note-info">Not used: {{ status[key] }}</p>{% endif %}
   {% if over is defined and key in over %}{% set setup = over[key] %}
   <p class="note note-warning">Used instead of your answer in Profile and search ({{ "Yes" if setup is sameas true else "No" if setup is sameas false else setup }}).</p>

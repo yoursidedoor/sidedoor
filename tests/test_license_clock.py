@@ -943,7 +943,8 @@ class DashboardTest(ClockCase):
         client = self.client()
         for path in ("/settings", "/setup"):
             page = client.get(path).text
-            self.assertIn("Active: Trial. Good until Mar 3, 17:06.", page, path)  # America/Los_Angeles
+            if path == "/setup":   # Settings shows only a refusal's saved line (one status line; owner, 2026-10-24)
+                self.assertIn("Active: Trial. Good until Mar 3, 17:06.", page, path)  # America/Los_Angeles
             self.assertNotIn(raw, page, path)
 
 

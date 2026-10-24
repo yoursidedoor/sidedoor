@@ -6,20 +6,48 @@
   </form>
   {% if message and message_at == at %}<p class="note note-info start-result" role="status">{{ message }}</p>{% endif %}
 {% endmacro %}
+{% macro run_line(when, last, next) %}
+  {# One line: "Last run 03:04 (finished) · next 04:00" (owner, 2026-10-24). #}
+  <p class="overview-run">{% if last and last.at and when(last.at) %}Last run {{ when(last.at) }} <span class="muted">({{ last.words }})</span>{% else %}Not run yet{% endif %}
+    <span class="muted" aria-hidden="true">·</span> {% if next.at %}next {{ when(next.at) }}{% else %}next: {{ next.label }}{% endif %}</p>
+{% endmacro %}
 {% macro run_rows(v, job) %}
-  {# Last run / Next run, as the Research card shows them (overview_page.job_runs). #}
+  {# Outreach / Applications runs, as the Research card shows them (overview_page.job_runs). #}
   {% if v.runs == v.unavailable %}
-  <dt>Last run</dt><dd><span class="muted">Not available</span></dd>
-  {% else %}{% set r = v.runs[job] %}
-  <dt>Last run</dt>
-  <dd>{% if r.last and v.when(r.last.at) %}{{ v.when(r.last.at) }} <span class="muted">({{ r.last.words }})</span>{% else %}Not run yet{% endif %}</dd>
-  <dt>Next run</dt>
-  <dd>{% if r.next.at %}{{ v.when(r.next.at) }}{% else %}{{ r.next.label }}{% endif %}</dd>
-  {% endif %}
+  <p class="overview-run">Last run <span class="muted">Not available</span></p>
+  {% else %}{% set r = v.runs[job] %}{{ run_line(v.when, r.last, r.next) }}{% endif %}
+{% endmacro %}
+{% macro health_line(item, v, at) %}
+  {# One Health item; the same markup at the top of the page and in Health (one source). #}
+      <li class="health-item health-{{ item.tone }}">
+        <span class="health-dot" aria-hidden="true"></span>
+        <span class="health-body">
+          <strong>{{ item.name }}</strong>
+          <span class="health-text">{{ item.text }}</span>
+          {% for note in item.notes or [] %}<span class="health-note">{% if note.href %}<a href="{{ note.href }}">{{ note.text }}</a>{% else %}{{ note.text }}{% endif %}{% if note.detail %} <details class="health-detail"><summary>Details</summary><code>{{ note.detail }}</code></details>{% endif %}</span>{% endfor %}
+          {% if item.timed %}<span class="muted health-time">{% if item.at %}Last good check {{ v.when(item.at) }}{% elif item.checked %}Checked {{ v.when(item.checked) }}{% else %}Not checked yet{% endif %}</span>{% endif %}
+        </span>
+        {% if item.fix %}
+          {% if item.fix.post == "/license/check" %}
+          <div class="health-fix">{% with check_next="/", check_label=item.fix.label %}{% include "license_check.html" %}{% endwith %}</div>
+          {% elif item.fix.post %}
+          <div class="health-fix">{{ start_button(at, item.fix.post, item.fix.label) }}</div>
+          {% else %}
+          <a class="button health-fix" href="{{ item.fix.href }}"{% if item.fix.href.startswith("http") %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ item.fix.label }}</a>
+          {% endif %}
+          {% if item.also %}<div class="health-fix">{{ start_button(at, item.also.post, item.also.label) }}</div>{% endif %}
+        {% elif message and message_at == at and item.name == "Scheduler" %}
+          <p class="note note-success start-result" role="status">{{ message }}</p>
+        {% endif %}
+      </li>
 {% endmacro %}
 {% block content %}
-<h1 class="title gradient-text">Overview</h1>
-{% if sidedoor_version %}<p class="muted overview-version">Sidedoor {{ sidedoor_version }}</p>{% endif %}
+<div class="overview-page">
+<div class="overview-head">
+  <h1 class="title gradient-text">Overview</h1>
+  {% if sidedoor_version and update_offer %}<a class="overview-version overview-version-update" title="Sidedoor {{ update_offer.latest }} is available" href="{% if update_offer.dismissed %}{{ update_offer.download_url }}" target="_blank" rel="noopener noreferrer{% else %}#update-banner{% endif %}">v{{ sidedoor_version }} · {{ update_offer.latest }} available</a>
+  {%- elif sidedoor_version %}<span class="overview-version" title="Sidedoor {{ sidedoor_version }}">v{{ sidedoor_version }}</span>{% endif %}
+</div>
 {% if paywall %}
 {# E8.T3: the paywall (E6.T0 section 11, Expired). [Renew] opens the checkout like [Buy a license],
    with guide 4.5 beside it; banner 1 above shows "Bought a new key? Paste it here" (always while
@@ -57,6 +85,11 @@
 {% endif %}
 {% set v = view %}
 {% set na = v.unavailable %}
+{% if v.alerts %}
+<ul class="overview-list overview-alerts" aria-label="Needs attention">
+  {% for item in v.alerts %}{{ health_line(item, v, "top") }}{% endfor %}
+</ul>
+{% endif %}
 {% if v.unreadable %}<p class="note note-warning overview-unreadable" role="status">Sidedoor couldn't read its records.</p>{% endif %}
 <div class="overview-grid">
   <section class="card overview-today" aria-labelledby="today-title">
@@ -65,27 +98,24 @@
       <div>
         <h3>Research</h3>
         {% if v.research == na %}<p class="muted">Not available</p>{% else %}
+        {{ run_line(v.when, v.research.last, v.research.next) }}
         <dl class="overview-stats">
-          <dt>Last run</dt>
-          <dd>{% if v.research.last %}{{ v.when(v.research.last.at) }} <span class="muted">({{ v.research.last.words }})</span>{% else %}Not run yet{% endif %}</dd>
-          <dt>Next run</dt>
-          <dd>{% if v.research.next.at %}{{ v.when(v.research.next.at) }}{% else %}{{ v.research.next.label }}{% endif %}</dd>
           {% for label, count in (("Companies found", v.research.companies), ("Roles found", v.research.roles), ("Contacts found", v.research.contacts)) %}
           <dt>{{ label }}</dt>
-          <dd{% if count is not none %} class="overview-number"{% endif %}>{% if count is none %}<span class="muted">Not run yet</span>{% else %}{{ count }}{% endif %}</dd>
+          <dd>{% if count is none %}<span class="muted">Not run yet</span>{% else %}<span class="overview-number">{{ count }}</span>{% endif %}</dd>
           {% endfor %}
         </dl>
         {% endif %}
       </div>
       <div>
         <h3>Outreach</h3>
-        {% if v.outreach == na %}<dl class="overview-stats">{{ run_rows(v, "outreach") }}</dl><p class="muted">Not available</p>{% else %}
+        {{ run_rows(v, "outreach") }}
+        {% if v.outreach == na %}<p class="muted">Not available</p>{% else %}
         {# Replies received: the people Networking & Referrals lists who wrote today (its Replied today filter). #}
         <dl class="overview-stats">
-          {{ run_rows(v, "outreach") }}
           <dt>Invitations sent</dt>
-          <dd><a class="overview-number" href="/sent">{{ v.outreach.invitations }}</a> <span class="muted">of {{ v.outreach.cap }} a day</span>
-            {% if v.outreach.waiting %}<br><a href="/sent?show=sending#conversations">{{ v.outreach.waiting }} waiting for confirmation</a>{% endif %}</dd>
+          <dd><a class="overview-number" href="/sent">{{ v.outreach.invitations }}</a> <span class="muted">of {{ v.outreach.cap }} a day</span></dd>
+          {% if v.outreach.waiting %}<dd class="overview-sub"><a href="/sent?show=sending#conversations">{{ v.outreach.waiting }} still sending</a></dd>{% endif %}
           <dt>Messages sent</dt>
           <dd><a class="overview-number" href="/sent">{{ v.outreach.messages }}</a></dd>
           <dt>Replies received</dt>
@@ -95,13 +125,39 @@
       </div>
       <div>
         <h3>Applications</h3>
+        {{ run_rows(v, "applications") }}
         <dl class="overview-stats">
-          {{ run_rows(v, "applications") }}
           <dt>Submitted</dt>
           <dd>{% if v.submitted == na %}<span class="muted">Not available</span>{% else %}<a class="overview-number" href="/applications?show=submitted_today">{{ v.submitted }}</a>{% endif %}</dd>
         </dl>
       </div>
     </div>
+  </section>
+
+  {# One "Needs you" card (owner, 2026-10-24): each kind of thing waiting on the user, with its own way
+     there. The counts are the ones those pages total: Approvals' messages, questions and notes, and
+     Applications' "Blocked, needs you" filter. #}
+  <section class="card overview-needs" aria-labelledby="needs-title">
+    <h2 id="needs-title">Needs you</h2>
+    {% if v.needs == na %}
+    <p class="muted">Not available</p>
+    {% else %}
+    {% set rows = (("questions", "question to answer", "questions to answer", "/approvals#questions", "Answer"),
+                   ("messages", "message to approve", "messages to approve", "/approvals#messages", "Review"),
+                   ("couldnt_send", "message couldn't send", "messages couldn't send", "/approvals#refused", "Review"),
+                   ("notes", "note for you", "notes for you", "/approvals#notes", "Read"),
+                   ("applications", "application blocked on you", "applications blocked on you", "/applications?show=needs_you", "Open")) %}
+    <ul class="overview-needs-list">
+      {% for key, one, many, href, label in rows %}{% set count = v.needs[key] %}
+      <li class="overview-needs-row{% if not count %} overview-needs-none{% endif %}">
+        <span class="overview-number">{{ count }}</span>
+        <span class="overview-needs-what">{{ one if count == 1 else many }}</span>
+        {% if count %}<a class="button overview-needs-go" href="{{ href }}">{{ label }}</a>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% if not (v.needs.questions or v.needs.messages or v.needs.couldnt_send or v.needs.notes or v.needs.applications) %}<p class="muted">Nothing needs you right now.</p>{% endif %}
+    {% endif %}
   </section>
 
   <section class="card overview-now" aria-labelledby="now-title">
@@ -110,27 +166,9 @@
     <dl class="overview-stats">
       <dt>Waiting for confirmation</dt>
       <dd><a class="overview-number" href="/applications?show=confirming">{{ v.right_now.confirming }}</a></dd>
-      <dt>Blocked, needs you</dt>
-      <dd><a class="overview-number" href="/applications?show=needs_you">{{ v.right_now.blocked }}</a></dd>
       <dt>Waiting to retry</dt>
       <dd><a class="overview-number" href="/applications?show=retrying">{{ v.right_now.retrying }}</a></dd>
     </dl>
-    {% endif %}
-  </section>
-
-  <section class="card overview-needs" aria-labelledby="needs-title">
-    <h2 id="needs-title">Needs you</h2>
-    {% if v.needs == na %}
-    <p class="muted">Not available</p>
-    {% elif v.needs.questions or v.needs.failures or v.needs.messages or v.needs.notes %}
-    <ul class="overview-list">
-      {% if v.needs.messages %}<li><a href="/approvals#messages"><strong>{{ v.needs.messages }}</strong> message{{ "s" if v.needs.messages != 1 }} waiting for you</a></li>{% endif %}
-      {% if v.needs.questions %}<li><a href="/approvals#questions"><strong>{{ v.needs.questions }}</strong> question{{ "s" if v.needs.questions != 1 }} for you</a></li>{% endif %}
-      {% if v.needs.notes %}<li><a href="/approvals#notes"><strong>{{ v.needs.notes }}</strong> note{{ "s" if v.needs.notes != 1 }} for you</a></li>{% endif %}
-      {% if v.needs.failures %}<li><a href="/failures#needs-you"><strong>{{ v.needs.failures }}</strong> application{{ "s" if v.needs.failures != 1 }} waiting on you</a></li>{% endif %}
-    </ul>
-    {% else %}
-    <p class="muted">Nothing needs you right now.</p>
     {% endif %}
   </section>
 
@@ -146,31 +184,10 @@
   <section class="card overview-health" aria-labelledby="health-title">
     <h2 id="health-title">Health</h2>
     <ul class="overview-list">
-      {% for item in v.health %}
-      <li class="health-item health-{{ item.tone }}">
-        <span class="health-dot" aria-hidden="true"></span>
-        <span class="health-body">
-          <strong>{{ item.name }}</strong>
-          <span class="health-text">{{ item.text }}</span>
-          {% for note in item.notes or [] %}<span class="health-note">{% if note.href %}<a href="{{ note.href }}">{{ note.text }}</a>{% else %}{{ note.text }}{% endif %}{% if note.detail %} <details class="health-detail"><summary>Details</summary><code>{{ note.detail }}</code></details>{% endif %}</span>{% endfor %}
-          {% if item.timed %}<span class="muted health-time">{% if item.at %}Last good check {{ v.when(item.at) }}{% elif item.checked %}Checked {{ v.when(item.checked) }}{% else %}Not checked yet{% endif %}</span>{% endif %}
-        </span>
-        {% if item.fix %}
-          {% if item.fix.post == "/license/check" %}
-          <div class="health-fix">{% with check_next="/", check_label=item.fix.label %}{% include "license_check.html" %}{% endwith %}</div>
-          {% elif item.fix.post %}
-          <div class="health-fix">{{ start_button("health", item.fix.post, item.fix.label) }}</div>
-          {% else %}
-          <a class="button health-fix" href="{{ item.fix.href }}"{% if item.fix.href.startswith("http") %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ item.fix.label }}</a>
-          {% endif %}
-          {% if item.also %}<div class="health-fix">{{ start_button("health", item.also.post, item.also.label) }}</div>{% endif %}
-        {% elif message and message_at == "health" and item.name == "Scheduler" %}
-          <p class="note note-success start-result" role="status">{{ message }}</p>
-        {% endif %}
-      </li>
-      {% endfor %}
+      {% for item in v.health %}{{ health_line(item, v, "health") }}{% endfor %}
     </ul>
   </section>
 </div>
 {% endif %}
+</div>
 {% endblock %}

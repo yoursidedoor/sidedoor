@@ -86,7 +86,7 @@ SPAWN = None      # (argv, env) -> None: starts the helper detached
 QUIT_SELF = None  # () -> None: this Sidedoor's normal stop
 KILL = None       # (pid, signal) -> None
 
-UPDATE_FAILED = "Sidedoor %s didn't install: %s Use Download to install it by hand."
+UPDATE_FAILED = "Sidedoor %s didn't install. %s"  # the banner offers "or download it" beside it
 DOWNLOAD_HINT = " Use Download to install it by hand."
 
 
@@ -594,7 +594,7 @@ def install(version, home, runner=None, fetch=None, spawn=None, quit_self=None, 
 
     def failed(why):
         LOG.warning("mac update: %s not installed: %s", version, why)
-        return {"state": "failed", "message": UPDATE_FAILED % (version, why[:1].upper() + why[1:])}
+        return {"state": "failed", "message": UPDATE_FAILED % (version, why if why.startswith("macOS") else why[:1].upper() + why[1:])}
 
     if not can_install():
         return failed("this copy of Sidedoor can't update itself.")

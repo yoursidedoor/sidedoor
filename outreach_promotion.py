@@ -82,10 +82,16 @@ def verified_location():
     None without a profile or a recorded location (then no location is offered as a fact).
     """
     try:
-        record = (user_profile.load().get("answers") or {}).get("current_location") or {}
+        policy = user_profile.load()
     except user_profile.ProfileMissing:
         return None
+    record = (policy.get("answers") or {}).get("current_location") or {}
     value = record.get("value") if isinstance(record, dict) else None
+    if isinstance(record, dict) and record.get("semantic"):
+        # The answer in force for that semantic: one the owner kept from Approvals for it is newer
+        # (`applications.answers_in_force`; owner, 2026-10-24, "every single worker").
+        import applications
+        value = applications.policy_answer(policy, record["semantic"], value)
     return value if isinstance(value, str) and value.strip() else None
 OWNER_RECORD_KINDS = ("RECIPIENT_ATTESTATION", "DRAFT_APPROVAL", "SELF_REFERENCE_CORRECTION")
 

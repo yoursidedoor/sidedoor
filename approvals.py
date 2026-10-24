@@ -465,13 +465,9 @@ def _queue_holds(database):
 
 def waiting_count(database):
     """Messages waiting for the owner (Overview's "Needs you", Settings' "N messages waiting"): held
-    messages and held campaign launches. Reads only; 0 when the outreach tables are not there yet."""
-    count = 0
-    if _has_table(database, "outreach_actions"):
-        count += database.execute("SELECT COUNT(*) FROM outreach_actions WHERE state=?", (AWAITING,)).fetchone()[0]
-    if _has_table(database, "outreach_queue"):
-        count += database.execute("SELECT COUNT(*) FROM outreach_queue WHERE state=?", (AWAITING,)).fetchone()[0]
-    return count
+    messages and held campaign launches, exactly the cards Approvals shows (`waiting_read`; an unreadable
+    row is never a card). Reads only; 0 when the outreach tables are not there yet."""
+    return len(waiting_read(database)[0])
 
 
 def waiting(database):

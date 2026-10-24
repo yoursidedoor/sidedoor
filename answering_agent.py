@@ -297,7 +297,8 @@ def packet_policy(policy):
     a recorded fact rather than in another derivation.
     """
     answers = {}
-    for key, value in ((policy or {}).get("answers") or {}).items():
+    # Only the answer in force per semantic (owner, 2026-10-24; `applications.answers_for_model`).
+    for key, value in applications.answers_for_model((policy or {}).get("answers")).items():
         if not isinstance(value, dict) or not value.get("source"):
             continue
         if str(value.get("source")).startswith(AI_SOURCE_PREFIX):
@@ -1345,7 +1346,7 @@ def prior_rejections(database, job_key, askable):
 
 
 def _recorded_for(policy, question, key):
-    answers = (policy or {}).get("answers") or {}
+    answers = applications.answers_for_model((policy or {}).get("answers"))   # the one in force
     recorded = answers.get(key)
     if isinstance(recorded, dict):
         return recorded

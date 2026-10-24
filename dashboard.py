@@ -260,7 +260,10 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # same-origin, not no-referrer (2026-10-24): under no-referrer a browser sends "Origin: null" on a
+        # plain form POST, which the cross-site check above refuses ("Update now" was refused). same-origin
+        # keeps the real Origin on our own requests and still sends no referrer to any other site.
+        response.headers["Referrer-Policy"] = "same-origin"
         if not request.url.path.startswith(STATIC_PREFIXES):
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -434,6 +437,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         context.update(finished=progress["finished"], running=running, message=message, message_at=message_at, view=None)
         import version  # owner, 2026-10-23: "the overview page should show what version of code is installed."
         context["sidedoor_version"] = version.current()
+        import update_check  # owner, 2026-10-24: the chip says "· X available" while one is offered
+        context["update_offer"] = update_check.offer(home)
         import license_clock
         license = license_clock.view(home)
         # E8.T3 (E6.T0 section 11): Expired shows a full-page paywall on Overview with [Renew]; the
@@ -519,9 +524,10 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         import update_check
         form = await request.form()
         version = form.get("version")
-        if form.get("notice") == "1":  # a failed Mac update's message only; the offer stays
+        # One Dismiss (owner, 2026-10-24): a failed Mac update's message and, when sent, the offer too.
+        if form.get("notice") == "1":
             await run_in_threadpool(update_check.dismiss_notice, home)
-        elif isinstance(version, str):
+        if isinstance(version, str):
             await run_in_threadpool(update_check.dismiss, version, home)
         back = form.get("next") if isinstance(form.get("next"), str) else "/"
         return RedirectResponse(back if _known_page(back) else "/", status_code=303)

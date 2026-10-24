@@ -25,7 +25,8 @@ Sources (why each is the record the product itself treats as that fact):
   inbox envelope's text (`inbox.text`, the Unipile reader and the HeyReach decoder).
 - not yet confirmed: "Sending…" is `outreach_actions` INVITE/INITIAL/FIRST_MESSAGE/FOLLOWUP/URGENT/REPLY in
   REQUEST_STARTED, ACKNOWLEDGED_DELIVERY_UNCONFIRMED or INVITE_RETRY_WAIT (Overview's INVITE_WAITING,
-  which Sidedoor still settles); its "Invitations sending" filter lists the INVITE ones, the ones
+  which Sidedoor still settles; an INVITE LinkedIn acknowledged reads "Invitation sent", owner 2026-10-24);
+  its "Invitations sending" filter lists the INVITE ones, the ones
   Overview's "waiting for confirmation" counts. UNCERTAIN_NO_RETRY and unsettled HeyReach launches
   (`outreach_attempts` CLAIMED, DISPATCHING, ACKNOWLEDGED_DELIVERY_UNCONFIRMED, UNCERTAIN_NO_RETRY) are
   never sent again: "couldn't confirm it went out", not Waiting. "Did not go out": CONFIRMED_NOT_SENT
@@ -85,7 +86,7 @@ DATABASE = Path(paths.STATE) / paths.DATABASE   # dashboard.DATABASE
 PAGE_SIZE = 25
 UNAVAILABLE = overview.UNAVAILABLE
 FILTERS = (("all", "All"), ("replied", "Replied"), ("replied_today", "Replied today"), ("waiting", "Waiting"),
-           ("sending", "Invitations sending"), ("referral_agreed", "Referral agreed"), ("needs_you", "Needs you"),
+           ("sending", "Sending"), ("referral_agreed", "Referral agreed"), ("needs_you", "Needs you"),
            ("closed", "Closed"))
 FILTER_KEYS = {key for key, _ in FILTERS}
 KINDS = ("accepted", "followup_sent", "inbound", "initial_sent", "opt_out", "outbound_observed")
@@ -93,7 +94,8 @@ MESSAGE_PURPOSES = ("INVITE", "INITIAL", "FIRST_MESSAGE", "FOLLOWUP", "URGENT", 
 SENDING = tuple(overview.INVITE_WAITING)            # acknowledged or in flight; Sidedoor still settles these
 UNCERTAIN = ("UNCERTAIN_NO_RETRY",)                 # never resent; kept for reconciliation only
 NOT_SENT = ("CONFIRMED_NOT_SENT",)
-QUEUED = ("PENDING",)                               # an invitation not started yet (owner, 2026-10-24: list it)
+QUEUED = ("PENDING",)
+ACKNOWLEDGED = "ACKNOWLEDGED_DELIVERY_UNCONFIRMED"                               # an invitation not started yet (owner, 2026-10-24: list it)
 CAMPAIGN_UNSETTLED = ("CLAIMED", "DISPATCHING", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", "UNCERTAIN_NO_RETRY")
 AUDIT_SCAN = 50
 SKIPPED_PHASES = ("RECONCILIATION", "COMPOSITION")
@@ -105,6 +107,7 @@ SEEN_IN_INBOX = "Your message, seen in your LinkedIn inbox"
 STATUS = {"closed": ("Closed", "muted"), "opted_out": ("Opted out", "muted"), "replied": ("Replied", "success"),
           "connected": ("Connected", "info"), "messaged": ("Messaged", "info"),
           "invited": ("Invited, waiting for acceptance", "info"), "sending": ("Sending…", "warning"),
+          "invite_sent": ("Invitation sent", "info"),
           "queued": ("Invitation queued", "muted"),
           "uncertain": ("Couldn't confirm it went out", "warning"), "failed": ("Couldn't send", "error"),
           "none": ("Nothing sent yet", "muted")}
@@ -177,6 +180,7 @@ class Person:
         self.direct = False        # a confirmed message that is not an invitation
         self.sending = False
         self.invite_sending = False
+        self.sending_unacked = False   # a sending message other than an acknowledged invitation
         self.queued = False        # an INVITE action still PENDING
         self.uncertain = False
         self.failed = False
@@ -246,6 +250,10 @@ def people(reader):
         elif state in SENDING:
             person.sending = True
             person.invite_sending = person.invite_sending or payload.get("purpose") == "INVITE"
+            # LinkedIn took the invitation request (owner, 2026-10-24, N2: the chip says "Invitation
+            # sent", as the sequence line does); anything else in flight is still "Sending…".
+            person.sending_unacked = person.sending_unacked or not (
+                payload.get("purpose") == "INVITE" and state == ACKNOWLEDGED)
         elif state in UNCERTAIN:
             person.uncertain = True
         else:
@@ -421,6 +429,7 @@ class Contact:
         self.direct = any(person.direct for person in own)
         self.sending = any(person.sending for person in own)
         self.invite_sending = any(person.invite_sending for person in own)
+        self.sending_unacked = any(person.sending_unacked for person in own)
         self.queued = any(person.queued for person in own)
         self.uncertain = any(person.uncertain for person in own)
         self.failed = any(person.failed for person in own)
@@ -457,7 +466,7 @@ class Contact:
             elif kinds.get("initial_sent"):
                 self._status = "invited"
             elif self.sending:
-                self._status = "sending"
+                self._status = "sending" if self.sending_unacked else "invite_sent"
             elif self.queued:
                 self._status = "queued"
             elif self.uncertain:
@@ -474,9 +483,9 @@ class Contact:
         if show == "replied_today":
             return self.last_inbound is not None and start is not None and start <= self.last_inbound < end
         if show == "waiting":
-            return self.status() in ("invited", "sending", "queued")
+            return self.status() in ("invited", "sending", "invite_sent", "queued")
         if show == "sending":
-            return self.invite_sending
+            return self.status() == "sending"   # the "Sending…" badge (owner 2026-10-24: counts by label)
         if show == "referral_agreed":
             return bool(self.referral and self.referral[0] == "AGREED")
         if show == "needs_you":
@@ -499,7 +508,15 @@ def contacts(reader):
 def replied_between(reader, start, end):
     """How many people this page lists whose latest message to the user falls in [start, end): Overview's
     "Replies received" (the same people the Replied today filter lists)."""
-    return sum(1 for contact in contacts(reader)[0] if contact.matches("replied_today", start, end))
+    return overview_counts(reader, start, end)["replies"]
+
+
+def overview_counts(reader, start, end):
+    """Overview's Outreach numbers that are lists on this page, counted by the same per-contact
+    `matches` the chips use: "replies" (Replied today) and "sending" (contacts badged "Sending…")."""
+    found = contacts(reader)[0]
+    return {"replies": sum(1 for contact in found if contact.matches("replied_today", start, end)),
+            "sending": sum(1 for contact in found if contact.matches("sending"))}
 
 
 def _search_texts(reader):
@@ -708,8 +725,40 @@ def _who(reader, ids, actions):
                                                  % _marks(lookups), tuple(lookups), "rw_contacts"):
         name = name or _text(found_name)
         company = company or _text(found_company)
-    return {"name": name or "Someone on LinkedIn", "company": _text(company), "title": title, "why": why or [],
+    return {"name": name or "Someone on LinkedIn", "company": _text(company), "title": title,
+            "role": role_line(title, company), "why": why or [],
             "linkedin": pages.linkedin_url("https://" + primary)}
+
+
+def _whole_prefix(text, prefix):
+    """`prefix` starts `text` and ends at a word boundary (case aside)."""
+    text, prefix = text.casefold(), prefix.casefold()
+    return text.startswith(prefix) and (len(text) == len(prefix) or not text[len(prefix)].isalnum())
+
+
+def role_line(title, company):
+    """"Title at Company" when the title is known, "Works at Company" when only the company is (owner,
+    2026-10-24, N1: research often records the employer itself as the person's employment, which
+    showed "Upwind · Upwind"), the title alone when no company is on record, else None. A title that
+    repeats the company ("Together AI founder and CEO", "Co-Founder and CTO, Cognition") loses it."""
+    title, company = _text(title), _text(company)
+    if title and company:
+        if _whole_prefix(company, title):
+            title = None                        # "InsForge" for "InsForge (InstaCloud)"
+        else:
+            if _whole_prefix(title, company):
+                title = title[len(company):]
+            for tail in (", " + company, " at " + company, " @ " + company):
+                if title.casefold().endswith(tail.casefold()):
+                    title = title[:-len(tail)]
+            title = title.strip(" ,·-") or None
+    if title and title[0].islower():
+        title = title[0].upper() + title[1:]
+    if title and company:
+        return title + " at " + company
+    if company:
+        return "Works at " + company
+    return title
 
 
 def note_view(note):
@@ -744,7 +793,69 @@ def sequence_line(reader, contact, now, zone):
     return sequence.position({"steps": steps, "due": due, "stage": stage}, zone) or None
 
 
-def entry(reader, contact, notes, refused, now=None, zone=None):
+# When a queued invitation goes (owner, 2026-10-24, N3): the next invitation step (`overview_page.next_run`,
+# which knows a pause, a stopped scheduler and research's turn: the hourly round or, on a Unipile install,
+# the 15-minute invitation tick at :02:30/:17:30/:32:30/:47:30, `scheduler_loop.INVITE_JOB`) at or after
+# the time pacing next allows an invitation (`pacing.check`, the sender's own rule). Nothing is promised
+# that is not computed.
+HELD_WORDS = {"Paused": "on hold while Sidedoor is paused",
+              "Not running": "goes out once Sidedoor is running again",
+              "Waiting to move your data": "goes out once your data has moved",
+              "after today's research": "goes out after today's research"}
+
+
+def queued_timing(reader, config, now, zone, running=True):
+    """The words after "Invitation queued · ", or None when they cannot be worked out."""
+    import pacing
+    fmt = lambda moment: overview.when(moment, now, zone)
+    try:
+        upcoming = overview.next_run(reader, "run", config, now, {"running": running}, overview.pause_flags(reader))
+    except Exception:
+        return None
+    if "label" in upcoming:
+        return HELD_WORDS.get(upcoming["label"])
+    if reader.database is None:
+        return None
+    try:
+        pace = pacing.check(reader.database, config, now)
+    except Exception:
+        return None
+    at = upcoming["at"]
+    if not pace["go"]:
+        until = overview._utc(pace["wait_until"])
+        if until is None:
+            return None
+        if pace["reason"] == "DAILY_CAP":
+            return "after today's limit resets " + fmt(until)
+        if pace["reason"] == "WEEKLY_CAP":
+            return "after this week's limit resets " + fmt(until)
+        if until > at:
+            at = next_invitation_step(until, config)
+    return "goes out around " + fmt(at)
+
+
+def next_invitation_step(moment, config):
+    """The first instant at or after `moment` that sends invitations: the hourly round, or on a Unipile
+    install the 15-minute invitation tick (`scheduler_loop.jobs`), whichever comes first."""
+    import scheduler_loop
+    instants, periods = scheduler_loop.schedule(moment, config)
+    names = ["run"] + ([scheduler_loop.INVITE_JOB] if scheduler_loop.INVITE_JOB in scheduler_loop.jobs(config) else [])
+    found = []
+    for name in names:
+        start = dt.datetime.fromtimestamp(instants[name], dt.timezone.utc)
+        found.append(start if start >= moment else start + dt.timedelta(seconds=periods[name]))
+    return min(found)
+
+
+def queued_line(timing, queued):
+    if timing is None:
+        return None
+    if queued > 1 and timing.startswith("goes out around "):
+        return "Invitation queued · the next of %d queued invitations %s" % (queued, timing)
+    return "Invitation queued · " + timing
+
+
+def entry(reader, contact, notes, refused, now=None, zone=None, queued=None):
     pages = _pages()
     actions = _actions(reader, contact.ids)
     status, tone = STATUS[contact.status()]
@@ -753,8 +864,10 @@ def entry(reader, contact, notes, refused, now=None, zone=None):
                  notes=[note_view(note) for identity, note in notes.values() if identity in contact.ids],
                  dom="contact-" + _digest(contact.ids[0]),
                  sequence=sequence_line(reader, contact, now, zone or ZoneInfo("America/Los_Angeles")))
-    if found["sequence"] == status:
-        found["sequence"] = None   # "Invitation queued" is already the chip
+    if contact.status() == "queued":
+        found["sequence"] = queued   # when it goes, when that is computed; else the chip says it all
+    elif found["sequence"] == status:
+        found["sequence"] = None
     found["refused"] = [{"kind": _word(pages.PURPOSE_WORDS, item["purpose"], "Message"),
                          "text": item["message"] if isinstance(item["message"], str) else None,
                          "reasons": list(dict.fromkeys(pages.GATE_WORDS.get(gate, pages.GENERIC_GATE)
@@ -765,8 +878,9 @@ def entry(reader, contact, notes, refused, now=None, zone=None):
 
 # --- The page ------------------------------------------------------------------------------------
 
-def listing(reader, show, page, query, start, end, now=None, zone=None):
+def listing(reader, show, page, query, start, end, now=None, zone=None, config=None, running=True):
     found, notes, refused = contacts(reader)
+    waiting = sum(1 for contact in found if contact.status() == "queued")
     if query:
         texts, needle = _search_texts(reader), query.casefold()
         found = [contact for contact in found if any(
@@ -777,8 +891,11 @@ def listing(reader, show, page, query, start, end, now=None, zone=None):
     pages = max(1, math.ceil(len(chosen) / PAGE_SIZE))
     page = min(max(1, page), pages)
     window = chosen[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]
+    zone = zone or ZoneInfo("America/Los_Angeles")
+    queued = queued_line(queued_timing(reader, config or {}, now or dt.datetime.now(dt.timezone.utc), zone, running),
+                         waiting) if any(contact.status() == "queued" for contact in window) else None
     with engagement.aliases_read_once(reader.database, getattr(reader, "alias_rows", None)):   # sequence_view
-        shown = [entry(reader, contact, notes, refused, now, zone) for contact in window]
+        shown = [entry(reader, contact, notes, refused, now, zone, queued) for contact in window]
     return {"contacts": shown, "total": len(chosen),
             "page": page, "pages": pages, "counts": counts}
 
@@ -790,7 +907,7 @@ def _int(value):
         return 1
 
 
-def gather(database, config, show="all", page=1, query=None, now=None):
+def gather(database, config, show="all", page=1, query=None, now=None, running=True):
     """Everything the page shows. `database` is a read-only connection or None (no file yet)."""
     now = now or dt.datetime.now(dt.timezone.utc)
     zone_name = config.get("timezone") or "America/Los_Angeles"
@@ -810,7 +927,8 @@ def gather(database, config, show="all", page=1, query=None, now=None):
         return "/sent" + ("?" + urllib.parse.urlencode(pairs) if pairs else "")
 
     return {"show": show, "query": query, "filters": FILTERS, "link": link, "unavailable": UNAVAILABLE,
-            "unreadable": reader.broken, "list": overview.section(reader, listing, show, _int(page), query, start, end, now, zone),
+            "unreadable": reader.broken, "list": overview.section(reader, listing, show, _int(page), query, start, end, now, zone,
+                                                                       config, running),
             "when": lambda moment: overview.when(moment, now, zone) if moment else None}
 
 
@@ -839,7 +957,9 @@ def register(app, templates, layout, *, home, root, config):
 
     def view(request, show="all", page="1", q="", flash=None):
         context = layout("sent", "Networking & Referrals")
-        context["view"] = read(lambda database: gather(database, config, show, page, q))
+        import setup_steps
+        running = setup_steps.scheduler_running(home)
+        context["view"] = read(lambda database: gather(database, config, show, page, q, running=running))
         context["flash"] = flash
         return templates.TemplateResponse(request, "networking.html", context)
 

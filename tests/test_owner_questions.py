@@ -183,15 +183,15 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         self.assertIsNone(self.job(asi)["next_at"])                                  # due again now
         [(key, kept)] = setup_steps.owner_answers(self.home)
         self.assertEqual((kept["value"], kept["semantic"], kept["question"], kept["employer"], kept["choices"]),
-                         (green_card, EXPORT["semantic"], EXPORT["label"], "asi", EXPORT_CHOICES))
+                         (green_card, EXPORT["semantic"], EXPORT["label"], "ASI", EXPORT_CHOICES))  # as the posting writes it
 
         # Settings shows it: question, where first asked, the answer, its date, Edit with the options, Remove.
         settings = self.page("/settings")
         section = settings.split('id="answers"', 1)[1].split("</section>", 1)[0]
         self.assertIn("Your saved answers", section)
         self.assertIn(EXPORT["label"], section)
-        self.assertIn("First asked for asi, Staff Software Engineer", section)
-        self.assertIn("Your answer: " + green_card, section)
+        self.assertIn("First asked for ASI, Staff Software Engineer", section)
+        self.assertRegex(section, r'<option value="%s" selected>' % __import__("re").escape(green_card))  # the answer is the selected option
         self.assertIn("answered " + kept["recorded_at"][:10], section)
         self.assertIn('<option value="None of the above."', section)
         self.assertIn("Remove", section)
@@ -277,7 +277,8 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         self.assertEqual(json.loads(current["choices"]), drifted["choices"])
         self.assertEqual(self.database.execute("SELECT state,last_error FROM user_decisions WHERE id=?", (old["id"],)).fetchone()[:],
                          ("SUPERSEDED", "QUESTION_REASKED"))
-        self.assertEqual(self.card(self.page(), EXPORT["label"]).count('type="radio"'), 6)
+        card = self.card(self.page(), EXPORT["label"])   # six choices: a menu (owner, 2026-10-24: radios for a few)
+        self.assertEqual(card.count("<option value=") - card.count('<option value="">'), 6)
 
     def test_owner_q2_a_question_no_longer_missing_closes_its_card(self):
         self.policy["answers"].pop("github", None)
@@ -325,7 +326,7 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         page = self.page()
         for question in (GITHUB, TWITTER):
             card = self.card(page, question["label"])
-            self.assertIn('<textarea id="answer-', card)
+            self.assertIn('<input type="text" name="answer"', card)   # a short value: one line (owner, 2026-10-24)
             self.assertNotIn('type="radio"', card)
         by_field = {decision["field"]: decision for decision in self.pending(insforge)}
         self.assertIn("Answer saved.", self.answer(by_field[applications.question_field(GITHUB)], "https://github.com/example-user"))
@@ -338,6 +339,114 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         self.assertEqual(self.job(insforge)["state"], "SUBMITTED")
         saved = {answer["semantic"]: answer["value"] for _key, answer in setup_steps.owner_answers(self.home)}
         self.assertEqual(saved, {"github_profile": "https://github.com/example-user", "twitter_profile": "https://x.com/example_user"})
+
+
+    # --- Blueprints (2026-10-24): an answer saved on Approvals while the applications run is going ---
+
+    def blueprints_setup(self):
+        # The owner's install: no GitHub link in Setup's answers; InsForge asked for it first.
+        self.policy["answers"].pop("github", None)
+        profile_home.use(self, self.policy)
+        self.dashboard()
+        insforge = self.discover(fixtures.role("InsForge (InstaCloud)", "insforge-1"))
+        self.form({"insforge (instacloud)": [GITHUB], "blueprints ai": [GITHUB]})
+        self.run_cycle(Model("CANNOT_ANSWER"))
+        [card] = self.pending(insforge)
+        blueprints = self.discover(fixtures.role("Blueprints AI", "blueprints-1"))
+        return insforge, card, blueprints
+
+    def test_owner_blueprints_answer_saved_during_a_run_reaches_a_later_job_of_that_run(self):
+        insforge, card, blueprints = self.blueprints_setup()
+        # The run starts (and loads the profile) before the owner answers InsForge's card; the answer
+        # is saved through Approvals while the run is reading Blueprints' page, as on the install
+        # (run 09:15, answer 09:17, Blueprints answered 09:33).
+        customize = self.adapter.customize
+
+        def answer_during_read(result, job):
+            customize(result, job)
+            if job["employer"] == "blueprints ai" and not setup_steps.owner_answers(self.home):
+                self.assertIn("Answer saved.", self.answer(card, "https://github.com/example-user"))
+        self.adapter.customize = answer_during_read
+        model = Model("CANNOT_ANSWER")
+        self.run_cycle(model, days=1)
+        [(key, _kept)] = setup_steps.owner_answers(self.home)
+        blueprints_packets = [packet for packet in model.packets if packet["job"]["employer"] == "blueprints ai"]
+        self.assertTrue(blueprints_packets)
+        self.assertEqual(blueprints_packets[0]["policy"]["answers"][key]["value"], "https://github.com/example-user")
+        self.assertEqual(self.pending(blueprints), [])
+        self.assertEqual(self.job(blueprints)["state"], "SUBMITTED")
+
+    def test_owner_blueprints_card_raised_after_a_save_is_closed_and_its_job_answered_again(self):
+        insforge, card, blueprints = self.blueprints_setup()
+        # The answer is saved while Blueprints is being answered: its packet did not have it, so it
+        # raises a card; that card is closed at once and the job is due again.
+        inner = Model("CANNOT_ANSWER")
+
+        def model(prompt):
+            if not is_judge_prompt(prompt) and not setup_steps.owner_answers(self.home) and "blueprints" in prompt.lower():
+                reply = inner(prompt)
+                self.assertIn("Answer saved.", self.answer(card, "https://github.com/example-user"))
+                return reply
+            return inner(prompt)
+        self.run_cycle(model, days=1)
+        self.assertEqual(self.pending(blueprints), [])
+        closed = self.database.execute("SELECT state FROM user_decisions WHERE job_key=?", (blueprints,)).fetchall()
+        self.assertEqual([row[0] for row in closed], ["STALE"])
+        self.assertIsNone(self.job(blueprints)["next_at"])
+        self.run_cycle(Model("CANNOT_ANSWER"), days=1)
+        self.assertEqual(self.pending(blueprints), [])
+        self.assertEqual(self.job(blueprints)["state"], "SUBMITTED")
+
+
+    def test_owner_kept_answers_reach_the_submit_session_and_outreach_facts(self):
+        # The submit session's recorded facts and outreach's verified location take the answer in
+        # force per semantic, so a kept Approvals answer, newer than Setup's, is the one they get.
+        setup_steps.save_owner_answer("d1", "open_to_employer_visa_sponsorship", "No", "test", self.home, yes_no=True)
+        setup_steps.save_owner_answer("d2", "current_location", "Washington, DC, USA", "test", self.home)
+        job = self.discover(fixtures.role("Later Co", "later-1"))
+        self.run_cycle(Model("ACCEPT"), days=1)
+        self.assertEqual(self.job(job)["state"], "SUBMITTED")
+        [submit] = [payload for operation, payload in self.adapter.calls if operation == "submit"]
+        self.assertIs(submit["recorded_facts"]["open_to_employer_visa_sponsorship"], False)
+        import outreach_promotion
+        self.assertEqual(outreach_promotion.verified_location(), "Washington, DC, USA")
+
+
+    def test_owner_models_get_only_the_answer_in_force_per_semantic(self):
+        # Setup records "does not need sponsorship" (False); a later kept Approvals answer says True.
+        # Every model packet carries only the kept True for that semantic.
+        semantic = "requires_visa_sponsorship_now_or_future_in_us"
+        self.policy["answers"]["requires_visa_sponsorship_us"] = {"value": False, "semantic": semantic, "source": "Setup"}
+        profile_home.use(self, self.policy)
+        self.dashboard()
+        setup_steps.save_owner_answer("d1", semantic, "Yes", "test", self.home, yes_no=True)
+        question = {"id": None, "required": True, "semantic": semantic, "answer_type": "boolean", "choices": [],
+                    "label": "Will you now or in the future require sponsorship?"}
+
+        def sponsorship(packet_answers):
+            return [answer["value"] for answer in packet_answers.values() if answer.get("semantic") == semantic]
+        # The answering AI and judge packet, and the recorded entry it is matched to.
+        import answering_agent
+        policy = applications.with_current_kept_answers(user_profile.load())
+        self.assertEqual(sponsorship(answering_agent.packet_policy(policy)["answers"]), [True])
+        self.assertIs(answering_agent._recorded_for(policy, question, "no-such-key")["value"], True)
+        # The inspect / investigate / submit read context.
+        import application_browser
+        import desktop_adapter
+        desktop_adapter.initialize(self.database)
+        job = self.discover(fixtures.role("Later Co", "later-1"))
+        row = self.database.execute("SELECT * FROM application_jobs WHERE job_key=?", (job,)).fetchone()
+        context = application_browser.context(self.root, self.database, {"job": dict(row)})
+        self.assertEqual(sponsorship(context["policy"]["answers"]), [True])
+        # Research qualification gets the same narrowed policy.
+        self.assertEqual(sponsorship(applications.policy_for_model(policy)["answers"]), [True])
+        # A job's own answer is never dropped, nor an answer without a semantic.
+        mixed = dict(policy["answers"], **{"field-x": {"value": False, "semantic": semantic, "source": "authenticated-owner-decision:1"},
+                                         "free": {"value": "x", "source": "Setup"}})
+        kept = applications.answers_for_model(mixed)
+        self.assertIn("field-x", kept)
+        self.assertIn("free", kept)
+        self.assertNotIn("requires_visa_sponsorship_us", kept)
 
 
 if __name__ == "__main__":

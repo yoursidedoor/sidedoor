@@ -40,7 +40,8 @@ ordered-set and zstandard. The result is <output>/Sidedoor.app:
     Contents/Resources/licenses/       their licence texts and NOTICE-<library>.txt, and
                                        THIRD-PARTY-NOTICES.txt (every bundled Python distribution's
                                        licence files, CPython's, the Nuitka runtime's, the dylibs')
-    Contents/Resources/sidedoor.icns   from assets/brand/yoursidedoor-icon-512.png (sips + iconutil)
+    Contents/Resources/sidedoor.icns   from assets/brand/yoursidedoor-icon-1024.png (sips + iconutil),
+                                       16 and 32 px from the simplified yoursidedoor-icon-16/32.png
 
 Every child Sidedoor starts of itself is the binary with a subcommand (`job`, `browser-guard`,
 `reply-tools`, `serve`); tests/test_frozen_spawns.py covers each spawn site. Nothing is downloaded:
@@ -71,7 +72,10 @@ import version  # noqa: E402
 APP = "Sidedoor"
 BINARY = "sidedoor"
 ENTRY = REPO / "tools" / "sidedoor.py"
-ICON = REPO / "assets" / "brand" / "yoursidedoor-icon-512.png"
+BRAND = REPO / "assets" / "brand"
+ICON = BRAND / "yoursidedoor-icon-1024.png"   # the macOS master (tools/make_brand.py)
+# Simplified art drawn for 16 and 32 pixels (bigger sign, thicker arrow): used for those exact sizes.
+SMALL_ICONS = {16: BRAND / "yoursidedoor-icon-16.png", 32: BRAND / "yoursidedoor-icon-32.png"}
 DEFAULT_RUNTIME = Path("~/sidedoor-browser-runtime").expanduser()
 # What the app needs of the runtime folder: Node's binary and licence, and the npm packages.
 # (Not node/lib/node_modules/npm, node/include or the downloaded tarball.)
@@ -157,16 +161,23 @@ def product_modules():
     return sorted(path.stem for path in REPO.glob("*.py") if not path.stem.startswith("manual_"))
 
 
-def make_icns(png, folder):
-    """A .icns with every size macOS asks for, made with the built-in sips and iconutil."""
+def make_icns(png, folder, small=None):
+    """A .icns with every size macOS asks for (16 to 512@2x = 1024), made with the built-in sips and
+    iconutil from the 1024 master `png`: 1024 itself is copied, the others reduced, never enlarged;
+    16 and 32 pixels come from the simplified art in `small` ({pixels: png})."""
+    small = SMALL_ICONS if small is None else small
     iconset = Path(folder) / "sidedoor.iconset"
     iconset.mkdir()
     for size in (16, 32, 128, 256, 512):
         for scale in (1, 2):
             pixels = size * scale
             name = "icon_%dx%d%s.png" % (size, size, "@2x" if scale == 2 else "")
-            subprocess.run(["sips", "-z", str(pixels), str(pixels), str(png), "--out", str(iconset / name)],
-                           check=True, capture_output=True)
+            source = Path(small.get(pixels, png))
+            if source == Path(png) and pixels == 1024:
+                shutil.copyfile(source, iconset / name)
+            else:
+                subprocess.run(["sips", "-z", str(pixels), str(pixels), str(source), "--out", str(iconset / name)],
+                               check=True, capture_output=True)
     icns = Path(folder) / "sidedoor.icns"
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
     return icns

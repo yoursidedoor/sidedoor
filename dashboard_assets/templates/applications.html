@@ -8,14 +8,16 @@
 {% endmacro %}
 {% macro next_steps(j) %}
   {% if j.problem %}<p class="app-problem">{{ j.problem }}</p>{% endif %}
-  {% if j.todo %}<p class="app-todo{% if j.needs_you %} app-todo-you{% endif %}">{{ j.todo }}{% if j.todo_href %} <a class="button app-fix" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}</p>{% endif %}
+  {% if j.todo %}<p class="app-todo{% if j.attention %} app-todo-you{% endif %}">{{ j.todo }}{% if j.todo_href %} <a class="button app-fix" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}</p>{% endif %}
 {% endmacro %}
-{% macro closing_block(j) %}
+{% macro same_job(j, v) %}{% if j.closing and j.closing.other_key %}Same job as: <a href="{{ v.link(job=j.closing.other_key) }}">{{ j.closing.other }}</a>{% else %}Same job as an earlier application{% endif %}{% endmacro %}
+{% macro closing_block(j, v) %}
   {% if j.closed %}<p class="app-closed"><strong>Why it closed:</strong> {{ j.closed }}
-    {% if j.closing and j.closing.other %}<br>Same as: {{ j.closing.other }}{% endif %}
-    {% if j.closing and j.closing.reason %}<br><span class="muted">Sidedoor's reasoning:</span> {{ j.closing.reason }}{% endif %}</p>{% endif %}
+    {% if j.duplicate %}<br>{{ same_job(j, v) }}{% endif %}
+    {% if j.reason %}<br>{{ j.reason }}{% endif %}</p>{% endif %}
 {% endmacro %}
 {% block content %}
+<div class="app-page">
 <h1 class="title">Applications</h1>
 {% set v = view %}
 {% set na = v.unavailable %}
@@ -34,11 +36,12 @@
   <p><span class="chip chip-{{ j.tone }}">{{ j.state }}</span>{% if j.reading and j.state != "Reading now" %} <span class="chip chip-info">Reading now</span>{% endif %}
     {% if j.url %}<a href="{{ j.url }}" rel="noopener noreferrer" target="_blank">Open the posting</a>{% endif %}</p>
   <dl class="facts">
-    {% if j.updated %}<dt>Last activity</dt><dd>{{ v.when(j.updated) }}</dd>{% endif %}
+    {% if j.submitted_at %}<dt>Submitted</dt><dd>{{ v.when(j.submitted_at) }}</dd>
+    {% elif j.updated %}<dt>Last activity</dt><dd>{{ v.when(j.updated) }}</dd>{% endif %}
     {% if j.next_at %}<dt>Next attempt</dt><dd>{{ v.when(j.next_at) }}</dd>{% endif %}
   </dl>
   {{ next_steps(j) }}
-  {{ closing_block(j) }}
+  {{ closing_block(j, v) }}
   {% if j.receipt %}<h3>Receipt</h3>{{ receipt_block(j.receipt, v) }}{% endif %}
 
   <h3>Eligibility</h3>
@@ -73,7 +76,9 @@
 {% else %}
 <nav class="app-filters" aria-label="Filter applications">
   {% for key, label in v.filters %}
+  {% if key == "all" or key == v.show or v.counts == na or v.counts[key] %}
   <a class="chip {{ 'chip-info app-filter-active' if key == v.show else 'chip-muted' }}" href="{{ v.link(show=key) }}"{% if key == v.show %} aria-current="true"{% endif %}>{{ label }}{% if v.counts != na %} <span class="app-count">{{ v.counts[key] }}</span>{% endif %}</a>
+  {% endif %}
   {% endfor %}
 </nav>
 <form class="app-search" method="get" action="/applications" role="search">
@@ -100,20 +105,27 @@
 </div>
 {% else %}
 <p class="muted app-total">{{ v.list.total }} application{{ "s" if v.list.total != 1 }}{% if v.list.pages > 1 %}, page {{ v.list.page }} of {{ v.list.pages }}{% endif %}</p>
+{% for g in v.list.groups %}
+<section class="app-group" aria-labelledby="app-group-{{ g.key }}">
+<h2 class="app-group-title" id="app-group-{{ g.key }}">{{ g.label }} <span class="muted">{{ g.count }}</span></h2>
 <ul class="app-list">
-  {% for j in v.list.jobs %}
+  {% for j in g.jobs %}
   <li class="card app-row app-{{ j.tone }}">
     <details>
       <summary>
         <span class="app-head"><strong>{{ j.company }}</strong> <span class="app-role">{{ j.role }}</span></span>
         <span class="chip chip-{{ j.tone }}">{{ j.state }}</span>{% if j.reading and j.state != "Reading now" %} <span class="chip chip-info">Reading now</span>{% endif %}
-        <span class="muted app-times">{% if j.updated %}Last activity {{ v.when(j.updated) }}{% endif %}{% if j.next_at %} · Next attempt {{ v.when(j.next_at) }}{% endif %}</span>
-        {% if j.todo and (j.needs_you or not j.closed) %}<span class="app-summary-todo{% if j.needs_you %} app-todo-you{% endif %}">{{ j.todo }}</span>{% endif %}
+        <span class="muted app-times">{% if j.submitted_at %}Submitted {{ v.when(j.submitted_at) }}{% elif j.updated %}Last activity {{ v.when(j.updated) }}{% endif %}{% if j.next_at %} · Next attempt {{ v.when(j.next_at) }}{% endif %}</span>
+        {% if j.closed and not j.duplicate %}<span class="app-summary-todo app-summary-closed">{{ j.closed }}</span>{% endif %}
+        {% if j.duplicate %}<span class="app-summary-todo app-summary-closed">{{ same_job(j, v) }}</span>{% endif %}
+        {% if j.reason %}<span class="app-summary-todo app-summary-reason muted">{{ j.reason }}</span>{% endif %}
+        {% if j.todo and (j.needs_you or not j.closed) %}<span class="app-summary-todo{% if j.attention %} app-todo-you{% endif %}">{{ j.todo }}</span>{% endif %}
+        {% if j.todo_href and j.todo_href == "/approvals#questions" %}<a class="button app-answer" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}
       </summary>
       <div class="app-body">
         <p>{% if j.url %}<a href="{{ j.url }}" rel="noopener noreferrer" target="_blank">Open the posting</a> · {% endif %}<a href="{{ v.link(company=j.employer, page=None) }}">More at {{ j.company }}</a></p>
         {{ next_steps(j) }}
-        {{ closing_block(j) }}
+        {{ closing_block(j, v) }}
         {% if j.receipt %}{{ receipt_block(j.receipt, v) }}{% endif %}
         {% if j.attempts %}
         <p class="app-attempts-line"><strong>Attempts:</strong>
@@ -125,6 +137,8 @@
   </li>
   {% endfor %}
 </ul>
+</section>
+{% endfor %}
 {% if v.list.pages > 1 %}
 <nav class="app-pages" aria-label="Pages">
   {% if v.list.page > 1 %}<a class="button" href="{{ v.link(page=v.list.page - 1) }}">Newer</a>{% endif %}
@@ -134,4 +148,5 @@
 {% endif %}
 {% endif %}
 {% endif %}
+</div>
 {% endblock %}

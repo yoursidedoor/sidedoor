@@ -171,7 +171,15 @@ record it, set facts.authorization to STATED_REQUIREMENT_NOT_MET instead. Never 
 authorization the map does not record. Leave
 facts.citizenship_clearance_requirements_met null: the host derives it from your list. Set facts.hiring_geography_includes_candidate only
 when the posting states where candidates must be based (e.g. "must be US based"); leave it
-null when it says nothing. Never answer any of these for the candidate.
+null when it says nothing. The candidate is included when he could be based in ANY place he
+lists for his search - each place in context.scope_targets.location_priority (with the work
+modes it names) or anywhere in context.scope_targets.countries - not only his current location
+(context.policy.answers current_location). When his search lists a place and its work modes
+include hybrid or onsite, he is open to relocating there: a role that is hybrid or onsite in
+that place includes him, wherever he lives now. A list of hubs or
+offices for hybrid or onsite work (e.g. "hybrid in our San Francisco, New York City, or Seattle
+hubs") is a location you judge under scope_fit.location, never a reason to set this false; set
+it false only when the stated requirement excludes every place he lists. Never answer any of these for the candidate.
 Scope judgment (owner decision, 2026-09-19): normalize location yourself. Set facts.country
 to the ISO 3166-1 alpha-2 code (exactly two capital letters, e.g. US, DE, GB) of the
 country the role is performed in, judged from the posting's own location text; a role
@@ -911,7 +919,8 @@ def result_contract(operation):
 def context(root, database, payload):
     policy = user_profile.load()
     job = payload["job"]
-    packet = {"policy": policy, "role": json.loads(job["payload"]),
+    # The model gets only the answer in force per semantic (owner, 2026-10-24).
+    packet = {"policy": applications.policy_for_model(policy), "role": json.loads(job["payload"]),
               "history_scope": "Saved evidence only; empty collections never establish absence",
               "saved_answers": [], "local_history": [], "external_history": [],
               "history_resolutions": []}
@@ -2954,12 +2963,17 @@ class HumanCheckWait:
         self.started = None
         self.waited = False
         self.extended = False
+        # Called once when the wait has begun (the owner notified, the claim extended): a headless
+        # session's guard reopens its Chrome headed for the tick (browser_guard.Proxy.show_headed).
+        self.on_begun = None
 
     def call(self):
         now = self.clock()
         if self.started is None:
             self.started = now
             self.extended = self.begin(now)
+            if self.extended and self.on_begun is not None:
+                self.on_begun()
         left = HUMAN_CHECK_SECONDS - (now - self.started).total_seconds()
         if left <= 0 or self.waited or not self.extended:
             return ("WAIT_EXPIRED: the owner did not clear the human check in time. Do not touch it; "

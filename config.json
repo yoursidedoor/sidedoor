@@ -4,6 +4,9 @@
   "codex": "/opt/homebrew/bin/codex",
   "model": "gpt-6-astra",
   "browser_read_model": "gpt-6-sol",
+  "browser_driver": {
+    "headless_operations": ["linkedin", "webmail", "inspect", "investigate", "submit", "verify", "reconcile"]
+  },
   "text_model": {
     "model": "z-ai/glm-5.3"
   },

@@ -11,12 +11,15 @@
   <form class="profile" method="post" action="/settings/profile" hx-post="/settings/profile" hx-target="#profile" hx-swap="outerHTML">
     <fieldset>
       <legend>Contact details</legend>
+      <div class="field-row">
       <div class="field{% if e.given_name %} has-error{% endif %}"><label for="s-given-name">First name</label>
         <input id="s-given-name" name="given_name" value="{{ f.given_name or '' }}" autocomplete="given-name">
         {% if e.given_name %}<p class="field-error">{{ e.given_name }}</p>{% endif %}{{ override(x.overrides or {}, "given_name") }}</div>
       <div class="field{% if e.family_name %} has-error{% endif %}"><label for="s-family-name">Last name</label>
         <input id="s-family-name" name="family_name" value="{{ f.family_name or '' }}" autocomplete="family-name">
         {% if e.family_name %}<p class="field-error">{{ e.family_name }}</p>{% endif %}{{ override(x.overrides or {}, "family_name") }}</div>
+      </div>
+      <div class="field-row">
       <div class="field{% if e.email %} has-error{% endif %}"><label{% if not x.email_locked %} for="s-email"{% endif %}>Application email</label>
         {% if x.email_locked %}
         <p class="locked-value" id="s-email"><strong>{{ x.state.locked_email }}</strong></p>
@@ -29,6 +32,7 @@
       <div class="field{% if e.phone %} has-error{% endif %}"><label for="s-phone">Phone</label>
         <input id="s-phone" type="tel" name="phone" value="{{ f.phone or '' }}" autocomplete="tel">
         {% if e.phone %}<p class="field-error">{{ e.phone }}</p>{% endif %}{{ override(x.overrides or {}, "phone") }}</div>
+      </div>
       <div class="field{% if e.linkedin %} has-error{% endif %}"><label for="s-linkedin">LinkedIn profile URL</label>
         <input id="s-linkedin" type="text" inputmode="url" autocomplete="url" name="linkedin" value="{{ f.linkedin or '' }}" placeholder="https://www.linkedin.com/in/your-name/">
         {% if e.linkedin %}<p class="field-error">{{ e.linkedin }}</p>{% endif %}{{ override(x.overrides or {}, "linkedin") }}</div>
@@ -49,12 +53,14 @@
     <fieldset>
       <legend>Application answers</legend>
       {% with pick = x.pick("work_authorization", f.work_authorization), label = "Work authorization and sponsorship (one line per country)", error = e.work_authorization %}{% include "pick.html" %}{% endwith %}{{ override(x.overrides or {}, "work_authorization") }}
+      <div class="field-row">
       <div class="field{% if e.notice_period %} has-error{% endif %}"><label for="s-notice">Notice period</label>
         <input id="s-notice" name="notice_period" value="{{ f.notice_period or '' }}" placeholder="2 weeks">
         {% if e.notice_period %}<p class="field-error">{{ e.notice_period }}</p>{% endif %}{{ override(x.overrides or {}, "notice_period") }}</div>
       <div class="field{% if e.start_weeks %} has-error{% endif %}"><label for="s-start-weeks">Earliest start: weeks after an application</label>
         <input id="s-start-weeks" name="start_weeks" inputmode="numeric" value="{{ f.start_weeks or '' }}" placeholder="4">
         {% if e.start_weeks %}<p class="field-error">{{ e.start_weeks }}</p>{% endif %}{{ override(x.overrides or {}, "start_weeks") }}</div>
+      </div>
     </fieldset>
     <fieldset>
       <legend>Voluntary self-identification</legend>
@@ -74,7 +80,7 @@
   <p class="why">Answers you gave to Sidedoor's questions on Approvals. Sidedoor's answering AI uses them on later applications when a question asks the same thing, and decides whether each one fits.</p>
   <div class="settings-kept-answers" id="kept-answers">
   {% if x.kept_answers %}
-    {% for key, answer in x.kept_answers %}{% with notice = None, over = x.kept_over or {}, oob = False, status = x.kept_status or {} %}{% include "settings_kept_answer.html" %}{% endwith %}{% endfor %}
+    {% for key, answer in x.kept_answers %}{% with notice = None, over = x.kept_over or {}, oob = False, status = x.kept_status or {}, companies = x.kept_companies or {} %}{% include "settings_kept_answer.html" %}{% endwith %}{% endfor %}
   {% else %}
     <p class="muted">No saved answers yet. When an application asks something only you can answer, the question appears on Approvals, and your answer is kept here.</p>
   {% endif %}
@@ -142,7 +148,7 @@
   <h2>Mode</h2>
   <form class="mode" method="post" action="/settings/mode" hx-post="/settings/mode" hx-trigger="change" hx-target="#mode" hx-swap="outerHTML">
     <label class="choice"><input type="radio" name="mode" value="automatic"{% if x.state.mode != "review" %} checked{% endif %}>
-      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, replies and follow-ups on its own, within its safety rules. Every message is shown on the Sent page.</span></label>
+      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, replies and follow-ups on its own, within its safety rules. Every message is shown on the Networking &amp; Referrals page.</span></label>
     <label class="choice"><input type="radio" name="mode" value="review"{% if x.state.mode == "review" %} checked{% endif %}>
       <span><strong>Review.</strong> Sidedoor drafts them and waits for you to approve each one on the Approvals page. Research and applications still run on their own.</span></label>
     <noscript><button class="button" type="submit">Save</button></noscript>
@@ -180,7 +186,8 @@
 {% elif x.name == "license" %}
   <h2>License</h2>
   {% set l = x.license %}
-  <p>Status: <span class="chip chip-{{ x.chip.tone }}">{{ x.chip.label }}</span></p>
+  {# One status line (owner, 2026-10-24): the chip, then only what its label does not already say. #}
+  <p class="license-status">Status: <span class="chip chip-{{ x.chip.tone }}">{{ x.chip.label }}</span>{% if x.status_detail and x.has_key and not x.keychain_wait %} <span class="{{ 'license-status-' ~ x.view.tone }}">{{ x.status_detail }}</span>{% endif %}</p>
   {% if x.keys_removed %}<p class="note note-warning" role="status">{{ x.keys_removed }}</p>{% endif %}
   {% if x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_notice }}</p>{% endif %}
   {% if x.keychain_wait %}
@@ -194,7 +201,6 @@
   {% endif %}
   {% else %}
   {% if x.has_key %}
-  <p class="note note-{{ x.view.tone }}" role="status">{{ x.view.text }}</p>
   {% for action in x.view.actions %}
   {% if action.post %}
   {% with check_next="/settings", check_label=action.label %}{% include "license_check.html" %}{% endwith %}
@@ -213,10 +219,11 @@
     <dt>This computer</dt><dd>{% if x.active %}Activated{% else %}Not active{% endif %}</dd>
   </dl>
   {% endif %}
-  {% if l.message %}<p class="note note-{{ 'success' if l.status == 'done' else 'error' }}" role="status">{{ l.message }}</p>{% endif %}
-  {% if x.has_key %}
+  {# A successful check's saved line ("Active: Trial.") repeats the status above; only a refusal is shown. #}
+  {% if l.message and l.status != 'done' %}<p class="note note-error" role="status">{{ l.message }}</p>{% endif %}
+  {% if x.offer_activate %}
   <form method="post" action="/settings/license/activate" hx-post="/settings/license/activate" hx-target="#license" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button{% if x.active %} button-quiet{% endif %}" type="submit">Activate</button> <span class="htmx-indicator muted">Checking...</span>
+    <button class="button" type="submit">Activate</button> <span class="htmx-indicator muted">Checking...</span>
   </form>
   {% endif %}
   <form method="post" action="/settings/license/change" hx-post="/settings/license/change" hx-target="#license" hx-swap="outerHTML" hx-disabled-elt="find button">

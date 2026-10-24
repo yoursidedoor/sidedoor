@@ -243,9 +243,31 @@ def banner(home=None):
     found = _banner(home)
     if notice:
         if found is None:
-            return {"tone": "warning", "text": notice, "dismiss_notice": True}
-        return dict(found, tone="warning", text=notice + " " + found["text"], dismiss_notice=True)
+            return {"tone": "warning", "text": notice, "dismiss_notice": True, "update_phase": "notice"}
+        # owner, 2026-10-24: the failure on line 1, the offer on line 2; one Dismiss hides both.
+        return dict(found, tone="warning", lead=notice, dismiss_notice=True)
     return found
+
+
+def offer(home=None):
+    """{"latest", "download_url", "dismissed"} of a newer version on offer, even after its banner was
+    dismissed (Overview's version chip still says so; owner, 2026-10-24), or None. Never raises."""
+    try:
+        state = _read(home)
+        available = state.get("available")
+        if not isinstance(available, dict):
+            return None
+        latest = parse_version(available.get("latest"))
+        installed = parse_version(installed_version())
+        if latest is None or installed is None or latest <= installed:
+            return None
+        if not _allowed_download(available.get("download_url")):
+            return None
+        dismissed = parse_version(state.get("dismissed"))
+        return {"latest": available["latest"], "download_url": available["download_url"],
+                "dismissed": dismissed is not None and dismissed >= latest}
+    except Exception:
+        return None
 
 
 def _banner(home):
@@ -264,7 +286,8 @@ def _banner(home):
         if dismissed is not None and dismissed >= latest:
             return None
         notes = available.get("notes") if isinstance(available.get("notes"), str) else ""
-        found = {"tone": "info", "text": "Sidedoor %s is available." % available["latest"],
+        # `update_phase` is the banner's phase (banner_item.html): available, working, restarting, failed.
+        found = {"tone": "info", "text": "Sidedoor %s is available." % available["latest"], "update_phase": "available",
                  "action_label": "Download", "action_href": available["download_url"], "external": True,
                  "notes": notes[:MAX_NOTES] or None, "dismiss": available["latest"]}
         return _with_update_now(found, available)
@@ -284,11 +307,17 @@ def _with_update_now(found, available):
         found = dict(found, download_href=found["action_href"])
         if state.get("version") == available["latest"] and state.get("state") in ("working", "replacing"):
             # poll: the banner re-reads itself (GET /update/banner, every 3 s) until the state ends.
-            return dict(found, text=state["message"], dismiss=None, poll=True)
+            # owner, 2026-10-24: no buttons while it runs; a short "Updating to X…", then "Restarting…".
+            if state["state"] == "replacing":
+                return dict(found, update_phase="restarting", tone="success", dismiss=None, poll=True,
+                            text="Sidedoor opens again by itself on %s." % available["latest"])
+            return dict(found, update_phase="working", text="Updating to %s…" % available["latest"], dismiss=None, poll=True)
+        label = "Update now"
         if state.get("version") == available["latest"] and state.get("state") == "failed":
-            found = dict(found, tone="warning", text=state["message"])
+            found = dict(found, update_phase="failed", tone="warning", text=state["message"])
+            label = "Try again"
         return dict(found, forms=[{"action": "/update/install", "fields": {"version": available["latest"]},
-                                   "label": "Update now"}])
+                                   "label": label}])
     except Exception:
         return None
 

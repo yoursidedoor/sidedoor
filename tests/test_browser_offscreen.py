@@ -41,8 +41,9 @@ class OffscreenLaunch(unittest.TestCase):
         self.assertEqual(command[-1], "about:blank")
 
     def test_playwright_fallback_launch_and_guard_flag_on_macos_only(self):
+        # The headed fallback (owner, 2026-10-24): an operation left out of headless_operations.
         directory = scratch(self)
-        config = {"browser_driver": {"profile": str(directory / "profile")}}
+        config = {"browser_driver": {"profile": str(directory / "profile"), "headless_operations": []}}
         with mock.patch.object(browser_runtime.sys, "platform", "darwin"):
             argv = browser_runtime.guard_command(config, directory, "inspect")
             launch = json.loads((directory / "browser-config.json").read_text())
@@ -345,11 +346,20 @@ class ProfileOwnedBySidedoor(unittest.TestCase):
             self.assertEqual(browser_runtime.display_state(self.config, self.root, run), "RUNTIME_MISSING")
 
     def test_doctor_carries_the_offscreen_note_on_macos(self):
-        with mock.patch.object(browser_runtime, "offscreen", lambda config=None, platform=None: True):
+        ua = mock.patch.object(browser_runtime, "headed_user_agent", lambda binary: "UA")   # a readable Chrome
+        with ua, mock.patch.object(browser_runtime, "offscreen", lambda config=None, platform=None: True):
             line = doctor.check_browser_runtime(self.config, ps(["/usr/bin/vim"]), self.root)
-        self.assertIn(browser_runtime.OFFSCREEN_WORDS, line["line"])
+        self.assertIn(browser_runtime.HEADLESS_WORDS, line["line"])   # default: every operation headless
+        with mock.patch.object(browser_runtime, "headed_user_agent", lambda binary: None), \
+                mock.patch.object(browser_runtime, "offscreen", lambda config=None, platform=None: True):
+            line = doctor.check_browser_runtime(self.config, ps(["/usr/bin/vim"]), self.root)
+        self.assertIn(browser_runtime.OFFSCREEN_WORDS, line["line"])  # version unreadable: it runs minimized
         self.assertEqual(browser_runtime.OFFSCREEN_WORDS,
                          "Sidedoor's browser runs minimized in the Dock; it appears when it needs you.")
+        with mock.patch.object(browser_runtime, "offscreen", lambda config=None, platform=None: True):
+            line = doctor.check_browser_runtime(dict(self.config, browser_driver=dict(
+                self.config.get("browser_driver") or {}, headless_operations=[])), ps(["/usr/bin/vim"]), self.root)
+        self.assertIn(browser_runtime.OFFSCREEN_WORDS, line["line"])
 
 
 import setup_steps  # noqa: E402
@@ -365,12 +375,13 @@ class OverviewSaysNothingWhileASessionRuns(unittest.TestCase):
         test_dashboard_overview.finished_home(self.home)
         with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"), \
                 mock.patch.object(browser_runtime, "display_state", lambda config=None, root=None, run=None: "SESSION_BUSY"), \
-                mock.patch.object(browser_runtime, "offscreen", lambda config=None, platform=None: True):
+                mock.patch.object(browser_runtime, "offscreen", lambda config=None, platform=None: True), \
+                mock.patch.object(browser_runtime, "headed_user_agent", lambda binary: "UA"):
             health = {entry["name"]: entry for entry in self.gather()["health"]}
         texts = json.dumps(health, default=str)
         self.assertNotIn(browser_runtime.UNAVAILABLE_WORDS["PROFILE_IN_USE"], texts)
         self.assertNotIn("Close the Sidedoor Chrome window", texts)
-        self.assertEqual(health["Browser window"]["text"], browser_runtime.OFFSCREEN_WORDS)
+        self.assertEqual(health["Browser window"]["text"], browser_runtime.HEADLESS_WORDS)   # config.json: all headless
         with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):
             self.assertNotIn("Browser window", {entry["name"] for entry in self.gather()["health"]})   # tests: off
 

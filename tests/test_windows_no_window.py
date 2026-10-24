@@ -67,7 +67,7 @@ class NoWindowTests(unittest.TestCase):
 
     def test_browser_guard_node_child(self):
         source = Path(browser_guard.__file__).read_text(encoding="utf-8")
-        start = source.index("self.child = subprocess.Popen(")
+        start = source.index("return subprocess.Popen(self.child_argv")   # spawn_child (also the H1 respawn)
         self.assertIn("**portable.no_window()", source[start:source.index("\n\n", start)])
 
     def test_other_windows_children_already_have_no_window(self):

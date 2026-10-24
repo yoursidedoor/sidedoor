@@ -60,11 +60,34 @@ a { color: var(--primary); }
 .banner-notes { font-weight: 400; }
 .banner-notes p { margin: 4px 0 0; white-space: pre-line; }
 .banner-dismiss { margin: 0; }
-.banner-dismiss button { background: none; border: 0; padding: 0; font: inherit; text-decoration: underline; cursor: pointer; }
+.banner-dismiss button { background: none; border: 0; padding: 0; font: inherit; text-decoration: none; cursor: pointer; }
+.banner-dismiss button:hover { text-decoration: underline; }
+/* The update banner (owner, 2026-10-24): text left, one right-aligned cluster; notes below, full width. */
+.banner-update { display: block; }
+.banner-update .banner-row { display: flex; align-items: center; gap: 16px; }
+.banner-update .banner-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.banner-update .banner-line { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.banner-update .banner-lead { font-weight: 600; }
+.banner-controls { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; white-space: nowrap; }
+.banner-controls .banner-form { margin: 0; }
+.banner-controls .button { padding: 6px 16px; white-space: nowrap; }
+.banner-link { color: inherit; font-weight: 400; text-decoration: underline; cursor: pointer; white-space: nowrap; }
+.banner-notes-toggle { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.banner-notes-toggle:focus-visible ~ .banner-row label.banner-link { outline: 2px solid currentColor; outline-offset: 2px; }
+.banner-notes-panel { display: none; margin: 8px 0 0; padding-top: 8px; border-top: 1px solid currentColor; font-weight: 400; white-space: pre-line; }
+.banner-notes-toggle:checked ~ .banner-notes-panel { display: block; }
+.banner-chip { padding: 2px 10px; font-size: 0.8125rem; background: var(--white); }
+.banner-spinner { flex: none; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: banner-spin 0.8s linear infinite; }
+@keyframes banner-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .banner-spinner { animation: none; border-right-color: currentColor; opacity: 0.6; } }
+.overview-version-update { color: var(--info); background: var(--info-tint); text-decoration: none; }
+.overview-version-update:hover { text-decoration: underline; }
 /* E8.T2: license banners carry a message, a button and a second link; under 480px they stack. */
 @media (max-width: 480px) {
   .banners { padding: 0 16px; }
   .banner { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .banner-update .banner-row { flex-direction: column; align-items: stretch; gap: 8px; }
+  .banner-controls { justify-content: flex-start; }
 }
 
 .button {
@@ -74,7 +97,9 @@ a { color: var(--primary); }
 }
 .button-highlight { background: var(--gradient); }
 
-.page { max-width: 1120px; margin: 0 auto; padding: 32px; }
+/* One wide container for every dashboard page (owner, 2026-10-24); form pages cap their fields'
+   width instead (Settings and Setup), never the page. */
+.page { max-width: 1600px; margin: 0 auto; padding: 32px; }
 .title { font-size: 2rem; font-weight: 800; margin: 0 0 24px; }
 .gradient-text { background: var(--gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .card {
@@ -91,7 +116,7 @@ a { color: var(--primary); }
 .progress progress::-webkit-progress-value { background: var(--gradient); border-radius: 999px; }
 .progress progress::-moz-progress-bar { background: var(--gradient); border-radius: 999px; }
 .setup-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
-@media (max-width: 900px) { .setup-layout { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .setup-layout { grid-template-columns: minmax(0, 1fr); } }
 .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
 .step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .step-head h2 { font-size: 1.125rem; margin: 0; flex: 1; }
@@ -110,8 +135,13 @@ label { display: block; font-weight: 600; margin: 8px 0 4px; }
 input, select { font: inherit; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--white); color: var(--text); min-width: 240px; max-width: 100%; }
 input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
 input[type="radio"], input[type="checkbox"] { min-width: 0; accent-color: var(--primary); }
-fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 16px; }
-legend { font-weight: 800; padding: 0 6px; }
+/* min-width 0: a fieldset otherwise grows to its widest field and scrolls a phone sideways (Setup). */
+fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 16px; min-width: 0; }
+/* Setup's fields keep a readable line on the wide page. */
+.steps input:not([type="radio"]):not([type="checkbox"]), .steps select, .steps textarea { max-width: min(100%, 40rem); }
+/* A box title sits inside its box, lined up with the fields, not on the border (owner, 2026-10-24). */
+legend { float: left; width: 100%; padding: 0; margin: 0 0 12px; font-size: 1.05rem; font-weight: 800; }
+legend + * { clear: both; }
 .has-error input, .has-error select, .has-error .chosen { border-color: var(--error); outline: 1px solid var(--error); }
 .field-error { color: var(--error); font-weight: 600; margin: 4px 0 0; }
 .choice { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; }
@@ -119,9 +149,20 @@ legend { font-weight: 800; padding: 0 6px; }
 .guide-link { font-weight: 600; }
 .guide-panel { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
 .guide-panel h3 { margin-top: 0; }
+/* Settings (owner, 2026-10-24): the guide column is hidden until a "Show me how" guide is opened
+   into it (htmx fills #guide-panel); until then the settings take the full width. */
+.guide-on-demand { grid-template-columns: minmax(0, 1fr); }
+.guide-on-demand > .guide-panel:empty { display: none; }
+.guide-on-demand:has(> .guide-panel:not(:empty)) { grid-template-columns: minmax(0, 1fr) 340px; }
+@media (max-width: 900px) { .guide-on-demand:has(> .guide-panel:not(:empty)) { grid-template-columns: 1fr; } }
 .verify { color: var(--warning); font-size: 0.875rem; }
 pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; overflow-x: auto; user-select: all; }
 .picklist { margin: 8px 0 12px; }
+/* The chips and the search box share a line and wrap together (owner, 2026-10-24). */
+.pick-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 40rem; }
+.pick-row > .chosen { display: contents; }
+.pick-row > input[type="search"] { flex: 1 1 22rem; min-width: 0; width: auto; }
+.has-error .pick-row > input[type="search"] { border-color: var(--error); outline: 1px solid var(--error); }
 .chosen { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; padding: 4px 0; border-radius: 10px; }
 .chosen .remove { border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; margin-left: 6px; }
 .options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
@@ -136,20 +177,44 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 
 /* Overview (E6.T3; E6.T0 spec section 5) */
 .not-running { margin-bottom: 24px; }
-.overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; align-items: start; }
+.overview-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 24px; }
+.overview-head .title { margin: 0; }
+.overview-version { color: var(--muted); background: #F3F4F6; border-radius: 999px; padding: 2px 10px; font-size: 0.8125rem; font-weight: 600; }
+ul.overview-alerts { margin: 0 0 24px; }
+.overview-alerts .health-item { padding: 12px 16px; border: 0; border-radius: var(--radius); }
+.overview-alerts .health-item.health-warning { background: var(--warning-tint); }
+.overview-alerts .health-item.health-error { background: var(--error-tint); }
+.overview-alerts .health-item:last-child { padding-bottom: 12px; }
+.overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; align-items: start; }
 .overview-today, .overview-health { grid-column: 1 / -1; }
+@media (max-width: 900px) { .overview-grid { grid-template-columns: minmax(0, 1fr); } }
 .overview-grid h2 { font-size: 1.25rem; margin: 0 0 16px; }
 .overview-grid h3 { font-size: 1rem; margin: 0 0 8px; }
 .overview-since { font-size: 0.875rem; font-weight: 400; }
 .overview-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 24px; }
-.overview-stats { margin: 0; }
-.overview-stats dt { color: var(--muted); font-size: 0.875rem; margin-top: 8px; }
-.overview-stats dd { margin: 0; }
-.overview-number { font-size: 1.5rem; font-weight: 800; text-decoration: none; }
+.overview-run { margin: 0 0 8px; font-size: 0.875rem; }
+/* One row per number: the label on the left, the number on the right, all one neutral style
+   (owner, 2026-10-24: numbers are dark; orange is for what needs you or can be clicked). */
+.overview-stats { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 0; align-items: stretch; }
+.overview-stats dt { display: flex; align-items: center; color: var(--muted); font-size: 0.875rem; padding: 6px 0; border-top: 1px solid var(--border); }
+.overview-stats dd { display: flex; align-items: baseline; justify-content: flex-end; gap: 4px; margin: 0; text-align: right; padding: 6px 0 6px 16px; border-top: 1px solid var(--border); }
+.overview-stats .overview-sub { grid-column: 1 / -1; justify-content: flex-start; text-align: left; padding: 0 0 6px; border-top: 0; font-size: 0.875rem; }
+.overview-number { font-size: 1.25rem; font-weight: 800; color: var(--text); text-decoration: none; font-variant-numeric: tabular-nums; }
+a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary); text-decoration: underline; }
+.overview-needs-list { list-style: none; margin: 0; padding: 0; }
+.overview-needs-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border); }
+.overview-needs-row:first-child { border-top: 0; padding-top: 0; }
+.overview-needs-row .overview-number { min-width: 2ch; text-align: right; }
+.overview-needs-what { flex: 1; }
+.overview-needs-none { color: var(--muted); }
+.overview-needs-none .overview-number { color: var(--muted); font-weight: 600; }
+.overview-needs-go { padding: 4px 14px; font-size: 0.875rem; }
 .overview-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.health-item { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.health-item { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .health-item:last-child { border-bottom: 0; padding-bottom: 0; }
-.health-dot { width: 12px; height: 12px; border-radius: 999px; flex: none; background: var(--muted); }
+/* The dot sits on the label's first line (owner, 2026-10-24): 24px line, 12px dot. */
+.health-dot { width: 12px; height: 12px; margin-top: 6px; border-radius: 999px; flex: none; background: var(--muted); }
+.health-item > .health-fix { align-self: center; }
 .health-success .health-dot { background: var(--success); }
 .health-warning .health-dot { background: #F59E0B; }
 .health-error .health-dot { background: var(--error); }
@@ -189,6 +254,18 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 .settings-sections { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .settings-section h2 { margin-top: 0; }
 .settings-section h3 { font-size: 1rem; margin: 16px 0 6px; }
+/* Text boxes use the width they have, up to a comfortable line (owner, 2026-10-24); phones get 100%. */
+.settings-section .field input:not([type="radio"]):not([type="checkbox"]):not([type="file"]),
+.settings-section .field select, .settings-section form > input[type="password"] { width: 100%; max-width: 40rem; min-width: 0; }
+.settings-section .secret { display: inline-flex; vertical-align: middle; width: min(100%, 28rem); }
+.settings-section .secret input { flex: 1 1 auto; width: auto; min-width: 0; }
+.license-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.license-status-error { color: var(--error); font-weight: 600; }
+.license-status-warning { color: var(--warning); font-weight: 600; }
+/* Short fields side by side where they fit; one column on narrow screens. */
+.settings-section fieldset { min-width: 0; }
+.field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0 16px; max-width: 40rem; }
+.field-row .field input, .field-row .field select { max-width: 100%; }
 .connection { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 12px; }
 .resume-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 12px; }
 .resume-file { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; }
@@ -236,6 +313,12 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 .app-answers dt { font-weight: 600; }
 .app-answers dd { margin: 0; }
 .app-pages { display: flex; align-items: center; justify-content: center; gap: 16px; margin: 16px 0; }
+/* Owner, 2026-10-24: the list sits under small headings, and the filters hide empty ones. */
+.app-group { margin: 0 0 24px; }
+.app-group-title { font-size: 0.875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+.app-group-title .muted { font-weight: 600; margin-left: 4px; }
+.app-summary-closed { color: var(--muted); }
+.app-answer { padding: 4px 14px; font-size: 0.875rem; }
 @media (max-width: 640px) {
   .app-row summary { padding: 12px 16px; }
   .app-body { padding: 0 16px 12px; }
@@ -258,7 +341,14 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 .fail-detail code { overflow-wrap: anywhere; }
 .fail-reasons { margin: 6px 0 0; padding-left: 18px; font-size: 0.95em; }
 .fail-reason { margin: 2px 0; overflow-wrap: anywhere; }
-.fail-reason code { font-size: 0.9em; }
+.fail-reason code, .fail-code { font-size: 0.8em; color: var(--muted); }
+.fail-calm { border-left: 4px solid var(--info); }
+.fail-calm-waiting { border-left-color: var(--border); }
+.fail-calm-list { margin-top: 12px; }
+.fail-earlier { margin-top: 12px; }
+.fail-earlier > summary { cursor: pointer; font-weight: 600; }
+.fail-earlier > .fail-list { margin-top: 12px; }
+.log-quiet { margin: 0 0 8px; }
 .fail-error { color: var(--muted); }
 .fail-runs { padding-left: 18px; }
 .fail-runs li { margin: 2px 0; overflow-wrap: anywhere; }
@@ -295,10 +385,64 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 .approval-note { white-space: pre-wrap; }
 .approvals-notices { margin: 0; padding-left: 20px; }
 .approvals-kept { display: block; margin-bottom: 16px; }
+/* Owner, 2026-10-24: an empty Approvals list is one compact line; a notice is its time, plain words
+   and a link. */
+.approvals-empty { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 12px 20px; margin-bottom: 12px; }
+.approvals-empty h2 { margin: 0; font-size: 1rem; }
+.approvals-empty p { margin: 0; }
+.approvals-notices { list-style: none; padding-left: 0; display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere; }
+.approvals-notice-time { display: inline-block; min-width: 7.5rem; }
+/* Questions and notes are tight cards, like Settings > Your saved answers (owner, 2026-10-24). */
+.approvals-section > h2 { margin: 0 0 8px; font-size: 1.25rem; }
+.approvals-section { padding: 16px 20px; margin-bottom: 16px; }
+.approvals-section.approvals-empty { padding: 12px 20px; margin-bottom: 12px; }
+#questions .approval-card, #notes .approval-card { padding: 12px 0; }
+#questions .approval-card p, #notes .approval-card p { margin: 0; }
+#questions .approval-q-text { margin-top: 2px; }
+.approval-q-due, .approval-n-from { font-size: 0.85rem; }
+#questions .approval-card .note, #notes .approval-card .note { margin: 6px 0 0; }
+.approval-q-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; min-width: 0; }
+.approval-q-form input[type="text"], .approval-q-form select { flex: 0 1 28rem; min-width: 0; max-width: 100%; padding: 6px 8px; }
+.approval-q-form textarea { flex: 1 1 28rem; width: auto; min-width: 0; max-width: 48rem; }
+.approval-q-prose { align-items: flex-end; }
+.approval-q-choices { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.approval-q-choice { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; }
+.approval-q-form .button, .approval-n-row .button { padding-top: 6px; padding-bottom: 6px; }
+.approval-n-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin-top: 4px; }
+.approval-n-row form { margin: 0; }
+.approvals-section.approvals-empty > h2 { margin: 0; font-size: 1rem; }
+@media (max-width: 640px) { .approvals-notice-time { display: block; min-width: 0; } }
+/* Waiting and couldn't-send messages: the same tight lines (owner, 2026-10-24). */
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+#messages .approval-card, #refused .approval-card { padding: 12px 0; }
+#refused .approval-card { padding: 8px 0 8px 12px; margin-top: 8px; }
+#refused > p.muted { margin: 0 0 4px; }
+#messages .approval-card > p, #refused .approval-card > p, #messages .approval-card > blockquote, #refused .approval-card > blockquote { margin: 0 0 4px; }
+.approval-m-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.approval-m-small { font-size: 0.85rem; }
+.approvals-section .approval-thread { margin: 4px 0; font-size: 0.9rem; }
+.approvals-section .approval-thread ol { margin: 4px 0; }
+.approvals-section .approval-thread p { margin: 0 0 4px; }
+.approval-not-ready { color: var(--warning); }
+.approvals-section .approval-text { margin: 4px 0; padding: 8px 12px; }
+.approvals-section .approval-edit { margin: 4px 0 0; }
+.approvals-section .approval-edit textarea { max-width: 60rem; }
+.approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 6px; }
+.approval-actions .approval-inline { margin: 0; }
+.approval-actions .approval-count { margin: 0; font-size: 0.85rem; }
+.approval-actions .approval-reject { margin: 0; }
+.approval-actions .approval-reject[open] { flex: 1 1 100%; }
+.approval-actions .button { padding-top: 6px; padding-bottom: 6px; }
 .button[disabled] { opacity: 0.5; cursor: not-allowed; }
-.settings-kept-answers .kept-answer { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
-.settings-kept-answers .kept-answer form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.settings-kept-answers input, .settings-kept-answers select { font: inherit; padding: 6px 8px; min-width: 0; max-width: 100%; }
+/* Saved answers (owner, 2026-10-24): three tight lines per card - the question, where and when, then the
+   answer with Save and Remove on one row; long text wraps inside the card. */
+.settings-kept-answers { min-width: 0; max-width: 100%; }
+.settings-kept-answers .kept-answer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 14px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; min-width: 0; }
+.settings-kept-answers .kept-answer > p { flex: 0 0 100%; margin: 0; min-width: 0; }
+.settings-kept-answers .kept-answer > p.muted { font-size: 0.85rem; margin-bottom: 6px; }
+.settings-kept-answers .kept-answer > form { display: flex; flex-wrap: nowrap; gap: 8px; align-items: center; margin: 0; min-width: 0; flex: 0 1 auto; }
+.settings-kept-answers .kept-answer > form:first-of-type { flex: 0 1 32rem; }
+.settings-kept-answers input, .settings-kept-answers select { font: inherit; padding: 6px 8px; flex: 1 1 0; width: auto; min-width: 0; max-width: 100%; }
 @media (max-width: 480px) {
   .approval-inline { align-items: stretch; }
   .approval-inline .button, .approval-edit .button { width: 100%; }

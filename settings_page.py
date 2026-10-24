@@ -28,6 +28,7 @@ message, URL or log.
 /settings route.
 """
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -150,6 +151,34 @@ def _read(root, read, empty):
         database.close()
 
 
+def kept_companies(root, keys):
+    """{saved-answer key: the company as its job posting writes it} (owner, 2026-10-24: "insforge
+    (instacloud)" is the stored employer key; the Applications page shows the posting's own
+    "InsForge (InstaCloud)"). From each answer's Approvals question and its job's payload; an answer
+    whose question or job is gone, or an unreadable database, falls back to the stored employer."""
+    ids = {key[len(setup_steps.OWNER_ANSWER_KEY):]: key for key in keys if key.startswith(setup_steps.OWNER_ANSWER_KEY)}
+    if not ids:
+        return {}
+
+    def read(database):
+        found = {}
+        marks = ",".join("?" * len(ids))
+        for decision_id, payload in database.execute(
+                "SELECT d.id, j.payload FROM user_decisions d JOIN application_jobs j ON j.job_key=d.job_key "
+                "WHERE d.id IN (%s)" % marks, tuple(ids)):
+            try:
+                company = (json.loads(payload) or {}).get("company") if payload else None
+            except (TypeError, ValueError):
+                company = None
+            if isinstance(company, str) and company.strip():
+                found[ids[decision_id]] = company.strip()
+        return found
+    try:
+        return _read(root, read, {})
+    except sqlite3.Error:
+        return {}
+
+
 def current_claims(root):
     """[(claim_id, claim)] of the résumé in use."""
     return _read(root, resume_intake.claims, [])
@@ -194,6 +223,16 @@ def _sync_license_pause(root, home):
     dashboard.sync_license_pause(root, home)
 
 
+def status_detail(view):
+    """What Settings > License's status line says after its chip: the state's words without the
+    label they start with ("Trial: 10 days left." beside the chip "Trial: 10 days left" says nothing
+    more; owner, 2026-10-24: one status line). None when nothing is left."""
+    text, label = str(view.get("text") or "").strip(), str(view.get("label") or "").strip()
+    if label and text.startswith(label):
+        text = text[len(label):].lstrip(" .")
+    return text or None
+
+
 def register(app, templates, layout, pick_view, *, home, root, config, browser, relay_url):
     app.router.routes[:] = [route for route in app.router.routes if getattr(route, "path", None) != "/settings"]
 
@@ -215,7 +254,8 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         elif name == "answers":
             # Your saved answers (owner, 2026-10-24): every answer given on Approvals, kept for later jobs.
             result.update(kept_answers=setup_steps.owner_answers(home), kept_over=setup_steps.kept_overrides(home)[1],
-                          kept_status=setup_steps.kept_status(home))   # E6.T4 A3, item 5
+                          kept_status=setup_steps.kept_status(home),   # E6.T4 A3, item 5
+                          kept_companies=kept_companies(root, [key for key, _ in setup_steps.owner_answers(home)]))
         elif name == "resume":
             profile = setup_steps.read_profile(home)
             raw = profile.get("resume_raw") if isinstance(profile.get("resume_raw"), dict) else None
@@ -252,6 +292,13 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
             result.update(license=license_clock.local_message(steps.get("license", {}), config), chip=chip, key=masked(key, "SD-" if key and key.startswith("SD-") else ""),
                           has_key=bool(key), key_box=key or "", view=view, times=license_times(view, config),
                           entitlement=value, active=bool(value) and view["problem"] != "machine",
+                          status_detail=status_detail(view),
+                          # [Activate] only while the license is not active and usable on this computer
+                          # (owner, 2026-10-24: not beside "Active"); kept for an expired key renewed on
+                          # the website and for the 2-computer limit, whose words ask for it.
+                          offer_activate=bool(key) and (not (bool(value) and view["problem"] != "machine")
+                                                        or not view["usable"]
+                                                        or view["problem"] == "activation_limit"),
                           portal=str(config.get("billing_portal_url") or "").strip(),
                           portal_line=PORTAL_LINE, no_portal=NO_PORTAL,
                           keychain_wait=setup_steps.keys_waiting(home),
@@ -464,7 +511,8 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         answer = dict(setup_steps.owner_answers(home)).get(key)
         over = setup_steps.kept_overrides(home)[1]
         return templates.get_template("settings_kept_answer.html").render(key=key, answer=answer, notice=notice, over=over, oob=oob,
-                                                                          status=setup_steps.kept_status(home))
+                                                                          status=setup_steps.kept_status(home),
+                                                                          companies=kept_companies(root, [key]))
 
     def kept_answer(request, key, notice):
         if not htmx(request):

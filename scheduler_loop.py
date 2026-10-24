@@ -12,6 +12,9 @@ What it does, and nothing more:
   instant on the hourly :00 except at `day_start_hour` (see `schedule`). Minutes are read in
   `config["timezone"]`; the 9:00 research boundary is not computed here: the research child's
   `daily_schedule.claim`/`due_day` decide the service day, as today.
+- The invitation tick (owner, 2026-10-24): on a Unipile install also `sidedoor job invites` every
+  15 minutes (`INVITE_INTERVAL_SECONDS`, at :02:30, :17:30, :32:30 and :47:30 local), which runs only
+  the hourly round's invitation step under state/runner.lock (`orchestrator.invite_tick`).
 - Per job it remembers the latest scheduled instant it fired. A job whose latest due instant is
   newer is due; however many instants a sleep or a clock jump skipped, it fires once.
 - A due job whose previous child is still alive is skipped and that instant is spent, as launchd's
@@ -58,11 +61,24 @@ DATABASE = Path(paths.STATE) / paths.DATABASE
 # Research first: on a wake every due child starts in this order, and the children themselves yield
 # to research (research_turn_pending, research_holds_turn), as under launchd.
 JOBS = ("research", "run", "applications")
+# The invitation tick (owner, 2026-10-24, option c: "run the invitation step every 15 minutes instead of
+# hourly"): `sidedoor job invites` (orchestrator.invite_tick) every INVITE_INTERVAL_SECONDS, at
+# INVITE_OFFSET_SECONDS past each local quarter hour (:02:30, :17:30, :32:30, :47:30), halfway between
+# research instants (every 300 s) and off the hourly round's :00, since all three take
+# state/runner.lock. Only on a Unipile install (`jobs`): HeyReach paces its own campaigns.
+INVITE_JOB = "invites"
+INVITE_INTERVAL_SECONDS = 900
+INVITE_OFFSET_SECONDS = 150
 TICK_SECONDS = 30
 HOURLY_MINUTE = 0
 APPLICATIONS_MINUTE = 30
 RESEARCH_INTERVAL_SECONDS = 300
 READ_TIMEOUT_SECONDS = 10
+
+
+def jobs(config):
+    """The jobs this loop starts, research first: JOBS, plus the invitation tick on a Unipile install."""
+    return JOBS + ((INVITE_JOB,) if (config or {}).get("linkedin_provider") == "unipile" else ())
 
 
 def frozen():
@@ -89,7 +105,7 @@ def job_command(name):
     """The command that runs one job as a child of this program: `[<binary>, "job", name]` when
     frozen, `[<python>, <orchestrator.py>, "job", name]` from source. Both enter the existing
     `orchestrator.main` paths unchanged (`sidedoor job run|research|applications`)."""
-    if name not in JOBS:
+    if name not in JOBS + (INVITE_JOB,):
         raise ValueError("Unknown job: %r" % (name,))
     if frozen():
         return [program(), "job", name]
@@ -100,7 +116,9 @@ def job_command(name):
 # ARCHIVE_NAME) rotates and retains it exactly as before: a `run` or `research` child sweeps at its
 # start under state/runner.lock, rotating its own stdout/stderr and skipping files another live
 # child holds open.
-LOG_NAMES = {"run": "launchd", "research": "research", "applications": "applications"}
+# The invitation tick writes to the hourly round's files: it is a piece of the round, shown with it on
+# the Logs page ("Hourly round"), each line tagged with its job name "invites".
+LOG_NAMES = {"run": "launchd", "research": "research", "applications": "applications", INVITE_JOB: "launchd"}
 
 
 # Windows process creation flags (subprocess has them only on Windows): a new process group, no
@@ -261,8 +279,10 @@ def schedule(now, config, problems=None):
     if research == hourly and dt.datetime.fromtimestamp(hourly, zone).hour != start_hour:
         # Not yet a minute past :00: the previous instant stands (already fired, or moved itself).
         research = hourly + RESEARCH_SHIFT_SECONDS if moment >= hourly + RESEARCH_SHIFT_SECONDS else research - interval
-    return ({"research": research, "run": hourly, "applications": at_minute(minute)},
-            {"research": interval, "run": 3600, "applications": 3600})
+    first = hourly + INVITE_OFFSET_SECONDS
+    invites = moment - ((moment - first) % INVITE_INTERVAL_SECONDS)
+    return ({"research": research, "run": hourly, "applications": at_minute(minute), INVITE_JOB: invites},
+            {"research": interval, "run": 3600, "applications": 3600, INVITE_JOB: INVITE_INTERVAL_SECONDS})
 
 
 def latest_instants(now, config):
@@ -363,7 +383,8 @@ class Loop:
             notes = []
             instants, periods = schedule(now, config, notes)
             self.notes = notes
-            for name in JOBS:
+            names = jobs(config)
+            for name in names:
                 last = self.last_fired.get(name)
                 if last is not None and instants[name] < last - periods[name]:
                     # The wall clock went back (a fast clock corrected): start counting again from
@@ -372,7 +393,7 @@ class Loop:
                     self._events["clock:" + name] = ("clock moved back; %s rescheduled from %s" % (
                         name, dt.datetime.fromtimestamp(instants[name], dt.timezone.utc).isoformat(timespec="seconds")),
                         now.timestamp())
-            due = [name for name in JOBS if self.last_fired.get(name) is None or instants[name] > self.last_fired[name]]
+            due = [name for name in names if self.last_fired.get(name) is None or instants[name] > self.last_fired[name]]
             result = {"started": [], "skipped_alive": [], "paused": False}
             if not due:
                 return result
@@ -441,6 +462,13 @@ class Loop:
                     self._problems["data-move"] = "data move check failed: %s" % type(error).__name__
             alive = {name for name, child in self.children.items() if child.poll() is None}
             for name in due:
+                if name == INVITE_JOB and {"run", "research"} & set(result["started"]):
+                    # On a start or a wake the round or research is due in the same tick: the tick
+                    # would only race them for state/runner.lock (and the round sends invitations
+                    # itself), so this instant is spent and the next quarter hour starts it.
+                    self.last_fired[name] = instants[name]
+                    result.setdefault("skipped_lock_holder", []).append(name)
+                    continue
                 if name in alive:
                     self.last_fired[name] = instants[name]
                     result["skipped_alive"].append(name)

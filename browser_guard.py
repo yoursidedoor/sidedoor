@@ -40,17 +40,28 @@ JSON-RPC message both ways. What it adds, all at the live harness's positions (o
   windowState "minimized", hide_code): a window Chrome un-minimized itself, a popup or a new window is
   minimized again. A minimized window still loads, renders and is snapshotted (a page in it is hidden
   exactly as a background tab is, which Playwright reads and screenshots; the throttling switches are
-  off). A focus keeper (FocusKeeper, ~every 200 ms) gives the front back to the user's last app
-  whenever Sidedoor's Chrome (by pid; never the user's own Chrome) activates itself, except during the
-  CAPTCHA wait and while the user is deliberately looking at it. The CAPTCHA wait un-minimizes the
+  off). A focus keeper (FocusKeeper, every 50 ms; owner, 2026-10-24: no guessing) gives the front
+  back to the app that was in front just before, every time Sidedoor's Chrome (by pid; never the user's
+  own Chrome) comes forward, and minimizes a window of it as soon as one shows, except during the
+  CAPTCHA wait, which ends with the window minimized and the front given back at once. The CAPTCHA wait un-minimizes the
   window on-screen and in front for the owner's tick (the one place the guard brings Chrome forward)
   and minimizes it when the wait ends. A read-back that is not minimized is recorded
   (WINDOW_NOT_MINIMIZED); a failed placement never stops the call.
 Every other @playwright/mcp tool is listed and forwarded unjudged in every operation; the trace checks
 that live ran on cua_repl code run in `application_browser.tool_item`, on the Codex trace, as before.
 
+* every operation, given --headless-user-agent with --background-chrome (macOS; owner, 2026-10-24:
+  "sometimes the browser still comes to the front and doesn't return me to my last screen", option A;
+  browser_runtime.headless_user_agent): the guard starts the profile's Chrome headless (--headless=new,
+  the installed Chrome's headed user agent), so there is no window to minimize and nothing to keep
+  from the front: no placement, no focus keeper. The CAPTCHA wait reopens the same profile headed on
+  the same DevTools port (Proxy.show_headed: cookies carried over, the page loaded again) and the
+  session then goes on as a headed --offscreen one. Operations left out of
+  config["browser_driver"]["headless_operations"] get --offscreen as before.
+
 Usage: sidedoor browser-guard --operation <op> [--audit <file.jsonl>] [--claim <file>]
-                              [--human-check <file>] [--background-chrome <profile>] [--offscreen]
+                              [--human-check <file>] [--background-chrome <profile>]
+                              [--headless-user-agent <ua> | --offscreen]
                               -- <node> <@playwright/mcp cli.js> <args...>
 """
 
@@ -99,18 +110,13 @@ PLACE_INTERVAL_SECONDS = 1.0
 # The CAPTCHA wait's on-screen placement, when its first try fails: retried after these pauses (seconds)
 # while the wait lasts (fg1-captcha, Moderate 2).
 ONSCREEN_RETRY_SECONDS = (5, 15, 30, 60)
-# The focus keeper (FG2 = a): poll period; how long a correction may stay unanswered (Chrome still in
-# front) before it counts as the user's own choice; how soon a second activation after a correction
-# counts as the user clicking again; how long after a forwarded call ends Chrome's own activation may
-# still arrive; how often FOCUS_RESTORED is written.
-FOCUS_POLL_SECONDS = 0.2
-FOCUS_STAY_SECONDS = 2.0
-FOCUS_RECLICK_SECONDS = 5.0
-FOCUS_CALL_GRACE_SECONDS = 1.5
-FOCUS_LOG_SECONDS = 10.0
-# This many corrections within FOCUS_STAY_SECONDS: they are not holding (the user keeps Chrome in front,
-# or macOS declines the switch back), so the keeper stops instead of fighting.
-FOCUS_MAX_CORRECTIONS = 4
+# The focus keeper (owner, 2026-10-24: "please ensure it doesn't make any guesses about which screen I'm on
+# and it minimizes itself extremely quickly and returns me back to the screen I was on"): poll period (one
+# `lsappinfo front`, ~3 ms, and one on-screen window list per poll); the shortest gap between two minimize
+# requests the keeper itself makes; how often a correction that keeps failing is written again.
+FOCUS_POLL_SECONDS = 0.05
+HIDE_RETRY_SECONDS = 0.25
+FOCUS_FAILED_LOG_SECONDS = 1.0
 
 
 def place_code(left, top, width, height, front=False):
@@ -180,6 +186,62 @@ def hide_code(left, top, width, height):
             "  }\n"
             "  return placed;\n"
             "}" % (left, top, width, height))
+
+
+# The CAPTCHA wait in a headless session (Proxy.show_headed): what is carried into the headed Chrome.
+STATE_CODE = ("async (page) => {\n"
+              "  return [{ url: page.url(), cookies: await page.context().cookies() }];\n"
+              "}")
+REOPENED_TEXT = (" The browser was reopened in a window for the owner and the page was loaded again: earlier "
+                 "snapshot refs and anything typed before the wait are gone, so take a fresh snapshot and fill "
+                 "it again before going on.")
+
+
+def client_hints_code(user_agent, metadata, screen=None):
+    """Playwright code that sets, on every open page and on each page the context opens later (its CDP
+    session stays attached: the overrides last while it is), Emulation.setUserAgentOverride (userAgent +
+    userAgentMetadata, when given) and, given `screen`, Emulation.setDeviceMetricsOverride with only the
+    screen size: width/height/deviceScaleFactor 0 leave the viewport (the 1280x900 window) and the
+    ratio (--force-device-scale-factor) as they are. Answers [{url} | {error}] for the pages open now."""
+    metrics = None if not screen else {
+        "width": 0, "height": 0, "deviceScaleFactor": 0, "mobile": False,
+        "screenWidth": int(screen["width"]), "screenHeight": int(screen["height"]), "positionX": 0, "positionY": 0}
+    return ("async (page) => {\n"
+            "  const override = { userAgent: %s, userAgentMetadata: %s }; const metrics = %s;\n"
+            "  const ctx = page.context();\n"
+            "  const apply = async (p) => {\n"
+            "    try { const s = await ctx.newCDPSession(p);\n"
+            "      if (override.userAgentMetadata) await s.send('Emulation.setUserAgentOverride', override);\n"
+            "      if (metrics) await s.send('Emulation.setDeviceMetricsOverride', metrics);\n"
+            "      return { url: p.url() }; }\n"
+            "    catch (e) { return { error: String(e && e.message || e).slice(0, 200) }; }\n"
+            "  };\n"
+            "  if (!ctx.__sidedoorClientHints) { ctx.__sidedoorClientHints = true; ctx.on('page', (p) => { apply(p); }); }\n"
+            "  const done = [];\n"
+            "  for (const p of ctx.pages()) done.push(await apply(p));\n"
+            "  return done;\n"
+            "}" % (json.dumps(user_agent), json.dumps(metadata), json.dumps(metrics)))
+
+
+def restore_code(cookies, url):
+    """Playwright code that puts `cookies` back and loads `url` (when given); answers [{cookies, url}]."""
+    return ("async (page) => {\n"
+            "  const cookies = %s; const url = %s; const done = { cookies: 0 };\n"
+            "  try { if (cookies.length) await page.context().addCookies(cookies); done.cookies = cookies.length; }\n"
+            "  catch (e) { done.error = String(e && e.message || e).slice(0, 200); }\n"
+            "  if (url) { try { await page.goto(url, { timeout: 30000 }); }\n"
+            "    catch (e) { done.goto_error = String(e && e.message || e).slice(0, 200); } }\n"
+            "  done.url = page.url();\n"
+            "  return [done];\n"
+            "}" % (json.dumps(cookies), json.dumps(url)))
+
+
+def parse_screen(value):
+    """"1512x982@2" -> {width, height, scale}; None for no or a malformed value."""
+    match = re.fullmatch(r"(\d{3,5})x(\d{3,5})@(\d(?:\.\d+)?)", value or "")
+    if not match:
+        return None
+    return {"width": int(match.group(1)), "height": int(match.group(2)), "scale": float(match.group(3))}
 
 
 def placed_windows(answer):
@@ -386,8 +448,27 @@ class MacFrontmost:
             self.pids[asn] = int(info.group(1))
         return self.pids[asn]
 
+    def shown(self, pid):
+        """True when app `pid` has a normal window on screen (Quartz's on-screen window list: owner pid
+        and layer only, no screen-recording permission needed; a minimized window is not on screen)."""
+        try:
+            import Quartz
+            windows = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID) or []
+            return any(item.get("kCGWindowOwnerPID") == pid and item.get("kCGWindowLayer") == 0 for item in windows)
+        except Exception:
+            return False
+
     def activate(self, pid):
-        """Bring app `pid` to the front. True when a route accepted the request."""
+        """Give the front back to app `pid` (the app the user was in, on the Space they are on). True when
+        a route accepted the request. `lsappinfo setfront` asks LaunchServices to make that process the
+        front one; NSRunningApplication.activateWithOptions_(0) (no NSApplicationActivateAllWindows: only its
+        key window comes forward) is the fallback. Neither picks a Space: macOS shows the Space holding the
+        activated app's key window, and that app was frontmost on the user's current Space (or is the
+        full-screen app whose Space it is) a moment ago, so the user stays where they were. When Chrome's
+        launch already moved macOS off a full-screen app's Space, activating that app's process is what
+        brings its Space back (to be confirmed on a real Mac with a full-screen Terminal)."""
         if self._out(["/usr/bin/lsappinfo", "setfront", "#%d" % int(pid)]) is not None and self.front() == pid:
             return True
         try:
@@ -398,52 +479,86 @@ class MacFrontmost:
             return False
 
 
-class FocusKeeper:
-    """FG2 = a, part 2 (owner, 2026-10-23): Chrome activates itself when Playwright creates or selects a
-    page, so while a session runs the guard watches the frontmost app and, whenever Sidedoor's own Chrome
-    (`chrome_pid()`: the process on Sidedoor's profile; the user's everyday Chrome is another pid and is
-    only ever treated as one of the user's apps) comes to the front, gives the front back to the last
-    other app at once. It does not correct:
-    - while `suspended()` (the CAPTCHA wait: the owner has to tick the box);
-    - while the user is looking at it on purpose ("watching"), until the front moves to another app.
-      Watching starts when Chrome stays in front FOCUS_STAY_SECONDS after a correction, comes back in
-      front within FOCUS_RECLICK_SECONDS of a correction while no browser call is running or just ended
-      (`busy()`: the user clicked it again, e.g. its window in the Dock, after being sent back), or when
-      FOCUS_MAX_CORRECTIONS corrections within FOCUS_STAY_SECONDS did not hold.
-    Setup step 8's sign-in window runs without the guard, so the keeper never sees it.
-    `poll()` never raises; FOCUS_RESTORED is written at most once per FOCUS_LOG_SECONDS with a count."""
+def pid_alive(pid):
+    """True while process `pid` runs (signal 0: nothing is sent)."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError, ValueError):
+        return True
+    return True
 
-    def __init__(self, chrome_pid, front, activate, busy=None, suspended=None, log=None, clock=None,
-                 on_watching=None):
+
+class FocusKeeper:
+    """Owner, 2026-10-24: "please ensure it doesn't make any guesses about which screen I'm on and it
+    minimizes itself extremely quickly and returns me back to the screen I was on". Every
+    FOCUS_POLL_SECONDS while a headed session runs, the guard reads the frontmost app (`front()`, by pid):
+    - any app that is not Sidedoor's own Chrome (`chrome_pid()`: the process on Sidedoor's profile; the
+      user's everyday Chrome is another pid and is one of the user's apps) is recorded with the time it was
+      seen: the app in front just before Chrome comes forward is the last one recorded, at most one poll
+      earlier. While the user is there, a Sidedoor Chrome window on screen (`chrome_shown(pid)`: a window
+      un-minimized by Chrome itself or newly opened) is minimized at once (`hide()`);
+    - Sidedoor's Chrome in front: the front goes back to that recorded app at once (`activate`), every
+      time, and its windows are minimized (`hide()`). There is no "the user is watching" exception; the
+      one exception is `suspended()`, the CAPTCHA wait, which ends when the wait ends.
+    Each correction is written as FOCUS_RESTORED (to_pid, restored, seen_ms: how long before the
+    correction that app was last seen in front, an upper bound on Chrome's activation to its detection;
+    correct_ms: how long the switch back took); one that keeps failing at most once per
+    FOCUS_FAILED_LOG_SECONDS with a count. Setup step 8's sign-in window runs without the guard, so the
+    keeper never sees it. `poll()` never raises."""
+
+    def __init__(self, chrome_pid, front, activate, suspended=None, log=None, clock=None, chrome_shown=None,
+                 hide=None, alive=None):
         self.chrome_pid, self.front, self.activate = chrome_pid, front, activate
-        self.busy = busy or (lambda now: False)
         self.suspended = suspended or (lambda: False)
         self.log = log or (lambda **entry: None)
         self.clock = clock or time.monotonic
-        self.on_watching = on_watching or (lambda watching: None)
-        self.last_other = None     # the last frontmost app that is not Sidedoor's Chrome
-        self.front_since = None    # when Sidedoor's Chrome last came to the front (None: not in front)
-        self.corrected_at = None   # the last correction
-        self.recent = []           # times of the corrections within FOCUS_STAY_SECONDS
-        self.watching = False
-        self.logged_at = None
-        self.unlogged = 0
+        self.chrome_shown = chrome_shown or (lambda pid: False)
+        self.hide = hide or (lambda: None)
+        self.alive = alive or pid_alive
+        self.last_other = None     # the frontmost app last seen that is not Sidedoor's Chrome
+        self.last_other_at = None  # when it was last seen in front
+        self.history = []          # the apps the user was in, most recent last (distinct pids, bounded)
+        self.failed_logged_at = None
+        self.failed_unlogged = 0
+        self.lock = threading.Lock()   # the poll thread and the CAPTCHA wait's end both poll
 
     def poll(self):
         try:
-            self._poll()
+            with self.lock:
+                self._poll()
         except Exception as error:   # never stops the guard
             try:
                 self.log(decision="FOCUS_KEEPER_ERROR", error=(str(error) or type(error).__name__)[:200])
             except Exception:
                 pass
 
-    def _set_watching(self, value, now):
-        if self.watching == value:
-            return
-        self.watching = value
-        self.log(decision="FOCUS_USER_WATCHING" if value else "FOCUS_KEEPER_RESUMED")
-        self.on_watching(value)
+    def record_front(self):
+        """Record the app in front now (when it is not Sidedoor's Chrome): called before the guard itself
+        brings Chrome forward (the CAPTCHA wait), so the wait's end returns the user there. Never raises."""
+        try:
+            with self.lock:
+                pid = self.front()
+                if pid is not None and pid != self.chrome_pid():
+                    self._seen(pid, self.clock())
+        except Exception as error:
+            self.log(decision="FOCUS_KEEPER_ERROR", error=(str(error) or type(error).__name__)[:200])
+
+    def _seen(self, pid, now):
+        self.last_other, self.last_other_at = pid, now
+        if not self.history or self.history[-1] != pid:
+            self.history = [item for item in self.history if item != pid][-15:] + [pid]
+
+    def target(self):
+        """The last app the user was actually in that still runs (a quit one is dropped), or None."""
+        while self.history and not self.alive(self.history[-1]):
+            self.history.pop()
+        return self.history[-1] if self.history else None
+
+    def _hide_if_shown(self, chrome):
+        if self.chrome_shown(chrome):       # every window already minimized: no CDP call, nothing logged
+            self.hide()
 
     def _poll(self):
         now = self.clock()
@@ -452,42 +567,34 @@ class FocusKeeper:
             return
         chrome = self.chrome_pid()
         if chrome is None or pid != chrome:
-            self.last_other = pid
-            self.front_since = None
-            self._set_watching(False, now)
+            self._seen(pid, now)
+            if chrome is not None and not self.suspended():
+                self._hide_if_shown(chrome)
             return
-        new = self.front_since is None
-        if new:
-            self.front_since = now
         if self.suspended():
-            self.corrected_at = None       # the CAPTCHA wait's time in front is not the user's choice
-            self.front_since = now
-            return
-        if self.watching or self.last_other is None:
-            return
-        if self.corrected_at is not None:
-            since = now - self.corrected_at
-            if not new:
-                if now - self.front_since >= FOCUS_STAY_SECONDS:
-                    self._set_watching(True, now)   # the correction did not take, or the user insists
-                return                              # one correction per stay in front
-            if since < FOCUS_RECLICK_SECONDS and not self.busy(now):
-                self._set_watching(True, now)
-                return
-        self.recent = [at for at in self.recent if now - at < FOCUS_STAY_SECONDS]
-        if len(self.recent) >= FOCUS_MAX_CORRECTIONS:
-            self._set_watching(True, now)
-            return
-        self.recent.append(now)
-        self.corrected_at = now
-        restored = bool(self.activate(self.last_other))
+            return                          # the CAPTCHA wait: the owner has to tick the box
+        target = self.target()
+        if target is None:
+            self._hide_if_shown(chrome)
+            return                          # no app the user was in still runs: nothing to return to
+        if target != self.last_other:
+            self.last_other_at = None       # the recorded app quit: the one before it, never a guess
+        self.last_other = target
+        started = self.clock()
+        restored = bool(self.activate(target))
+        done = self.clock()
+        self._hide_if_shown(chrome)
+        entry = dict(to_pid=self.last_other, restored=restored,
+                     seen_ms=round((started - self.last_other_at) * 1000, 1) if self.last_other_at is not None else None,
+                     correct_ms=round((done - started) * 1000, 1))
         if restored:
-            # Chrome left the front: its next activation is a new one, even one the next poll sees.
-            self.front_since = None
-        self.unlogged += 1
-        if self.logged_at is None or now - self.logged_at >= FOCUS_LOG_SECONDS:
-            self.log(decision="FOCUS_RESTORED", to_pid=self.last_other, restored=restored, count=self.unlogged)
-            self.logged_at, self.unlogged = now, 0
+            self.failed_logged_at, self.failed_unlogged = None, 0
+            self.log(decision="FOCUS_RESTORED", **entry)
+            return
+        self.failed_unlogged += 1
+        if self.failed_logged_at is None or done - self.failed_logged_at >= FOCUS_FAILED_LOG_SECONDS:
+            self.log(decision="FOCUS_RESTORED", count=self.failed_unlogged, **entry)
+            self.failed_logged_at, self.failed_unlogged = done, 0
 
 
 class Refusal(Exception):
@@ -500,17 +607,34 @@ class Proxy:
     def __init__(self, operation, child_argv, audit=None, claim=None, human_check=None, snapshot_timeout=30.0,
                  stdin=None, stdout=None, arm_binding=None, human_check_wait=None, uploads=None,
                  call_timeout=CALL_TIMEOUT_SECONDS, background_chrome=None, launch_background=None,
-                 offscreen=False, clock=None, sleep=None, focus_keeper=None):
+                 offscreen=False, clock=None, sleep=None, focus_keeper=None, headless_user_agent=None,
+                 launch_headless=None, relaunch_headed=None, stop_chrome=None, client_hints=None, screen=None):
         self.operation = operation
         self.offscreen = offscreen
+        # Headless (owner, 2026-10-24, option A): given --headless-user-agent with --background-chrome the
+        # guard starts the profile's Chrome headless (no window, nothing to minimize, no focus keeper);
+        # `self.headless` stays True only while that Chrome is the guard's own (show_headed needs it).
+        self.headless_user_agent = headless_user_agent if background_chrome else None
+        self.headless = False
+        self.endpoint = None
+        self.launch_headless = launch_headless
+        self.relaunch_headed = relaunch_headed
+        self.stop_chrome = stop_chrome
+        self.reopened = False      # the CAPTCHA wait reopened the headless session headed
+        self.client_hints = client_hints   # H3: userAgentMetadata for a headless session (browser_runtime)
+        self.screen = screen               # {width, height, scale}: the real display a headless session reports
         self.clock = clock or time.monotonic
         self.sleep = sleep or time.sleep
         self.placed_at = None      # when the windows were last minimized
         self.showing = False       # the CAPTCHA wait has the window on-screen: no minimizing
-        self.shown_for_user = False   # the window was put on-screen for the user watching it (FocusKeeper)
-        self.last_answer_at = None    # when the browser last answered a forwarded call (FocusKeeper.busy)
+        self.unchanged_logged_at, self.unchanged_count = None, 0   # minimizes that changed nothing
+        self.hiding = False        # a minimize the focus keeper asked for is running
+        self.hide_asked_at = None
         self.stopped = threading.Event()
-        self.focus_keeper = focus_keeper   # None: built in run() (macOS, --offscreen); False: none
+        self.focus_keeper = focus_keeper   # None: built when needed (macOS, headed); False: none
+        self.keeper_thread = None
+        self.child = None          # the browser server, once started (after Chrome)
+        self.initialized = False   # the client's notifications/initialized has reached it
         self.place_lock = threading.Lock()
         self.counter_lock = threading.Lock()
         self.audit = open(audit, "a", encoding="utf-8") if audit else None
@@ -526,8 +650,9 @@ class Proxy:
         self.stdout = stdout if stdout is not None else sys.stdout
         # The browser server (and the Chrome it starts) gets this server's whole environment, which carries
         # the user's session variables codex was given (browser_runtime.session_environment).
-        self.child = subprocess.Popen(child_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-                                      bufsize=1, encoding="utf-8", env=dict(os.environ), **portable.no_window())
+        self.child_argv = list(child_argv)
+        self.initialize_params = None   # the client's initialize, replayed to a respawned browser server (H1)
+        self.child = self.spawn_child()
         # The arm and CAPTCHA tools are built from the same private files the self-spawned servers read.
         if arm_binding is None and claim:
             import application_browser
@@ -555,10 +680,41 @@ class Proxy:
         self.idle = threading.Condition()
 
     def start_background_chrome(self, child_argv, path, launch=None):
-        """Start Sidedoor's Chrome on `path` without activating it and attach @playwright/mcp to it
-        (`--cdp-endpoint`). If that cannot start, @playwright/mcp launches Chrome itself on the same
-        profile as before (it may then come to the front; recorded as BACKGROUND_LAUNCH_FAILED)."""
+        """Start Sidedoor's Chrome on `path` without activating it (headless given a user agent) and
+        attach @playwright/mcp to it (`--cdp-endpoint`). If that cannot start, @playwright/mcp launches
+        Chrome itself on the same profile as before (with the same headless or off-screen switches,
+        browser_runtime.launch_config; recorded as BACKGROUND_LAUNCH_FAILED)."""
         import browser_runtime
+        if self.headless_user_agent:
+            try:
+                if self.launch_headless is not None:
+                    endpoint = self.launch_headless(path, self.headless_user_agent)
+                else:
+                    import setup_steps
+                    binary = setup_steps.chrome_path()
+                    if not binary:
+                        raise OSError("Google Chrome not found")
+                    endpoint = browser_runtime.launch_headless(binary, path, self.headless_user_agent,
+                                                               scale=(self.screen or {}).get("scale"))
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                # H2: a headless launch that fails runs this session headed and minimized (the --offscreen
+                # rules, focus keeper included): `open -g` first, then Playwright's own launch, whose
+                # switches are the off-screen ones (browser_runtime.launch_config).
+                self.log(decision="HEADLESS_LAUNCH_FAILED", reason=str(error)[:200] or type(error).__name__)
+                self.headless_user_agent = None
+                self.offscreen = True
+                return self.start_background_chrome(child_argv, path, launch)
+            self.endpoint = endpoint
+            self.headless = True
+            self.log(decision="BACKGROUND_LAUNCHED", endpoint=endpoint, headless=True)
+            return child_argv + ["--cdp-endpoint", endpoint]
+        # Every headed launch (owner-approved, 2026-10-24): `open -g` still makes Chrome the frontmost app
+        # a moment after it starts (and macOS may leave the user's full-screen Space for it), so the app in
+        # front is recorded and the focus keeper runs BEFORE Chrome starts: its first activation is undone
+        # at once, not left until a later poll finds nothing to return to.
+        if self.offscreen:
+            self.record_front()
+            self.start_focus_keeper()
         try:
             if launch is None:
                 import setup_steps
@@ -572,6 +728,7 @@ class Proxy:
             self.log(decision="BACKGROUND_LAUNCH_FAILED", reason=str(error)[:200] or type(error).__name__)
             self.background_chrome = None
             return child_argv + ["--user-data-dir", str(path)]
+        self.endpoint = endpoint
         self.log(decision="BACKGROUND_LAUNCHED", endpoint=endpoint)
         return child_argv + ["--cdp-endpoint", endpoint]
 
@@ -601,8 +758,13 @@ class Proxy:
             tools.append(human_check_tool())
         return tools
 
-    def pump_child(self):
-        for line in self.child.stdout:
+    def spawn_child(self):
+        return subprocess.Popen(self.child_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                bufsize=1, encoding="utf-8", env=dict(os.environ), **portable.no_window())
+
+    def pump_child(self, child=None):
+        child = child or self.child
+        for line in child.stdout:
             try:
                 message = json.loads(line)
             except ValueError:
@@ -623,7 +785,6 @@ class Proxy:
                     {"uri": pathlib.Path(self.uploads).resolve().as_uri(), "name": "uploads"}]}})
                 continue
             if "method" not in message:
-                self.last_answer_at = self.clock()
                 with self.idle:
                     self.in_flight.discard(ident)
                     self.idle.notify_all()
@@ -636,7 +797,8 @@ class Proxy:
                                            if not (isinstance(tool, dict) and tool.get("name") in hidden)]
                         result["tools"].extend(self.own_tools())
             self.to_client(message)
-        self.requests.put(None)
+        if child is self.child:   # a browser server the guard replaced (respawn_child) ends nothing
+            self.requests.put(None)
 
     def pump_client(self):
         for line in self.stdin:
@@ -678,11 +840,6 @@ class Proxy:
             return None
 
     # --- the hidden window (FG1 = b, then FG2 = a: minimized) ------------------------------------
-    @property
-    def user_watching(self):
-        keeper = self.focus_keeper
-        return bool(keeper and keeper.watching)
-
     def place_window(self, onscreen=False):
         """Minimize every window of the session's Chrome, or put it on-screen: in front for the CAPTCHA
         wait, or (not in front) for a user who opened it on purpose. Recorded in the audit; never raises.
@@ -691,12 +848,12 @@ class Proxy:
         if not self.offscreen:
             return None
         with self.place_lock:
-            # Re-checked under the lock (fg1-captcha, Moderate 1): no minimizing while the CAPTCHA wait or
-            # the user shows the window, and no on-screen placement once neither does.
-            shown = self.showing or self.user_watching
-            if shown != onscreen:
+            # Re-checked under the lock (fg1-captcha, Moderate 1): no minimizing while the CAPTCHA wait
+            # shows the window, and no on-screen placement once it does not.
+            if self.showing != onscreen:
                 return None
             front = self.showing
+            began = self.clock()
             if onscreen:
                 left, top = browser_runtime.ONSCREEN_POSITION
                 code = place_code(left, top, *browser_runtime.WINDOW_SIZE, front=front)
@@ -714,8 +871,18 @@ class Proxy:
         if not placed:
             self.log(decision="WINDOW_PLACEMENT_FAILED", onscreen=onscreen, errors=errors)
             return None
-        self.log(decision=("WINDOW_ONSCREEN" if front else "WINDOW_SHOWN_FOR_USER") if onscreen else "WINDOW_MINIMIZED",
-                 windows=placed, **({"errors": errors} if errors else {}))
+        unchanged = not onscreen and not errors and all(item.get("was") == "minimized" for item in placed)
+        now = self.clock()
+        if unchanged:   # nothing was un-minimized: written at most once per FOCUS_FAILED_LOG_SECONDS, counted
+            self.unchanged_count += 1
+            if self.unchanged_logged_at is not None and now - self.unchanged_logged_at < FOCUS_FAILED_LOG_SECONDS:
+                return placed
+            self.log(decision="WINDOW_MINIMIZED", windows=placed, ms=round((now - began) * 1000, 1),
+                     unchanged=self.unchanged_count)
+            self.unchanged_logged_at, self.unchanged_count = now, 0
+            return placed
+        self.log(decision="WINDOW_ONSCREEN" if onscreen else "WINDOW_MINIMIZED", windows=placed,
+                 ms=round((now - began) * 1000, 1), **({"errors": errors} if errors else {}))
         stuck = [item for item in placed if not onscreen and item.get("state") != "minimized"]
         if stuck:
             self.log(decision="WINDOW_NOT_MINIMIZED", windows=stuck)
@@ -723,15 +890,10 @@ class Proxy:
 
     def keep_hidden(self, force=False):
         """After the client's `initialized` (force) and before a forwarded call: minimize the windows
-        again, at most once a second; never while the CAPTCHA wait shows them. While the user watches the
-        window on purpose it is not minimized; it is put on-screen once (it was parked off-screen)."""
+        again, at most once a second; never while the CAPTCHA wait shows them. Between calls the focus
+        keeper minimizes a window as soon as it shows (`hide_now`)."""
         if not self.offscreen or self.showing:
             return
-        if self.user_watching:
-            if not self.shown_for_user and self.place_window(onscreen=True) is not None:
-                self.shown_for_user = True
-            return
-        self.shown_for_user = False
         if not force and self.placed_at is not None and self.clock() - self.placed_at < PLACE_INTERVAL_SECONDS:
             return
         self.place_window()
@@ -751,23 +913,41 @@ class Proxy:
             checked = self._chrome_checked = (pid, browser_runtime.holds_profile(pid, self.profile_path))
         return pid if checked[1] else None
 
-    def busy(self, now):
-        """A forwarded call is running, or the browser answered one under FOCUS_CALL_GRACE_SECONDS ago:
-        Chrome's own activation (a new or selected page) is expected now."""
-        return bool(self.in_flight) or (self.last_answer_at is not None
-                                        and now - self.last_answer_at < FOCUS_CALL_GRACE_SECONDS)
+    def hide_now(self):
+        """The focus keeper's minimize: on a thread of its own (the CDP round trip must not slow the next
+        poll), one at a time, at most once per HIDE_RETRY_SECONDS; never during the CAPTCHA wait."""
+        now = self.clock()
+        if (not self.offscreen or self.showing or self.hiding or self.child is None or not self.initialized
+                or (self.hide_asked_at is not None and now - self.hide_asked_at < HIDE_RETRY_SECONDS)):
+            return
+        self.hiding, self.hide_asked_at = True, now
 
-    def start_focus_keeper(self):
+        def run():
+            try:
+                self.place_window()
+            finally:
+                self.hiding = False
+        threading.Thread(target=run, daemon=True).start()
+
+    def make_focus_keeper(self, headed=False):
+        """The focus keeper (built once; macOS, a headed session or one about to be), or None. Not started."""
         if self.focus_keeper is None:
             import browser_runtime
             # Never in the test suite (BACKGROUND_ALLOWED False there): a test's guard never reads or
             # changes the real desktop's front app.
-            if not (self.offscreen and sys.platform == "darwin" and browser_runtime.BACKGROUND_ALLOWED):
+            if not ((self.offscreen or headed) and sys.platform == "darwin" and browser_runtime.BACKGROUND_ALLOWED):
                 return None
             mac = MacFrontmost()
-            self.focus_keeper = FocusKeeper(self.chrome_pid, mac.front, mac.activate, busy=self.busy,
-                                            suspended=lambda: self.showing, log=self.log, clock=self.clock)
-        if not self.focus_keeper:
+            self.focus_keeper = FocusKeeper(self.chrome_pid, mac.front, mac.activate,
+                                            suspended=lambda: self.showing, log=self.log, clock=self.clock,
+                                            chrome_shown=mac.shown, hide=self.hide_now)
+        return self.focus_keeper or None
+
+    def start_focus_keeper(self, headed=False):
+        """Start the focus keeper's poll (once per guard; later calls return the same thread)."""
+        if self.keeper_thread is not None:
+            return self.keeper_thread
+        if not self.make_focus_keeper(headed):
             return None
 
         def run():
@@ -775,6 +955,7 @@ class Proxy:
                 self.focus_keeper.poll()
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
+        self.keeper_thread = thread
         return thread
 
     # --- judging ------------------------------------------------------------------------------
@@ -847,8 +1028,15 @@ class Proxy:
             # in front for the wait (the focus keeper does not correct meanwhile), and minimized again when
             # it ends, whatever the outcome. A failed first try is
             # retried on a thread of its own while the wait lasts (Moderate 2).
-            if self.offscreen and self.place_window(onscreen=True) is None:
-                threading.Thread(target=self.retry_onscreen, daemon=True).start()
+            # A headless session has no window: once the wait has begun (the owner notified, the claim
+            # extended) its profile is reopened headed on the same page (show_headed) and is then placed
+            # exactly as a headed session's window.
+            if self.headless:
+                self.human_check_wait.on_begun = self.show_headed
+            elif self.offscreen:
+                self.record_front()   # the user's app, before the window is brought forward for the tick
+                if self.place_window(onscreen=True) is None:
+                    threading.Thread(target=self.retry_onscreen, daemon=True).start()
             try:
                 text, error = self.human_check_wait.call(), False
             except Exception:
@@ -856,12 +1044,67 @@ class Proxy:
             finally:
                 self.showing = False
                 self.place_window()
+                if self.focus_keeper:
+                    self.focus_keeper.poll()   # the front goes back to the user's app at once, not a poll later
+            if self.reopened and not error:
+                text += REOPENED_TEXT
             self.log(decision="HUMAN_CHECK_RETURNED", tool=HUMAN_CHECK_TOOL, text=text[:200])
             self.answer(message, text, error)
         self.log(decision="HUMAN_CHECK_STARTED", tool=HUMAN_CHECK_TOOL)
         # Set before the thread starts (Moderate 1): a call handled meanwhile never hides the window.
         self.showing = True
         threading.Thread(target=run, daemon=True).start()
+
+    def show_headed(self):
+        """The CAPTCHA wait in a headless session (owner, 2026-10-24): the owner needs a window to tick.
+        The headless Chrome's pages and cookies (session cookies too) are read, it is stopped, the same
+        profile is reopened headed (`open -g`, browser_runtime.launch_background) on the DevTools port
+        @playwright/mcp is attached to, which reconnects on its next call; the cookies are put back and
+        the current page is loaded again. From then on the session is a headed one: on-screen and in
+        front for the wait, minimized with the focus keeper after it. Never raises; a failure is
+        recorded (HEADED_REOPEN_FAILED) and the wait goes on (the owner then cannot tick, and the read
+        ends CAPTCHA_REQUIRED as before)."""
+        try:
+            self._show_headed()
+        except Exception as error:
+            self.log(decision="HEADED_REOPEN_FAILED", reason=(str(error) or type(error).__name__)[:200])
+
+    def record_front(self, headed=False):
+        """Before the guard itself brings Chrome forward: the focus keeper records the user's app."""
+        keeper = self.make_focus_keeper(headed)
+        if keeper:
+            keeper.record_front()
+
+    def _show_headed(self):
+        import browser_runtime
+        self.record_front(headed=True)   # the user's app, before Chrome is reopened and brought forward
+        self.start_focus_keeper(headed=True)   # paused for the tick; corrects the moment the wait ends
+        state = (placed_windows(self.child_call("tools/call", {"name": PLACE_TOOL, "arguments": {"code": STATE_CODE}}))
+                 or [{}])[0]
+        port = int(self.endpoint.rsplit(":", 1)[1])
+        path = self.background_chrome
+        (self.stop_chrome or browser_runtime.end_session)({"browser_driver": {"profile": path}})
+        if self.relaunch_headed is not None:
+            self.relaunch_headed(path, port)
+        else:
+            import setup_steps
+            app = browser_runtime.chrome_app(setup_steps.chrome_path() or "")
+            if app is None:
+                raise OSError("Google Chrome.app not found")
+            browser_runtime.launch_background(app, path, port=port)
+        self.headless = False
+        self.offscreen = True
+        self.respawn_child()
+        self.reopened = True
+        cookies = state.get("cookies") if isinstance(state.get("cookies"), list) else []
+        url = state.get("url") if isinstance(state.get("url"), str) and state["url"].startswith("http") else None
+        restored = placed_windows(self.child_call("tools/call", {"name": PLACE_TOOL, "arguments": {
+            "code": restore_code(cookies, url)}}))
+        self.log(decision="HEADED_FOR_HUMAN_CHECK", cookies=len(cookies), url=url,
+                 restored=(restored or [{}])[0])
+        if self.place_window(onscreen=True) is None:
+            threading.Thread(target=self.retry_onscreen, daemon=True).start()
+        self.start_focus_keeper()
 
     def retry_onscreen(self):
         """The CAPTCHA wait's on-screen placement after its first try failed: tried again after each of
@@ -886,10 +1129,14 @@ class Proxy:
             params = message.get("params") if isinstance(message.get("params"), dict) else {}
             capabilities = params.get("capabilities") if isinstance(params.get("capabilities"), dict) else {}
             message = dict(message, params=dict(params, capabilities=dict(capabilities, roots={"listChanged": False})))
+        if method == "initialize":
+            self.initialize_params = message.get("params")
         if method != "tools/call":
             self.to_child(message)
             if method == "notifications/initialized":
+                self.initialized = True
                 self.keep_hidden(force=True)   # FG2 = a: minimized right after launch, before any page work
+                self.apply_client_hints()       # H3: a headless session's UA client hints, before any page work
             return
         params = message.get("params")
         params = params if isinstance(params, dict) else {}
@@ -973,23 +1220,61 @@ class Proxy:
                 return
             self.handle(message)
 
-    def stop_child(self, grace=10.0):
+    def stop_child(self, grace=10.0, child=None):
         """Fix 7: close the browser server's input (it then closes Chrome), wait, terminate, wait, kill."""
+        child = child or self.child
         try:
-            self.child.stdin.close()
+            child.stdin.close()
         except OSError:
             pass
-        for step in (None, self.child.terminate, self.child.kill):
+        for step in (None, child.terminate, child.kill):
             if step is not None:
                 try:
                     step()
                 except OSError:
                     pass
             try:
-                self.child.wait(timeout=grace)
+                child.wait(timeout=grace)
                 return
             except subprocess.TimeoutExpired:
                 continue
+
+    def respawn_child(self):
+        """H1 (owner-approved, 2026-10-24): @playwright/mcp keeps its first browser context for its whole
+        life, so after the CAPTCHA reopen it cannot reach the new Chrome. The guard starts a fresh browser
+        server on the same command line (same --cdp-endpoint: the reopen keeps the port), hands it the
+        client's own `initialize` and `notifications/initialized` (its answer is the guard's, never
+        relayed), and relays it from then on. The client's tool list is unchanged (same server, same
+        tools). Raises OSError when the new server does not answer `initialize`."""
+        old = self.child
+        with self.child_lock:
+            self.child = self.spawn_child()
+        threading.Thread(target=self.pump_child, args=(self.child,), daemon=True).start()
+        threading.Thread(target=self.stop_child, kwargs={"child": old, "grace": 5.0}, daemon=True).start()
+        answer = self.child_call("initialize", self.initialize_params or {
+            "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "sidedoor-guard", "version": "1"}})
+        if not isinstance(answer, dict) or not isinstance(answer.get("result"), dict):
+            raise OSError("the restarted browser server did not answer initialize")
+        self.to_child({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.log(decision="BROWSER_SERVER_RESTARTED")
+
+    def apply_client_hints(self):
+        """H3: a headless session presents the installed Chrome's headed user agent AND its client hints
+        (sec-ch-ua, navigator.userAgentData), through CDP's Emulation.setUserAgentOverride with
+        userAgentMetadata on every page, and on each new page as it opens (client_hints_code). Recorded
+        CLIENT_HINTS_SET / CLIENT_HINTS_FAILED; never raises, never stops the session."""
+        if not (self.headless and (self.client_hints or self.screen)):
+            return
+        try:
+            answer = self.child_call("tools/call", {"name": PLACE_TOOL, "arguments": {
+                "code": client_hints_code(self.headless_user_agent, self.client_hints, self.screen)}})
+        except (OSError, ValueError) as error:
+            answer = {"error": str(error)[:200]}
+        pages = placed_windows(answer)
+        if pages is None or any("error" in item for item in pages):
+            self.log(decision="CLIENT_HINTS_FAILED", pages=pages)
+        else:
+            self.log(decision="CLIENT_HINTS_SET", pages=len(pages))
 
 
 def main(argv=None):
@@ -1000,6 +1285,10 @@ def main(argv=None):
     parser.add_argument("--human-check", help="the private CAPTCHA-wait context (application_browser.consume)")
     parser.add_argument("--uploads", help="the session's read-only upload folder, announced as the browser's root")
     parser.add_argument("--background-chrome", help="macOS: start Chrome on this profile without activating it")
+    parser.add_argument("--headless-user-agent",
+                        help="with --background-chrome: start that Chrome headless, presenting this user agent")
+    parser.add_argument("--headless-client-hints", help="with --headless-user-agent: userAgentMetadata (JSON)")
+    parser.add_argument("--headless-screen", help="with --headless-user-agent: the display to report, WxH@scale")
     parser.add_argument("--offscreen", action="store_true",
                         help="keep the session's Chrome windows minimized, and the front with the user's app")
     parser.add_argument("child", nargs=argparse.REMAINDER, help="-- then the @playwright/mcp command")
@@ -1011,7 +1300,9 @@ def main(argv=None):
         parser.error("--claim is for the submit operation only")
     return Proxy(options.operation, child, options.audit, options.claim, options.human_check,
                  uploads=options.uploads, background_chrome=options.background_chrome,
-                 offscreen=options.offscreen).run()
+                 offscreen=options.offscreen, headless_user_agent=options.headless_user_agent,
+                 client_hints=json.loads(options.headless_client_hints) if options.headless_client_hints else None,
+                 screen=parse_screen(options.headless_screen)).run()
 
 
 if __name__ == "__main__":

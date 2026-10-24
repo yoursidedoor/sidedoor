@@ -402,7 +402,7 @@ def check_browser_runtime(config, run=None, root=None):
     if state == "PROFILE_IN_USE":
         return _line(WARN, "Browser runtime", browser_runtime.UNAVAILABLE_WORDS["PROFILE_IN_USE"],
                      browser_runtime.UNAVAILABLE_TODO["PROFILE_IN_USE"])
-    note = (" " + browser_runtime.OFFSCREEN_WORDS) if browser_runtime.offscreen(config) else ""
+    note = (" " + browser_runtime.window_words(config)) if browser_runtime.offscreen(config) else ""
     if state == "SESSION_BUSY":
         return _line(OK, "Browser runtime", "Present. " + browser_runtime.BUSY_WORDS + note)
     return _line(OK, "Browser runtime", "Present, and no other Chrome is using Sidedoor's profile." + note)

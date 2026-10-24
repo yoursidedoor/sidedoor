@@ -149,7 +149,8 @@ class GatherTest(unittest.TestCase):
         listed(db, "h")
         event(db, "inbound", None, self.inside, "cold")                          # a stranger who wrote first
         event(db, "inbound", None, self.before, "i")
-        # An acknowledged invitation whose delivery is unconfirmed is waiting, never sent.
+        # An acknowledged invitation whose delivery is unconfirmed is never sent, and not "still sending" either:
+        # Networking badges it "Invitation sent" (owner 2026-10-24: the link counts by the badge).
         invite_action(db, "x", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", self.inside, self.inside)
         db.execute("INSERT INTO application_events(job_key,at,event,detail) VALUES ('j1',?,'SUBMISSION_VERIFIED','{}')", (self.inside.isoformat(),))
         db.execute("INSERT INTO application_events(job_key,at,event,detail) VALUES ('j0',?,'SUBMISSION_VERIFIED','{}')", (self.before.isoformat(),))
@@ -162,7 +163,7 @@ class GatherTest(unittest.TestCase):
         db.execute("INSERT INTO research_days VALUES ('2026-10-21','COMPLETE',1,'r1',NULL,?,0)", (self.inside.isoformat(),))
         db.commit()
         view = self.gather()
-        self.assertEqual(view["outreach"], {"invitations": 2, "cap": 20, "waiting": 1, "messages": 3, "replies": 1})
+        self.assertEqual(view["outreach"], {"invitations": 2, "cap": 20, "waiting": 0, "messages": 3, "replies": 1})
         self.assertEqual(view["submitted"], 1)
         self.assertEqual(view["compute"]["used"], 600)
         self.assertEqual(view["compute"]["resets"], pacific(2026, 10, 22, 9, 0))
@@ -239,7 +240,8 @@ class GatherTest(unittest.TestCase):
         db.commit()
         view = self.gather()
         self.assertEqual(view["right_now"], {"confirming": 1, "blocked": 2, "retrying": 2})
-        self.assertEqual(view["needs"], {"questions": 1, "failures": 1, "messages": 0, "notes": 0})   # "answers" has no pending question
+        # The one needs-you rule: the asked job is a question only, the answered one needs nothing.
+        self.assertEqual(view["needs"], {"questions": 1, "applications": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
 
     def test_o19_spent_reconcile_reads_need_the_owner(self):
         db = self.database
@@ -250,7 +252,7 @@ class GatherTest(unittest.TestCase):
         db.commit()
         view = self.gather()
         self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 1, "retrying": 1})
-        self.assertEqual(view["needs"], {"questions": 0, "failures": 1, "messages": 0, "notes": 0})
+        self.assertEqual(view["needs"], {"questions": 0, "applications": 1, "messages": 0, "couldnt_send": 0, "notes": 0})
 
     def scheduler(self, scheduler, pause=None):
         if pause:
@@ -368,7 +370,7 @@ class GatherTest(unittest.TestCase):
         invite_action(db, "bad-payload", "REQUEST_STARTED", self.inside, self.inside, payload="{not json")
         invite_action(db, "bad-time", "CONFIRMED_SENT", self.before, self.before,
                       result=json.dumps({"attempts": [{"started_at": "not a time"}]}))
-        invite_action(db, "ok", "ACKNOWLEDGED_DELIVERY_UNCONFIRMED", self.inside, self.inside)
+        invite_action(db, "ok", "REQUEST_STARTED", self.inside, self.inside)
         db.commit()
         outreach = self.gather()["outreach"]
         self.assertEqual((outreach["replies"], outreach["waiting"], outreach["cap"]), (1, 1, 20))
@@ -400,7 +402,7 @@ class GatherTest(unittest.TestCase):
             view = overview_page.gather(database, CONFIG, self.home, setup_steps.progress(self.home), False, now=self.now)
             self.assertEqual(view["outreach"], {"invitations": 0, "cap": 20, "waiting": 0, "messages": 0, "replies": 0})
             self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 0, "retrying": 0})
-            self.assertEqual(view["needs"], {"questions": 0, "failures": 0, "messages": 0, "notes": 0})
+            self.assertEqual(view["needs"], {"questions": 0, "applications": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
             self.assertEqual(view["compute"]["used"], 0)
             self.assertIsNone(view["research"]["last"])
             self.assertEqual(view["research"]["next"], {"label": "As soon as Sidedoor runs"})
@@ -570,6 +572,52 @@ class OverviewPageTest(unittest.TestCase):
         self.assertIn("Out of credits", health)
         self.assertNotIn("Key works", health)
         self.assertIn('href="%s"' % provider_limits.CREDITS_URL, health)
+
+    def test_red_and_amber_health_items_show_under_the_title_unless_a_banner_says_it(self):
+        """Owner, 2026-10-24: a red or amber Health item also shows just under the title with the same
+        text and link (one source); one a banner or the "not running" card already states is not repeated."""
+        import provider_limits
+        setup_steps.update_state(lambda state: state["steps"].update(
+            linkedin={"status": "checking", "message": "Waiting", "at": "2026-10-22T17:02:00Z"}), self.home)
+        (self.home / provider_limits.CREDIT_WAIT_FILE).write_text(json.dumps({"observed_at": "2026-10-22T15:00:00Z"}),
+                                                                  encoding="utf-8")
+        page = self.page().text
+        top = page[page.index('class="overview-list overview-alerts"'):page.index('id="today-title"')]
+        health = page[page.index('id="health-title"'):]
+        for text in ("Waiting for LinkedIn", '<a class="button health-fix" href="/settings#connections">Check LinkedIn</a>'):
+            self.assertIn(text, top)
+            self.assertIn(text, health)
+        self.assertIn("Out of credits", health)
+        self.assertNotIn("Out of credits", top)              # its banner says it
+        self.assertNotIn("Scheduler", top)                   # the "Sidedoor is not running" card says it
+        self.assertLess(page.index('class="overview-version"'), page.index('class="overview-list overview-alerts"'))
+
+    def test_the_version_is_a_tag_beside_the_title(self):
+        import version
+        with mock.patch.object(version, "current", return_value="0.0.10"):
+            page = self.page().text
+        head = page[page.index('class="overview-head"'):]
+        self.assertRegex(head, r'^class="overview-head">\s*<h1 class="title gradient-text">Overview</h1>\s*'
+                               r'<span class="overview-version" title="Sidedoor 0.0.10">v0.0.10</span>')
+
+    def test_needs_you_counts_are_the_approvals_and_applications_totals(self):
+        import approvals_page
+        import applications_page
+        database = database_with_schema(self.root)
+        job(database, "eligibility", "BLOCKED", "REQUIRED_ELIGIBILITY_ANSWER")
+        job(database, "answers", "BLOCKED", "UNKNOWN_REQUIRED_ANSWERS:salary")
+        job(database, "wall", "BLOCKED", "CAPTCHA_REQUIRED")
+        now = dt.datetime.now(dt.timezone.utc)
+        question(database, "q1", "eligibility", now)
+        database.commit()
+        reader = overview_page.Reader(database)
+        needs = overview_page.needs_you(reader, now)
+        start = workflow_tasks.service_day_start(now, "America/Los_Angeles", 9)
+        counts = applications_page.counts(reader, now, start, start + dt.timedelta(days=1))
+        self.assertEqual((needs["questions"], needs["applications"]),
+                         (approvals_page.question_count(database, now), counts["needs_you"]))
+        self.assertEqual((needs["questions"], needs["applications"]), (1, 0))
+        database.close()
 
     def test_get_writes_nothing_not_even_side_files(self):
         database = database_with_schema(self.root)
@@ -913,10 +961,9 @@ class JobRunsTest(unittest.TestCase):
         outreach_card = page.split("<h3>Outreach</h3>")[1].split("<h3>Applications</h3>")[0]
         applications_card = page.split("<h3>Applications</h3>")[1].split("</section>")[0]
         self.assertIn('<span class="muted">(finished)</span>', outreach_card)
-        self.assertIn("<dt>Next run</dt>", outreach_card)
-        self.assertIn("Not running", outreach_card)            # this test process has no scheduler
+        self.assertIn("next: Not running", outreach_card)      # this test process has no scheduler
         self.assertIn("Not run yet", applications_card)
-        self.assertIn("<dt>Next run</dt>", applications_card)
+        self.assertIn("next: Not running", applications_card)
 
     @unittest.skipUnless(DEPENDENCIES, "dashboard packages (fastapi, httpx) are not installed")
     def test_no_row_is_empty_with_an_applications_record_and_no_loop(self):
@@ -940,11 +987,12 @@ class JobRunsTest(unittest.TestCase):
         self.database = sqlite3.connect(":memory:")
         outreach_card = page.split("<h3>Outreach</h3>")[1].split("<h3>Applications</h3>")[0]
         applications_card = page.split("<h3>Applications</h3>")[1].split("</section>")[0]
-        rows = lambda card: dict(re.findall(r"<dt>(Last run|Next run)</dt>\s*<dd>(.*?)</dd>", card, re.S))
-        self.assertEqual(rows(outreach_card), {"Last run": '10:12 <span class="muted">(finished)</span>',
-                                               "Next run": "Not running"})
-        self.assertEqual(rows(applications_card), {"Last run": '09:50 <span class="muted">(finished)</span>',
-                                                   "Next run": "Not running"})
+        # One line each (owner, 2026-10-24): "Last run 10:12 (finished) · next: Not running".
+        line = lambda card: " ".join(re.search(r'<p class="overview-run">(.*?)</p>', card, re.S).group(1).split())
+        self.assertEqual(line(outreach_card), 'Last run 10:12 <span class="muted">(finished)</span> '
+                                              '<span class="muted" aria-hidden="true">·</span> next: Not running')
+        self.assertEqual(line(applications_card), 'Last run 09:50 <span class="muted">(finished)</span> '
+                                                  '<span class="muted" aria-hidden="true">·</span> next: Not running')
 
 
 if __name__ == "__main__":

@@ -1,19 +1,21 @@
-{# One owner question (approvals_page.questions): `item`, its flash `f` ({tone, text, kept}). #}
+{# One owner question (approvals_page.questions): `item`, its flash `f` ({tone, text, kept}). Four tight lines
+   (owner, 2026-10-24): company · role, the question, the deadline, the answer control with Save answer. #}
 {% set q = item %}{% set f = f or {} %}
 <article class="approval-card" id="{{ q.dom }}">
-  <h3>{{ q.employer }}{% if q.role %}: {% if q.url %}<a href="{{ q.url }}" rel="noopener noreferrer" target="_blank">{{ q.role }}</a>{% else %}{{ q.role }}{% endif %}{% endif %}</h3>
-  <p>{{ q.question }}</p>
-  {% if q.expires %}<p class="muted">Answer by {{ v.when(q.expires) }}. Until then this application waits; nothing is submitted without your answer.</p>{% endif %}
+  <p class="approval-q-job"><strong>{{ q.employer }}</strong>{% if q.role %} · {% if q.url %}<a href="{{ q.url }}" rel="noopener noreferrer" target="_blank">{{ q.role }}</a>{% else %}{{ q.role }}{% endif %}{% endif %}</p>
+  <p class="approval-q-text" id="label-{{ q.dom }}"><strong>{{ q.question }}</strong></p>
+  {% if q.expires %}<p class="muted approval-q-due">Answer by {{ v.when(q.expires) }}. Nothing is submitted without your answer.</p>{% endif %}
   {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
-  <form method="post" action="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
+  <form class="approval-q-form{{ ' approval-q-prose' if q.control == 'textarea' }}" method="post" action="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
     <input type="hidden" name="decision_id" value="{{ q.id }}"><input type="hidden" name="payload_hash" value="{{ q.payload_hash }}">
-    {% if q.answer_type == "boolean" %}
-    {% for choice in ("Yes", "No") %}<label class="choice"><input type="radio" name="answer" value="{{ choice }}"{% if loop.first %} required{% endif %}{% if f.kept == choice %} checked{% endif %}> <span>{{ choice }}</span></label>{% endfor %}
-    {% elif q.answer_type == "choice" and q.choices %}
-    {% for choice in q.choices %}<label class="choice"><input type="radio" name="answer" value="{{ choice }}"{% if loop.first %} required{% endif %}{% if f.kept == choice %} checked{% endif %}> <span>{{ choice }}</span></label>{% endfor %}
+    {% if q.control == "radio" %}
+    <span class="approval-q-choices" role="radiogroup" aria-labelledby="label-{{ q.dom }}">{% for choice in q.options %}<label class="approval-q-choice"><input type="radio" name="answer" value="{{ choice }}"{% if loop.first %} required{% endif %}{% if f.kept == choice %} checked{% endif %}> {{ choice }}</label>{% endfor %}</span>
+    {% elif q.control == "select" %}
+    <select name="answer" aria-labelledby="label-{{ q.dom }}" required><option value="">Choose one</option>{% for choice in q.options %}<option value="{{ choice }}"{% if f.kept == choice %} selected{% endif %}>{{ choice }}</option>{% endfor %}</select>
+    {% elif q.control == "textarea" %}
+    <textarea name="answer" rows="3" maxlength="4000" aria-labelledby="label-{{ q.dom }}" required>{{ f.kept or "" }}</textarea>
     {% else %}
-    <label for="answer-{{ q.dom }}">Your answer</label>
-    <textarea id="answer-{{ q.dom }}" name="answer" rows="3" maxlength="4000" required>{{ f.kept or "" }}</textarea>
+    <input type="text" name="answer" maxlength="4000" aria-labelledby="label-{{ q.dom }}" value="{{ f.kept or '' }}" required>
     {% endif %}
     <button class="button" type="submit">Save answer</button>
   </form>

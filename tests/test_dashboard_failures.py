@@ -448,6 +448,110 @@ class ReviewFixTest(GatherBase):
         [row] = listing["list"]["jobs"]
         self.assertEqual((row["state"], row["problem"]), ("Waiting to retry", "The application page reported a problem after Submit."))
 
+class PolishTest(GatherBase):
+    """Owner, 2026-10-24: questions and answered jobs are calm, causes never repeat the headline or show
+    engineers' notes, codes lead with words, day-old items fold, runs are named, empty logs share a line."""
+
+    def job_row(self, key, state, code, updated):
+        self.database.execute("INSERT INTO application_jobs(job_key,employer,requisition,payload,state,blocker,updated_at) "
+                              "VALUES (?,?,?,?,?,?,?)", (key, "acme", key, json.dumps({"company": "Acme", "role": key}), state,
+                                                         code, updated.isoformat()))
+
+    def test_questions_and_answered_jobs_are_calm_and_never_counted(self):
+        recent = self.now - dt.timedelta(hours=1)
+        unknown = "UNKNOWN_REQUIRED_ANSWERS:unidentified-question:gpa:2d8b"
+        self.job_row("asked", "BLOCKED", unknown, recent)
+        base.question(self.database, "q1", "asked", self.now)
+        base.question(self.database, "q2", "asked", self.now)
+        self.job_row("answered", "BLOCKED", unknown, recent)
+        base.question(self.database, "q3", "answered", self.now, state="ANSWERED")
+        self.job_row("unreadable", "BLOCKED", failures_page.applications_page.FORM_NOT_READABLE, recent)
+        view = self.gather()
+        asked, answered = view["needs_calm"]
+        self.assertEqual((asked["calm"], asked["text"], asked["fix"]),
+                         ("question", "Answer Sidedoor's questions about Acme, asked.",
+                          {"label": "Answer on Approvals", "href": "/approvals#questions"}))
+        self.assertEqual((answered["calm"], answered["text"]), ("waiting", "Acme, answered: your answers are in."))
+        self.assertIn("Waiting for its next run", answered["todo"])
+        # Only the unreadable form (a real hold) is red, and only it reaches doctor and Report a problem.
+        self.assertEqual([entry["refs"]["job_key"] for entry in view["needs_you"]], ["unreadable"])
+        self.assertEqual(self.items(view, "applications"), [])
+
+    def test_one_needs_you_rule_overview_applications_and_failures_agree(self):
+        import applications_page
+        recent = self.now - dt.timedelta(hours=1)
+        unknown = "UNKNOWN_REQUIRED_ANSWERS:unidentified-question:gpa:2d8b"
+        self.job_row("asked", "BLOCKED", unknown, recent)
+        base.question(self.database, "q1", "asked", self.now)
+        self.job_row("answered", "BLOCKED", unknown, recent)
+        self.job_row("resume", "BLOCKED", "DESIGNATED_RESUME_MISMATCH", recent)
+        self.job_row("unreadable", "BLOCKED", applications_page.FORM_NOT_READABLE, recent)
+        view = self.gather()
+        needs = overview_page.needs_you(overview_page.Reader(self.database), self.now)
+        listing = applications_page.gather(self.database, CONFIG, None, now=self.now)
+        chip = applications_page.gather(self.database, CONFIG, None, show="needs_you", now=self.now)
+        grouped = [job["key"] for item in listing["list"]["groups"] if item["key"] == "needs_you" for job in item["jobs"]]
+        failing = sorted(entry["refs"]["job_key"] for entry in view["needs_you"])
+        self.assertEqual(failing, ["resume", "unreadable"])
+        self.assertEqual(sorted(grouped), failing)
+        self.assertEqual(sorted(job["key"] for job in chip["list"]["jobs"]), failing)
+        self.assertEqual((needs["applications"], listing["counts"]["needs_you"], needs["questions"]), (2, 2, 1))
+
+    def test_causes_say_the_headline_once_without_engineer_notes(self):
+        self.job_row("retry", "RETRY_WAIT", "ANSWERING_RETRY", self.now - dt.timedelta(hours=1))
+        self.database.execute("INSERT INTO application_events(job_key,event,at,detail) VALUES (?,?,?,?)",
+                              ("retry", "RETRY_WAIT", (self.now - dt.timedelta(hours=1)).isoformat(),
+                               json.dumps({"code": "ANSWERING_RETRY", "next_action": "Re-run the AI answering step on the next cycle"})))
+        [item] = self.items(self.gather(), "applications")
+        [reason] = item["reasons"]
+        self.assertEqual((reason["words"], reason["where"], reason["error"], reason["code"]), (None, None, None, "ANSWERING_RETRY"))
+
+    def test_an_exception_code_leads_with_plain_words(self):
+        self.assertEqual(failures_page.cause_words("LINKEDIN_CONTACTS_KeyError"), "The contact finder hit an internal error.")
+        self.assertEqual(failures_page.cause_words("ValueError"), "Sidedoor hit an internal error.")
+        self.assertEqual(failures_page.cause_words("SOMETHING_NEW"), "Something went wrong.")
+
+    def test_items_older_than_a_day_fold_into_earlier(self):
+        self.database.execute("INSERT INTO runs VALUES ('old',?,'INTERRUPTED',NULL,NULL)", ((self.now - dt.timedelta(hours=30)).isoformat(),))
+        self.database.execute("INSERT INTO runs VALUES ('new',?,'FAILED',?,NULL)",
+                              ((self.now - dt.timedelta(hours=2)).isoformat(), (self.now - dt.timedelta(hours=2)).isoformat()))
+        [section] = [s for s in self.gather()["sections"] if s["key"] == "scheduler"]
+        self.assertEqual([entry["code"] for entry in section["recent"]], ["ROUND_FAILED"])
+        self.assertEqual([entry["code"] for entry in section["earlier"]], ["ROUND_INTERRUPTED"])
+        self.assertEqual(len(section["entries"]), 2)   # readers of the full list are unchanged
+
+    def test_runs_are_named_by_what_they_were_about(self):
+        folder = self.root / "reports" / "application-recovery" / "decision-ab_1"
+        folder.mkdir(parents=True)
+        (self.root / "reports" / "application-recovery" / "decision-zz").mkdir()
+        (self.root / "reports" / "email-check" / "check-x1").mkdir(parents=True)
+        self.job_row("cf:1", "BLOCKED", "FILE_UPLOAD_FAILED", self.now)
+        self.database.execute("INSERT INTO application_events(job_key,event,at,detail) VALUES (?,?,?,?)",
+                              ("cf:1", "APPLICATION_RECOVERY_DECIDED", self.now.isoformat(),
+                               json.dumps({"decision": {"artifacts": {"directory": str(folder)}}})))
+        logs = self.root / "logs"
+        logs.mkdir()
+        for label in ("ai-1", "cloud-2"):
+            (logs / ("7feefb1b-f6b3-45d2-8d2d-69d916574ff4.%s.1.discovery.log" % label)).write_text("x\n")
+        self.database.commit()
+        names = failures_page.run_names(overview_page.Reader(self.database))
+        runs, _ = failures_page.runs_paged(self.root, logs, names=names)
+        self.assertEqual(sorted(run["label"] for run in runs),
+                         ["Email check", "Recovery decision decision-zz", "Recovery decision \u00b7 Acme, cf:1",
+                          "Research \u00b7 2 industries"])
+
+    def test_empty_and_missing_logs_share_one_line(self):
+        logs = self.root / "logs"
+        logs.mkdir()
+        (logs / "research.stderr.log").write_text("")
+        (logs / "launchd.stderr.log").write_text("2026-10-22T17:00:00Z boom\n")
+        view = failures_page.logs_view(logs, [])
+        self.assertEqual([stream["name"] for stream in view["boxes"]], ["launchd.stderr.log"])
+        self.assertEqual(view["quiet"], ["No errors from: Research, Applications, Sidedoor.",
+                                         "No output from: Hourly round, Research, Applications, Sidedoor."])
+        self.assertEqual(len(view["streams"]), 8)   # the download still lists every stream
+
+
 class LogTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -581,7 +685,8 @@ class FailuresPageTest(unittest.TestCase):
         self.assertIn("Nothing needs you right now.", page)
         self.assertIn('id="scheduler"', response.text)
         self.assertIn('id="needs-you"', response.text)
-        self.assertIn("no log yet", page)
+        self.assertIn("No errors from: Hourly round, Research, Applications, Sidedoor.", page)   # one line, no empty boxes
+        self.assertNotIn("no log yet", page)
         self.assertFalse((self.root / "state").exists())
         self.assertFalse((self.root / "logs").exists())
 
@@ -597,7 +702,9 @@ class FailuresPageTest(unittest.TestCase):
         base.job(database, "own", "BLOCKED", "DESIGNATED_RESUME_MISMATCH")
         database.commit()
         database.close()
-        self.assertIn('href="/failures#needs-you"', self.get("/").text)
+        # Overview's Needs you leads to Applications' "Blocked, needs you" (owner, 2026-10-24); the
+        # same hold is still listed under this page's Needs you.
+        self.assertIn('href="/applications?show=needs_you"', self.get("/").text)
         page = self.get()
         self.assertIn("Your résumé file changed since you set it.", text_of(page.text))
         needs = page.text[page.text.index('id="needs-you"'):page.text.index("</section>", page.text.index('id="needs-you"'))]

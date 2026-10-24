@@ -811,6 +811,55 @@ def answers_in_force(answers):
     return _answers_in_force(answers)[0]
 
 
+def with_current_kept_answers(policy):
+    """`policy` with the answers the owner kept from Approvals as profile.json holds them NOW
+    (setup_steps.save_owner_answer; owner, 2026-10-24: "saved answers need to reach every single
+    worker that actually consumes my packet"). The applications job loads the profile once per run
+    and a run can last longer than an hour, so an answer saved on Approvals during a run never
+    reached a later job of that run (blueprints ai, 2026-10-24: saved 09:17, asked again 09:33 by
+    the run that started 09:15). Only the kept answers are replaced, added or removed; every other
+    recorded answer and setting is as given. A profile that cannot be read leaves `policy` as it is.
+    Returns a new dict; `policy` is not changed."""
+    try:
+        document = json.loads(user_profile.profile_path().read_text())
+    except Exception:
+        return policy
+    current = document.get("answers") if isinstance(document, dict) else None
+    if not isinstance(policy, dict) or not isinstance(current, dict):
+        return policy
+    answers = {key: answer for key, answer in (policy.get("answers") or {}).items() if not kept_answer(answer)}
+    answers.update((key, answer) for key, answer in current.items() if kept_answer(answer))
+    return dict(policy, answers=answers)
+
+
+def kept_answers_of(policy):
+    """The kept Approvals answers in `policy`, for telling whether they changed."""
+    return {key: answer for key, answer in ((policy or {}).get("answers") or {}).items() if kept_answer(answer)}
+
+
+# Answers recorded for one job (application_answers): never superseded per semantic (`answers_in_force`).
+PER_JOB_ANSWER_SOURCES = ("ai-answer:", "owner-declaration:", COMPUTED_ANSWER_SOURCE_PREFIX, "authenticated-owner-decision:")
+
+
+def answers_for_model(answers):
+    """The recorded answers a model is handed: only the answer in force per semantic (newest wins,
+    `answers_in_force`, the rule `policy_answer` applies for eligibility), so a Setup entry and a
+    newer answer kept from Approvals for the same semantic never both reach it with nothing saying
+    which one holds (owner, 2026-10-24). Answers without a semantic, and a job's own answers
+    (PER_JOB_ANSWER_SOURCES), are passed as they are. Order is kept."""
+    answers = answers if isinstance(answers, dict) else {}
+    in_force = answers_in_force(answers)
+    return {key: answer for key, answer in answers.items() if key in in_force or (
+        isinstance(answer, dict) and str(answer.get("source") or "").startswith(PER_JOB_ANSWER_SOURCES))}
+
+
+def policy_for_model(policy):
+    """`policy` with its answers narrowed by `answers_for_model`; a new dict."""
+    if not isinstance(policy, dict) or not isinstance(policy.get("answers"), dict):
+        return policy
+    return dict(policy, answers=answers_for_model(policy["answers"]))
+
+
 NOT_USED_NEWER = "NEWER_KEPT_ANSWER"           # a newer kept answer for the same semantic is used
 NOT_USED_NOT_YES_NO = "NOT_YES_NO"             # not a yes/no, and the profile records a yes/no for it
 
@@ -1927,8 +1976,13 @@ def recorded_authorization_facts(policy):
     answers = (policy or {}).get("answers") or {}
 
     def recorded(key):
+        # The answer in force for the semantic recorded under this key (`answers_in_force`), so an
+        # answer the owner kept from Approvals for the same semantic is the one the submit session
+        # gets (owner, 2026-10-24); else the value recorded under the key, as before.
         entry = answers.get(key)
-        return entry.get("value") if isinstance(entry, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        return policy_answer(policy, entry.get("semantic"), entry.get("value")) if entry.get("semantic") else entry.get("value")
 
     return {"work_authorization_by_jurisdiction": recorded("work_authorization_by_jurisdiction"),
             "requires_visa_sponsorship_us": recorded("requires_visa_sponsorship_us"),
@@ -3581,6 +3635,7 @@ def predraft_answers(database, job, policy, root, config, adapter, now):
                             (job["job_key"], PREDRAFT_EVENT, record["form_fingerprint"])).fetchone()
     if done:
         return None
+    policy = with_current_kept_answers(policy)   # answers kept on Approvals since the run began
     scoped_policy = dict(policy, answers=dict(policy["answers"]))
     for saved in database.execute("SELECT * FROM application_answers WHERE job_key=? AND field<>?",
                                   (job["job_key"], decision_transport.FORM_NOT_READABLE_FIELD)):
@@ -3913,6 +3968,7 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     if not current or current["state"] in FINAL:
         return
     job = dict(current)
+    policy = with_current_kept_answers(policy)
     job["candidate_email"] = policy["answers"]["email"]["value"]
     # Same posting, another listing (owner, 2026-09-27). Before a new job's first read, when its
     # company already has other jobs on file, the model judges whether this listing is one of
@@ -4165,6 +4221,7 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         with database:
             decision_transport.supersede_fact(database, job["job_key"], decision_transport.FORM_NOT_READABLE_FIELD,
                                               "FORM_NOW_ENUMERATED", now)
+    policy = with_current_kept_answers(policy)   # answers kept on Approvals since the run began
     scoped_policy = dict(policy, answers=dict(policy["answers"]))
     # The escalation's own reply is never an application answer: it says the form could
     # not be read, not what the form asks. Excluding the reserved field here is what makes
@@ -4236,6 +4293,13 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
                                  "AND state IN ('PENDING','WAITING_TRANSPORT')", (job["job_key"] + ":" + blocker,))
                 event(database, job["job_key"], OWNER_QUESTION_EVENT,
                       {"questions": sorted(cards), "ai_retry": sorted(set(missing) - set(cards)), "expires_at": expires}, now)
+            # An answer kept on Approvals while this job was being answered (owner, 2026-10-24) was
+            # not in the packet: every open card it may cover (same semantic, the scope of a card's
+            # policy hash) is closed and its job made due again, so the answering AI runs with it
+            # (`decision_transport.refresh_stale`); if it still cannot answer, a card is raised anew.
+            latest = with_current_kept_answers(policy)
+            if kept_answers_of(latest) != kept_answers_of(policy):
+                decision_transport.refresh_stale(database, latest, now)
             return
         blocker = "ANSWERING_RETRY:" + ",".join(missing)
         retry_at = (dt.datetime.fromisoformat(now) + dt.timedelta(hours=1)).isoformat()

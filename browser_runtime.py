@@ -561,6 +561,25 @@ ONSCREEN_POSITION = (80, 60)
 WINDOW_SIZE = (1280, 900)
 WINDOW_SWITCHES = ("--window-position=%d,%d" % OFFSCREEN_POSITION, "--window-size=%d,%d" % WINDOW_SIZE)
 OFFSCREEN_WORDS = "Sidedoor's browser runs minimized in the Dock; it appears when it needs you."
+HEADLESS_WORDS = "Sidedoor's browser runs without a window; one appears only when a CAPTCHA needs you."
+MIXED_WORDS = ("Sidedoor's browser runs without a window (some jobs run it minimized in the Dock); "
+               "it appears when it needs you.")
+# Headless (owner, 2026-10-24: "sometimes the browser still comes to the front and doesn't return me to my
+# last screen", option A): on macOS each operation named in config["browser_driver"]["headless_operations"]
+# (default: every one) runs Sidedoor's Chrome in Chrome's own headless mode (--headless=new) on the same
+# profile, so it has no window and cannot come to the front; the minimized window and the focus keeper
+# (FG2 = a) run only for the operations left out (the per-operation fallback) and for the CAPTCHA wait,
+# which reopens the same profile headed for the owner's tick (browser_guard.Proxy.show_headed). The page
+# sees the installed Chrome's own headed user agent (`headed_user_agent`, from its version: new headless
+# would otherwise say "HeadlessChrome"), and navigator.webdriver stays false as in the headed launch
+# (Chrome sets it under --headless; Blink's documented AutomationControlled switch turns it off).
+HEADLESS_OPERATIONS = ("linkedin", "webmail", "inspect", "investigate", "submit", "verify", "reconcile")
+HEADLESS_SWITCH = "--headless=new"
+AUTOMATION_SWITCH = "--disable-blink-features=AutomationControlled"
+# Chrome's reduced user agent on macOS (the OS part is frozen at 10_15_7 and the minor versions at 0.0.0
+# by Chrome itself); only the major version comes from the installed Chrome.
+MAC_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/%s.0.0.0 Safari/537.36")
 # False in the test suite (tests/profile_home.py): a test's guard never starts a real Chrome.
 BACKGROUND_ALLOWED = True
 
@@ -574,17 +593,159 @@ def background_launch(config=None, platform=None):
 
 
 def offscreen(config=None, platform=None):
-    """True when session Chrome windows are kept hidden (minimized, FG2 = a): the same sessions as `background_launch`
-    (macOS, the real headed profile), whichever way Chrome is started (open -g, or Playwright's fallback)."""
+    """True when session Chrome is kept out of the user's way: the same sessions as `background_launch`
+    (macOS, the real profile), headless or minimized (doctor, the overview). Which of the two a session
+    gets is `minimized` / `headless_user_agent`."""
     return background_launch(config, platform)
 
 
-def launch_config(config=None):
-    """@playwright/mcp's --config: LAUNCH_CONFIG, plus the off-screen window for its fallback launch."""
+def headless_operations(config=None):
+    """The operations that run headless (config["browser_driver"]["headless_operations"]; default all).
+    A value that is not a list keeps the default."""
+    value = settings(config).get("headless_operations")
+    if not isinstance(value, list):
+        return HEADLESS_OPERATIONS
+    return tuple(item for item in value if isinstance(item, str))
+
+
+def chrome_version(binary):
+    """The installed Chrome's version ("141.0.7390.123") from its bundle's Info.plist, or None. Read
+    from the file only: Chrome is never started for it."""
+    import plistlib
+    app = chrome_app(binary or "")
+    if app is None:
+        return None
+    try:
+        with open(app / "Contents" / "Info.plist", "rb") as stream:
+            version = plistlib.load(stream).get("CFBundleShortVersionString")
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+    return version if isinstance(version, str) and version.split(".")[0].isdigit() else None
+
+
+def headed_user_agent(binary):
+    """The user agent the installed Chrome sends headed (macOS), or None when its version is unknown."""
+    version = chrome_version(binary)
+    return MAC_USER_AGENT % version.split(".")[0] if version else None
+
+
+def headless_user_agent(config, operation, platform=None, binary=None):
+    """The user agent a headless session of `operation` presents, or None when the operation runs headed:
+    not macOS's background launch, not in `headless_operations`, or the installed Chrome's version cannot
+    be read (then it runs headed and minimized as before, never as "HeadlessChrome")."""
+    if not background_launch(config, platform) or operation not in headless_operations(config):
+        return None
+    if binary is None:
+        import setup_steps
+        binary = setup_steps.chrome_path(platform)
+    return headed_user_agent(binary)
+
+
+def minimized(config=None, operation=None, platform=None):
+    """True when the session's Chrome is headed and kept minimized with the focus keeper (FG2 = a): macOS's
+    background launch for an operation that does not run headless (the per-operation fallback)."""
+    return background_launch(config, platform) and headless_user_agent(config, operation, platform) is None
+
+
+def headless_switches(user_agent, scale=None):
+    """Chrome's switches for a headless session: new headless at the normal window size, presenting
+    `user_agent`, with navigator.webdriver false as headed, and (given `scale`) the real display's
+    device pixel ratio (--force-device-scale-factor: the CSS viewport stays WINDOW_SIZE wide)."""
+    switches = (HEADLESS_SWITCH, "--window-size=%d,%d" % WINDOW_SIZE, "--user-agent=" + user_agent, AUTOMATION_SWITCH)
+    return switches + (("--force-device-scale-factor=%s" % _number(scale),) if scale else ())
+
+
+def _number(value):
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+# A headless Chrome reports an 800x600 screen at ratio 1 (real-site check, 2026-10-24), against a 1280x900
+# window: the session reports the user's own main display instead (`display`, read once from Quartz in
+# points with its backing scale), never smaller than the window. Unreadable: a common MacBook display.
+FALLBACK_DISPLAY = (1512, 982, 2)
+
+
+def display(quartz=None):
+    """(width, height, scale) of the main display: size in points (CGDisplayPixelsWide/High), scale =
+    the current mode's pixel width over its point width. FALLBACK_DISPLAY when it cannot be read."""
+    try:
+        if quartz is None:
+            import Quartz as quartz
+        main = quartz.CGMainDisplayID()
+        width, height = int(quartz.CGDisplayPixelsWide(main)), int(quartz.CGDisplayPixelsHigh(main))
+        mode = quartz.CGDisplayCopyDisplayMode(main)
+        scale = quartz.CGDisplayModeGetPixelWidth(mode) / quartz.CGDisplayModeGetWidth(mode)
+        if width <= 0 or height <= 0 or not 1 <= scale <= 4:
+            return FALLBACK_DISPLAY
+        return width, height, round(scale * 4) / 4
+    except Exception:
+        return FALLBACK_DISPLAY
+
+
+def screen_metrics(value=None):
+    """The headless session's screen: {width, height, scale}, the display never smaller than the window."""
+    width, height, scale = value or display()
+    return {"width": max(width, WINDOW_SIZE[0]), "height": max(height, WINDOW_SIZE[1]), "scale": scale}
+
+
+def window_words(config=None, binary=None):
+    """What the overview and doctor say about where the browser is (macOS background launch only): what
+    will actually run, so "without a window" only when the config lists the operation AND the installed
+    Chrome's headed user agent can be derived (`headless_user_agent`; otherwise it runs minimized)."""
+    if binary is None:
+        import setup_steps
+        binary = setup_steps.chrome_path()
+    operations = set(headless_operations(config)) & set(HEADLESS_OPERATIONS)
+    if not operations or headed_user_agent(binary) is None:
+        return OFFSCREEN_WORDS
+    return HEADLESS_WORDS if operations == set(HEADLESS_OPERATIONS) else MIXED_WORDS
+
+
+def launch_config(config=None, operation=None):
+    """@playwright/mcp's --config: LAUNCH_CONFIG, plus the off-screen window for its fallback launch. The
+    fallback is headed and minimized for every operation (H2): the guard reaches it only when its own
+    launch failed, and then runs the session by the --offscreen rules (browser_guard)."""
     value = json.loads(json.dumps(LAUNCH_CONFIG))
     if offscreen(config):
         value["browser"]["launchOptions"]["args"] = list(WINDOW_SWITCHES)
     return value
+
+
+# Chrome's GREASE brand (components/embedder_support user_agent_utils: GenerateBrandVersionList), seeded by
+# the major version, so the brand list matches the installed headed Chrome's exactly.
+GREASE_CHARACTERS = (" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_")
+GREASE_VERSIONS = ("8", "99", "24")
+GREASE_ORDERS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+
+
+def brand_list(major, version):
+    """[{brand, version}] for Chrome `major` (`version`: "141" for brands, the full one for the full list)."""
+    seed = int(major)
+    grease = {"brand": "Not" + GREASE_CHARACTERS[seed % 11] + "A" + GREASE_CHARACTERS[(seed + 1) % 11] + "Brand",
+              "version": GREASE_VERSIONS[seed % 3] + ("" if version == major else ".0.0.0")}
+    order = GREASE_ORDERS[seed % 6]
+    brands = [None, None, None]
+    brands[order[0]] = grease
+    brands[order[1]] = {"brand": "Chromium", "version": version}
+    brands[order[2]] = {"brand": "Google Chrome", "version": version}
+    return brands
+
+
+def client_hints(binary, mac_version=None, machine=None):
+    """CDP userAgentMetadata for the installed Chrome headed on this Mac (H3), or None when its version is
+    unknown: brands, fullVersionList, platform, its version, architecture, all from the installed Chrome
+    and this machine, never a fixed version."""
+    import platform as host
+    version = chrome_version(binary)
+    if not version:
+        return None
+    major = version.split(".")[0]
+    machine = machine or host.machine()
+    return {"brands": brand_list(major, major), "fullVersionList": brand_list(major, version),
+            "fullVersion": version, "platform": "macOS",
+            "platformVersion": mac_version if mac_version is not None else (host.mac_ver()[0] or ""),
+            "architecture": "arm" if machine.startswith("arm") else "x86", "bitness": "64", "model": "",
+            "mobile": False, "wow64": False}
 
 
 def chrome_app(binary):
@@ -596,21 +757,23 @@ def chrome_app(binary):
     return None
 
 
-def background_command(app, path):
-    """`open -g -n -a <Chrome.app> --args ...`: Chrome on `path`, never activated, DevTools on a free port."""
+def background_command(app, path, port=0):
+    """`open -g -n -a <Chrome.app> --args ...`: Chrome on `path`, never activated, DevTools on a free port
+    (or on `port`: the CAPTCHA wait reopens a headless session's profile headed on the port
+    @playwright/mcp is attached to)."""
     return ["/usr/bin/open", "-g", "-n", "-a", str(app), "--args", "--user-data-dir=" + str(path),
             # Live parity (CK3, accepted): Playwright's own launch also opens a local DevTools port.
-            "--remote-debugging-port=0", *BACKGROUND_SWITCHES, *WINDOW_SWITCHES, "about:blank"]
+            "--remote-debugging-port=%d" % port, *BACKGROUND_SWITCHES, *WINDOW_SWITCHES, "about:blank"]
 
 
-def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, stop=None):
-    """Start Chrome on profile `path` without activating it; return its DevTools endpoint
-    (`http://127.0.0.1:<port>`, from the DevToolsActivePort file Chrome writes into the profile).
-    Raises OSError when `open` fails or no port appears within `timeout`; before that last raise the
-    Chrome `open` started on this profile is stopped (`end_session`: only a Chrome whose command line
-    carries --user-data-dir=<path>), so it cannot clash with Playwright's fallback launch (CK2)."""
-    import subprocess
-    import time
+def headless_command(binary, path, user_agent, scale=None):
+    """Chrome's own binary, headless, on `path` with DevTools on a free port. Started directly (no
+    LaunchServices): a windowless Chrome has nothing to activate."""
+    return [str(binary), "--user-data-dir=" + str(path), "--remote-debugging-port=0", *BACKGROUND_SWITCHES,
+            *headless_switches(user_agent, scale), "about:blank"]
+
+
+def _fresh_port_file(path):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     port_file = path / DEVTOOLS_PORT_FILE
@@ -618,10 +781,39 @@ def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sl
         port_file.unlink()   # a stale file names a port that is gone
     except OSError:
         pass
-    done = (run or subprocess.run)(background_command(app, path), stdin=subprocess.DEVNULL,
+    return port_file
+
+
+def launch_headless(binary, path, user_agent, popen=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None,
+                    clock=None, stop=None, scale=None):
+    """Start Chrome headless on profile `path` (`headless_command`); return its DevTools endpoint, as
+    `launch_background` does (same port file, same stop of this profile's Chrome on a timeout)."""
+    import subprocess
+    port_file = _fresh_port_file(path)
+    (popen or subprocess.Popen)(headless_command(binary, path, user_agent, scale), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return _await_port(port_file, path, timeout, sleep, clock, stop)
+
+
+def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, stop=None,
+                      port=0):
+    """Start Chrome on profile `path` without activating it; return its DevTools endpoint
+    (`http://127.0.0.1:<port>`, from the DevToolsActivePort file Chrome writes into the profile).
+    Raises OSError when `open` fails or no port appears within `timeout`; before that last raise the
+    Chrome `open` started on this profile is stopped (`end_session`: only a Chrome whose command line
+    carries --user-data-dir=<path>), so it cannot clash with Playwright's fallback launch (CK2)."""
+    import subprocess
+    path = Path(path)
+    port_file = _fresh_port_file(path)
+    done = (run or subprocess.run)(background_command(app, path, port), stdin=subprocess.DEVNULL,
                                    capture_output=True, text=True, timeout=timeout)
     if done.returncode != 0:
         raise OSError("open -g failed: " + (done.stderr or "").strip()[:200])
+    return _await_port(port_file, path, timeout, sleep, clock, stop)
+
+
+def _await_port(port_file, path, timeout, sleep=None, clock=None, stop=None):
+    import time
     clock, sleep = clock or time.monotonic, sleep or time.sleep
     deadline = clock() + timeout
     while clock() < deadline:
@@ -638,14 +830,14 @@ def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sl
     raise OSError("Chrome wrote no DevTools port within %d s" % timeout)
 
 
-def mcp_command(config, directory):
+def mcp_command(config, directory, operation=None):
     """The @playwright/mcp command line (bundled Node, absolute paths: no npx shim). In background
     mode it carries no profile: the guard starts Chrome and adds `--cdp-endpoint` (browser_guard)."""
     directory = Path(directory)
     output = directory / OUTPUT_FOLDER
     output.mkdir(parents=True, exist_ok=True)
     launch = directory / "browser-config.json"
-    launch.write_text(json.dumps(launch_config(config), indent=1) + "\n")
+    launch.write_text(json.dumps(launch_config(config, operation), indent=1) + "\n")
     command = [str(node_path(config)), str(mcp_cli(config)), "--browser", settings(config).get("browser", "chrome")]
     if settings(config).get("isolated"):
         command.append("--isolated")  # tests only: an in-memory profile
@@ -668,9 +860,18 @@ def guard_command(config, directory, operation, claim=None, human_check=None):
         command.extend(["--human-check", str(human_check)])
     if background_launch(config):
         command.extend(["--background-chrome", str(profile(config))])
-    if offscreen(config):
+    user_agent = headless_user_agent(config, operation)
+    if user_agent:
+        command.extend(["--headless-user-agent", user_agent])   # headless (owner, 2026-10-24, option A)
+        import setup_steps
+        hints = client_hints(setup_steps.chrome_path())
+        if hints:
+            command.extend(["--headless-client-hints", json.dumps(hints, sort_keys=True, separators=(",", ":"))])
+        screen = screen_metrics()
+        command.extend(["--headless-screen", "%dx%d@%s" % (screen["width"], screen["height"], _number(screen["scale"]))])
+    elif offscreen(config):
         command.append("--offscreen")
-    return command + ["--"] + mcp_command(config, directory)
+    return command + ["--"] + mcp_command(config, directory, operation)
 
 
 def encoded(value):

@@ -40,8 +40,10 @@ Sources (why each is the record the product itself treats as that fact):
   (`application_recovery.user_hold`) is "Blocked", any other route retries on its own ("Waiting to
   retry"), e.g. the three-strikes access blocks.
 - needs you: `user_decisions` PENDING (owner questions, not the transport smoke test, not expired),
-  owner holds (route OWNER) on jobs without such a pending question, messages waiting for approval
+  owner holds (route OWNER, the "Blocked" above), messages waiting for approval
   (`approvals.waiting_count`) and the reply AI's notes not marked done (`reply_tools.open_flags`).
+- the alerts under the title: the red and amber Health items no banner (or the "not running" card)
+  already states (`alerts`).
 - compute: `workflow_tasks.compute_used` for `workflow_tasks.budget_day` (the same arithmetic
   `reserve_compute` admits against) against config `daily_compute_seconds`.
 - last cycle: `runs` (one row per hourly cycle).
@@ -60,6 +62,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import paths
+import resources
 import setup_steps
 import workflow_tasks
 
@@ -345,12 +348,9 @@ def outreach(reader, config, now, start, end):
     # The people Networking & Referrals lists who wrote today (its "Replied today" filter): a stranger
     # who wrote first is not on that page, so not counted here either (E6.T5 N11).
     import networking_page
-    replies = networking_page.replied_between(reader, start, end)
-    waiting = 0
-    for (text,) in reader.rows("SELECT payload FROM outreach_actions WHERE state IN (%s)" % ",".join("?" * len(INVITE_WAITING)),
-                               INVITE_WAITING, "outreach_actions"):
-        payload = _json(text)
-        waiting += bool(payload and payload.get("purpose") == "INVITE")
+    # "waiting": the contacts Networking's Sending chip lists (badge "Sending…"), the same per-contact rule.
+    listed = networking_page.overview_counts(reader, start, end)
+    replies, waiting = listed["replies"], listed["sending"]
     import pacing  # the sender's own warm-up rule; loaded only when the page needs it
     first = first_invite_request(reader) if reader.has("outreach_actions") else None
     cap = pacing.daily_cap(pacing._settings(config), [first] if first else [], now)
@@ -358,9 +358,9 @@ def outreach(reader, config, now, start, end):
 
 
 def submitted_today(reader, start, end):
-    verified = reader.rows("SELECT at FROM application_events WHERE event='SUBMISSION_VERIFIED' AND at>=?",
-                           (_prefilter(start),), "application_events")
-    return len(_within(verified, start, end))
+    """Unique jobs verified as submitted today: the rows Applications' "Submitted today" lists."""
+    import applications_page
+    return len(applications_page.submitted_today_keys(reader, start, end)[0])
 
 
 def _blocked(reader):
@@ -382,11 +382,23 @@ def _blocked(reader):
     return owner, waiting
 
 
-def right_now(reader):
-    owner, waiting = _blocked(reader)
-    return {"confirming": reader.count("SELECT COUNT(*) FROM application_jobs WHERE state IN ('SUBMITTING','RECONCILE')",
-                                       (), "application_jobs"),
-            "blocked": len(owner), "retrying": len(waiting)}
+def retrying_keys(reader, now):
+    """THE "Waiting to retry" rule (owner, 2026-10-24): every job whose Applications badge says
+    "Waiting to retry" (`applications_page.job_view`): state RETRY_WAIT not being read right now (the
+    badge says "Reading now" first) plus the BLOCKED automatic waits (`_blocked`) not being read right
+    now either. Overview's Right now number, Applications' "Waiting to retry" chip count and its list
+    all come from here."""
+    import applications_page
+    reading = applications_page.reading_keys(reader, now)
+    later = [key for (key,) in reader.rows("SELECT job_key FROM application_jobs WHERE state='RETRY_WAIT'", (), "application_jobs")]
+    return [key for key in later + _blocked(reader)[1] if key not in reading]
+
+
+def right_now(reader, now):
+    import applications_page
+    owner, _ = _blocked(reader)
+    return {"confirming": applications_page.state_count(reader, "confirming", now),
+            "blocked": len(owner), "retrying": len(retrying_keys(reader, now))}
 
 
 def _pending_questions(reader, now):
@@ -396,18 +408,43 @@ def _pending_questions(reader, now):
                        (int(now.timestamp() * 1000),), "user_decisions")
 
 
+def answers_hold(blocker):
+    """A hold on the form's questions (UNKNOWN_REQUIRED_ANSWERS), not the unreadable-form hold."""
+    import decision_transport
+    code = str(blocker or "")
+    return (code.split(":", 1)[0] == "UNKNOWN_REQUIRED_ANSWERS"
+            and code != "UNKNOWN_REQUIRED_ANSWERS:" + decision_transport.FORM_NOT_READABLE_FIELD)
+
+
+def blocked_on_owner(owner_hold, asked, blocker):
+    """THE needs-you rule (owner, 2026-10-24), the one test behind Overview's Needs you rows,
+    Applications' "Blocked, needs you" filter and "Needs you" heading, and the Needs you list on
+    Failures: a job with an open question card counts only under "questions to answer", never here;
+    a job whose answers are in (`answers_hold` with no open card) needs nothing from the owner; every
+    other owner hold (`_blocked`, e.g. the résumé changed) is an application blocked on the owner."""
+    return bool(owner_hold) and not asked and not answers_hold(blocker)
+
+
+def blocked_on_owner_keys(reader, now):
+    """The job keys `blocked_on_owner` selects, in `_blocked`'s order."""
+    owner = _blocked(reader)[0]
+    asked = {row[0] for row in _pending_questions(reader, now)}
+    blockers = dict(reader.rows("SELECT job_key,blocker FROM application_jobs WHERE state='BLOCKED'", (), "application_jobs"))
+    return [key for key in owner if blocked_on_owner(True, key in asked, blockers.get(key))]
+
+
 def needs_you(reader, now):
-    """Questions, owner holds without a question, messages waiting for approval
-    (`approvals.waiting_count`) and the reply AI's notes not marked done (`reply_tools.open_flags`);
-    each count links to its section of Approvals (E6.T4)."""
+    """The one "Needs you" card (owner, 2026-10-24): questions to answer, messages waiting for approval
+    (`approvals.waiting_count`) and the reply AI's notes not marked done (`reply_tools.open_flags`),
+    each the total of its section of Approvals (E6.T4), and the applications blocked on the owner
+    (`blocked_on_owner_keys`), the total of Applications' "Blocked, needs you" filter
+    (`applications_page.counts`). A held job with a question on Approvals counts only as a question."""
     import approvals
     import reply_tools
-    questions = _pending_questions(reader, now)
-    asked = {row[0] for row in questions}
-    owner, _ = _blocked(reader)
     present = reader.database is not None
-    return {"questions": len(questions), "failures": sum(1 for key in owner if key not in asked),
+    return {"questions": len(_pending_questions(reader, now)), "applications": len(blocked_on_owner_keys(reader, now)),
             "messages": approvals.waiting_count(reader.database) if present else 0,
+            "couldnt_send": approvals.refused_count(reader.database) if present else 0,
             "notes": reply_tools.open_flag_count(reader.database) if present else 0}
 
 
@@ -570,7 +607,10 @@ def next_run(reader, job, config, now, scheduler, pause):
         return {"label": "after today's research"}   # no database yet: no research day on record
     import scheduler_loop
     instants, periods = scheduler_loop.schedule(now, config)
-    return {"at": dt.datetime.fromtimestamp(instants[job] + periods[job], dt.timezone.utc)}
+    # Outreach: the hourly round or the invitation tick (owner, 2026-10-24), whichever starts first;
+    # both yield to research and stop on pause exactly as tested above.
+    names = [job] + ([scheduler_loop.INVITE_JOB] if job == "run" and scheduler_loop.INVITE_JOB in scheduler_loop.jobs(config) else [])
+    return {"at": dt.datetime.fromtimestamp(min(instants[name] + periods[name] for name in names), dt.timezone.utc)}
 
 
 def job_runs(reader, config, now, scheduler, pause, reports):
@@ -587,14 +627,21 @@ SETTINGS_LICENSE = "/settings#license"
 NOT_CHECKED = "Not checked yet"
 
 
-def _item(name, tone, text, at=None, fix=None, checked=None, timed=True):
+def _item(name, tone, text, at=None, fix=None, checked=None, timed=True, banner=False):
     """One health line. tone: success (green), warning (amber), error (red). `at` is the last time
     the check was good; `checked` the time of a stored check that was not good (Setup keeps only
     each check's latest result, so an earlier good time is not on record); `fix` is
     {"label", "href"} or {"label", "post"} (a form button). A line whose text already says it was
-    never checked carries no time line."""
+    never checked carries no time line. `banner`: a banner (dashboard.layout) or the "not running"
+    card already says this at the top of the page, so `alerts` leaves it out."""
     return {"name": name, "tone": tone, "text": text, "at": at, "fix": fix, "checked": None if at else checked,
-            "timed": timed and text != NOT_CHECKED}
+            "timed": timed and text != NOT_CHECKED, "banner": banner}
+
+
+def alerts(items):
+    """The red and amber Health items shown again just under the Overview title (owner, 2026-10-24),
+    the same items (one source), less those a banner already states."""
+    return [item for item in items if item["tone"] in ("error", "warning") and not item.get("banner")]
 
 
 def _good_at(saved):
@@ -655,7 +702,9 @@ def scheduler_item(scheduler, cycle, pause, fmt):
     if not scheduler.get("running"):
         if flags.get("user_paused_at"):
             notes.append({"text": "Also paused by you since %s." % fmt(_utc(flags["user_paused_at"]))})
-        item = _item("Scheduler", "error", "Not running. " + last, at, {"label": "Start", "post": "/start"}, timed=bool(at))
+        # The "Sidedoor is not running" card at the top of the page already says this, with [Start].
+        item = _item("Scheduler", "error", "Not running. " + last, at, {"label": "Start", "post": "/start"}, timed=bool(at),
+                     banner=True)
     elif flags.get("license_paused_at"):
         # The license pause clears only through the license (E6.T0 section 5): no [Resume] here.
         item = _item("Scheduler", "error", "Paused because of your license. " + last, at,
@@ -695,6 +744,16 @@ def browser_offscreen():
         return False
 
 
+def browser_window_words():
+    """Where the browser is (browser_runtime.window_words, from config.json's headless operations)."""
+    import browser_runtime
+    try:
+        config = resources.read_json("config.json")
+    except (OSError, ValueError):
+        config = None
+    return browser_runtime.window_words(config if isinstance(config, dict) else None)
+
+
 def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     state = progress["state"]
     steps = state["steps"]
@@ -713,7 +772,7 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     else:
         tone = license["tone"] if license["tone"] in ("error", "warning") else "success"
         items.append(_item("License", "warning" if license["state"] == "checking" else tone,
-                           license["text"], checked, fix))
+                           license["text"], checked, fix, banner=license_clock.banner(license) is not None))
 
     linkedin = steps.get("linkedin", {})
     status, offer = linkedin.get("status"), linkedin.get("offer")
@@ -737,7 +796,7 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     openrouter = steps.get("openrouter", {})
     if waits["out_of_credit"]:  # the same fix as the "out of credits" banner
         items.append(_item("OpenRouter", "error", waits["out_of_credit"]["health"], fix=wait_fix(waits["out_of_credit"]),
-                           timed=False))
+                           timed=False, banner=True))
     elif openrouter.get("status") == "done":
         items.append(_item("OpenRouter", "success", "Key works", _good_at(openrouter)))
     else:
@@ -747,21 +806,23 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     codex = steps.get("codex", {})
     if waits["codex_missing"]:  # the same fix as the "can't find Codex" banner
         items.append(_item("Codex", "error", waits["codex_missing"]["health"], fix=wait_fix(waits["codex_missing"]),
-                           timed=False))
+                           timed=False, banner=True))
     elif progress["done"][6] and waits["usage_limit"]:  # the same link as the ChatGPT usage banner
         items.append(_item("Codex", "warning", waits["usage_limit"]["health"], fix=wait_fix(waits["usage_limit"]),
-                           timed=False))
+                           timed=False, banner=True))
     elif progress["done"][6]:
         items.append(_item("Codex", "success", "Signed in with ChatGPT", _good_at(codex)))
     else:  # the same fix as the "Codex stopped working." banner
         failed = codex.get("message") if codex.get("status") == "failed" else None
         items.append(_item("Codex", "error", failed or "Codex stopped working",
-                           fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}, checked=_utc(codex.get("at"))))
+                           fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}, checked=_utc(codex.get("at")),
+                           banner=bool(progress.get("finished"))))   # dashboard.layout's "Codex stopped working."
 
     email = steps.get("email", {})
     browser = browser_unavailable() if setup_steps.chrome_path() else None
     if not setup_steps.chrome_path():  # the same fix as the "Google Chrome stopped working." banner
-        items.append(_item("Browser profile", "error", "Google Chrome stopped working", fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}))
+        items.append(_item("Browser profile", "error", "Google Chrome stopped working", fix={"label": "Fix", "href": SETTINGS_CONNECTIONS},
+                           banner=bool(progress.get("finished"))))   # dashboard.layout's "Google Chrome stopped working."
     elif browser == "RUNTIME_MISSING":   # E7.T1: the bundled Node / @playwright/mcp is gone
         import browser_runtime
         items.append(_item("Browser profile", "error", browser_runtime.UNAVAILABLE_WORDS["RUNTIME_MISSING"] + " "
@@ -773,7 +834,7 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
                            fix={"label": "Open Settings", "href": SETTINGS_CONNECTIONS}))
     elif email.get("mismatch"):  # the same fix as the mailbox banner
         items.append(_item("Browser profile", "error", "Signed in to a different mailbox",
-                           fix={"label": "Open Sidedoor's browser", "href": SETTINGS_CONNECTIONS}))
+                           fix={"label": "Open Sidedoor's browser", "href": SETTINGS_CONNECTIONS}, banner=True))
     elif setup_steps.email_locked(state):
         at = _good_at(email) or _utc(state.get("email_check_passed_at"))
         items.append(_item("Browser profile", "success", "Mailbox matches", at))
@@ -782,7 +843,7 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
                            fix={"label": "Open Settings", "href": SETTINGS_CONNECTIONS}))
     if setup_steps.chrome_path() and browser_offscreen():   # FG1 = b: where the window is, and when it shows
         import browser_runtime
-        items.append(_item("Browser window", "success", browser_runtime.OFFSCREEN_WORDS, timed=False))
+        items.append(_item("Browser window", "success", browser_window_words(), timed=False))
 
     if not isinstance(scheduler, dict):
         scheduler = {"running": bool(scheduler)}
@@ -870,7 +931,7 @@ def gather(database, config, home, progress, scheduler, now=None, root=None):
     found = {"research": section(reader, research, config, now, scheduler_running),
              "outreach": section(reader, outreach, config, now, start, end),
              "submitted": section(reader, submitted_today, start, end),
-             "right_now": section(reader, right_now),
+             "right_now": section(reader, right_now, now),
              "needs": section(reader, needs_you, now),
              "compute": {"used": section(reader, compute, config, now),
                          "in_flight": section(reader, compute_in_flight, config, now),
@@ -882,6 +943,7 @@ def gather(database, config, home, progress, scheduler, now=None, root=None):
              "day_start": when(start, now, zone),
              "unreadable": reader.broken,
              "unavailable": UNAVAILABLE}
+    found["alerts"] = alerts(found["health"])
     found["when"] = lambda moment: when(moment, now, zone)
     found["duration"] = duration
     return found

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+<div class="net-page">
 <h1 class="title">Networking &amp; Referrals</h1>
 {% set v = view %}
 {% set na = v.unavailable %}
@@ -7,9 +8,9 @@
 {% if flash and flash.text %}<p class="note note-{{ flash.tone }}" role="alert">{{ flash.text }}</p>{% endif %}
 
 <nav class="net-filters" aria-label="Filter contacts">
-  {% for key, label in v.filters %}
+  {% for key, label in v.filters %}{% if v.list == na or key in ("all", v.show) or v.list.counts[key] %}
   <a class="chip {{ 'chip-info net-filter-active' if key == v.show else 'chip-muted' }}" href="{{ v.link(show=key, page=None) }}"{% if key == v.show %} aria-current="true"{% endif %}>{{ label }}{% if v.list != na %} <span class="net-count">{{ v.list.counts[key] }}</span>{% endif %}</a>
-  {% endfor %}
+  {% endif %}{% endfor %}
 </nav>
 <form class="net-search" method="get" action="/sent" role="search">
   {% if v.show != "all" %}<input type="hidden" name="show" value="{{ v.show }}">{% endif %}
@@ -39,7 +40,7 @@
   <li class="card net-row" id="{{ c.dom }}">
     <details>
       <summary>
-        <span class="net-head"><strong>{{ c.name }}</strong>{% if c.title or c.company %} <span class="net-role">{{ c.title or "" }}{% if c.title and c.company %} · {% endif %}{{ c.company or "" }}</span>{% endif %}</span>
+        <span class="net-head"><strong>{{ c.name }}</strong>{% if c.role %} <span class="net-role">{{ c.role }}</span>{% endif %}</span>
         <span class="chip chip-{{ c.tone }}">{{ c.status }}</span>
         {% if c.referral %}<span class="chip chip-{{ c.referral.tone }}">{{ c.referral.words }}</span>{% endif %}
         {% if c.notes or c.refused %}<span class="chip chip-error">Needs you</span>{% endif %}
@@ -92,4 +93,5 @@
 {% endif %}
 {% endif %}
 </section>
+</div>
 {% endblock %}

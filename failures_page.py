@@ -31,8 +31,10 @@ Sources (why each is a real failure):
   pure compute wait (`compute_wait` true) is a wait and is left out; a day that later COMPLETEd is
   not listed.
 - applications (`application_jobs`, F4): the Applications page's own classification. Owner holds
-  (`overview_page._blocked`, the Overview needs-you count, minus jobs with a question on Approvals)
-  are Needs you; a BLOCKED/RETRY_WAIT job not on route OWNER or RECONCILE (`applications.job_route`)
+  (`overview_page._blocked`, Applications' "Blocked, needs you", minus jobs with a question on Approvals)
+  are Needs you; a job with a question on Approvals, and an answered job waiting for its next run
+  (UNKNOWN_REQUIRED_ANSWERS with no open card), are calm items there, not failures (owner 2026-10-24,
+  `needs_calm`); a BLOCKED/RETRY_WAIT job not on route OWNER or RECONCILE (`applications.job_route`)
   is a failure only when its blocker is one of applications.py's failure sets
   (`application_failure_codes`); every other hold is a wait or a check in progress. Given-up jobs
   live under Applications' "Given up" only (owner, D5).
@@ -169,18 +171,26 @@ def _plural(count, words):
 
 
 def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=None, detail=None, log=None, href=None,
-          job=None, moments=(), slots=(), code=None, reasons=None, refs=None, log_href=None):
+          job=None, moments=(), slots=(), code=None, reasons=None, refs=None, log_href=None, calm=None):
     """One failure. `todo` always says what happens next or what to do; `fix` is {"label", "href"}.
     `job` names the scheduler job ("run", "research", "applications") whose exit this failure
     explains, and `moments` when each such failure happened (F1: one item per real failure). `code` is a
     short program code for the Report a problem summary (report_problem); it is never shown here.
     `reasons` (a Causes, 2026-10-23) are the recorded causes shown under the headline: at most
     REASON_LIMIT distinct ones, newest first, each {"words", "code", "count", "at", "where", "error",
-    "log_href"}, plus `reasons_more` and `reasons_href` (the Logs view of that component). `refs` are
+    "log_href"}, plus `reasons_more` and `reasons_href` (the Logs view of that component). `calm` ("question"
+    or "waiting") marks an item that is not a failure: a question waiting on Approvals, or a job whose
+    answers are in and that waits for its next run (shown under Needs you, never red, never counted).
+    A cause whose words or place the headline already says shows without them. `refs` are
     the item's own ids (task, research run, finder run, job key, round slot) and `log_href` opens that
     run's own records and files (`run_view`)."""
     shown, more = reasons.top() if reasons is not None else ([], 0)
-    return {"group": group, "text": text, "todo": todo, "at": at, "count": max(1, int(count or 1)), "retry_at": retry_at,
+    for reason in shown:   # owner 2026-10-24: the headline once; a cause never repeats it
+        if reason["words"] and reason["words"].rstrip(".") in text:
+            reason["words"] = None
+        if reason["where"] and reason["where"] in text:
+            reason["where"] = None
+    return {"calm": calm, "group": group, "text": text, "todo": todo, "at": at, "count": max(1, int(count or 1)), "retry_at": retry_at,
             "you": you, "fix": fix, "detail": detail, "log": log or [], "href": href, "job": job,
             "moments": [moment for moment in moments if moment is not None] or ([at] if job and at else []),
             "slots": list(slots), "code": code, "reasons": shown, "reasons_more": more,
@@ -222,9 +232,21 @@ CAUSE_WORDS = {
 }
 
 
+_EXCEPTION_NAME = re.compile(r"(?:[A-Za-z]+_)*[A-Z][A-Za-z]*(?:Error|Exception|Interrupt|Exit)\Z")
+
+
 def cause_words(code):
+    """Plain words for a code (owner 2026-10-24: lead with words, the code is for support). A code
+    with no wording of its own still gets words: an exception name is an internal error."""
     root = _code(code)
-    return CAUSE_WORDS.get(root) or applications_page.CODE_WORDS.get(root)
+    found = CAUSE_WORDS.get(root) or applications_page.CODE_WORDS.get(root)
+    if found:
+        return found
+    if _EXCEPTION_NAME.fullmatch(root):
+        if root.startswith("LINKEDIN_CONTACTS_"):
+            return "The contact finder hit an internal error."
+        return "Sidedoor hit an internal error."
+    return "Something went wrong."
 
 
 def _bounded(text, secrets):
@@ -484,7 +506,8 @@ def task_failures(reader, now, fmt, secrets=()):
 
 # --- Scheduler -----------------------------------------------------------------------------------------
 
-JOB_NAMES = {"research": "Research", "run": "The hourly round", "applications": "Applications"}
+JOB_NAMES = {"research": "Research", "run": "The hourly round", "applications": "Applications",
+             "invites": "The invitation step"}
 CYCLE_SPAN = dt.timedelta(hours=6)       # an unfinished round's longest possible run (worker_step's lease)
 JOB_SLACK = dt.timedelta(minutes=5)
 # How long before an applications or research child's exit the failure that made it exit can have
@@ -564,7 +587,7 @@ def scheduler_failures(loop, config, now, fmt, log_tail=None, secrets=()):
             todo, fix = "It runs again once Sidedoor is running. Start it on Overview.", {"label": "Open Overview", "href": "/"}
         stem = scheduler_loop.LOG_NAMES.get(job)
         log = log_tail(stem + ".stderr.log") if log_tail and stem else None
-        component = {"run": "launchd"}.get(job, job if job in ("research", "applications") else "sidedoor")
+        component = {"run": "launchd", "invites": "launchd"}.get(job, job if job in ("research", "applications") else "sidedoor")
         entry = _item("scheduler", text, todo, moment, fix=fix, log=log, code="JOB_EXIT:" + str(job),
                       refs={"job": job}, log_href=logs_href(component, moment))
         entry["exited"] = job
@@ -723,13 +746,17 @@ def answering_causes(reader, job_key, limit=ANSWERING_ATTEMPTS):
 
 
 def application_failures(reader, now, fmt, secrets=()):
-    """Owner holds (Needs you, as Overview counts them) and held jobs whose blocker is a failed
+    """Owner holds (Needs you, by the one rule `overview.blocked_on_owner` that Overview and
+    Applications count with: questions and answered jobs are calm items) and held jobs whose blocker is a failed
     attempt. Words and next steps are the Applications page's own (`applications_page.job_view`).
     Given-up jobs are not listed here: they live under Applications' "Given up" (owner, D5)."""
     since = _since(now)
     owner, _ = overview._blocked(reader)
     owner_keys = set(owner)
-    asked = {row[0] for row in overview._pending_questions(reader, now)}
+    pending = {}
+    for row in overview._pending_questions(reader, now):
+        pending[row[0]] = pending.get(row[0], 0) + 1
+    asked = set(pending)
     codes = application_failure_codes()
     counts, recorded_causes = {}, {}
     for key, detail, moment in reader.rows("SELECT job_key,detail,at FROM application_events WHERE event IN ('BLOCKED','RETRY_WAIT') "
@@ -737,26 +764,39 @@ def application_failures(reader, now, fmt, secrets=()):
         recorded = overview._json(detail) or {}
         if _code(recorded.get("code")) in codes:   # F8: only failed attempts count, never waits or holds
             counts[key] = counts.get(key, 0) + 1
-            recorded_causes.setdefault(key, []).append((recorded.get("code"), overview._utc(moment), _error_text(recorded)
-                                                        or (recorded.get("next_action") if isinstance(recorded.get("next_action"), str) else None)))
+            # Never the event's next_action: it is a note for engineers, not a cause (owner 2026-10-24).
+            recorded_causes.setdefault(key, []).append((recorded.get("code"), overview._utc(moment), _error_text(recorded)))
     rows = reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,updated_at,receipt FROM application_jobs "
                        "WHERE state IN ('BLOCKED','RETRY_WAIT') ORDER BY updated_at DESC", (), "application_jobs")
     found = []
     for row in rows:
         key = row["job_key"]
-        if key in owner_keys and key in asked:
-            continue   # the question is on Approvals; Overview counts it there, not here
         if key not in owner_keys and not is_application_failure(row["blocker"], row["state"]):
             continue
         view = applications_page.job_view(row, owner_keys, asked, set(), fmt)
         name = "%s, %s" % (view["company"], view["role"]) if view["role"] != "Role not recorded" else view["company"]
         link = {"label": "Open application", "href": _job_link(key)}
         at = overview._utc(row["updated_at"])
+        if key in owner_keys and key in asked:
+            # Owner 2026-10-24: a question on Approvals is not a failure; a calm item points there.
+            many = pending[key] > 1
+            found.append(_item("applications", "Answer Sidedoor's question%s about %s." % ("s" if many else "", name),
+                               "The application goes on after you answer.", at, href=_job_link(key),
+                               fix={"label": "Answer on Approvals", "href": "/approvals#questions"},
+                               code="QUESTION_PENDING", refs={"job_key": key}, calm="question"))
+            continue
+        if key in owner_keys and not overview.blocked_on_owner(True, False, row["blocker"]):
+            # Answered (no open question): not a failure, it waits for its next run (owner 2026-10-24).
+            found.append(_item("applications", "%s: your answers are in." % name,
+                               "Waiting for its next run. Nothing you need to do; Sidedoor asks on Approvals if "
+                               "anything is still open.", at, href=_job_link(key), code="ANSWERS_IN",
+                               refs={"job_key": key}, calm="waiting"))
+            continue
         code = _code(row["blocker"]) or "APPLICATION_" + str(row["state"])
         causes = Causes(secrets, logs_href("applications", at))
         extra = {"reasons": causes, "refs": {"job_key": key}, "log_href": run_href("job", key)}
         for recorded, moment, error in recorded_causes.get(key, []):
-            causes.add(recorded, moment, error, where=name, log_href=extra["log_href"])
+            causes.add(recorded, moment, error, log_href=extra["log_href"])
         if code == "ANSWERING_RETRY":
             # Why each question is still open (the answering audit), not the event's next action.
             causes = Causes(secrets, causes.more_href)
@@ -764,7 +804,7 @@ def application_failures(reader, now, fmt, secrets=()):
             for question, why, moment in answering_causes(reader, key):
                 causes.add("ANSWERING_RETRY", moment, why, where="Question: " + question, log_href=extra["log_href"])
         if not causes.found:
-            causes.add(row["blocker"] or code, at, where=name, log_href=extra["log_href"])
+            causes.add(row["blocker"] or code, at, log_href=extra["log_href"])
         if view["needs_you"]:
             found.append(_item("applications", "%s: %s" % (name, view["problem"]), view["todo"], at, you=True,
                                fix={"label": view["todo_label"], "href": view["todo_href"]} if view["todo_href"] else link,
@@ -943,8 +983,9 @@ def finder_failures(reader, now, fmt, secrets=()):
                 "research_failure_diagnosis"]) if value.get("research_failure_diagnosis") else None) if part)
             entry["causes"].add("LINKEDIN_CONTACTS_UNKNOWN", at, reason, where=name, log_href=link)
         else:
-            said = " ".join(str(part) for part in (value.get("error_type"), value.get("error"),
-                                                    "at " + value["raised_at"] if value.get("raised_at") else None) if part)
+            parts = [str(part) for part in (value.get("error_type"), value.get("error"),
+                                             "at " + value["raised_at"] if value.get("raised_at") else None) if part]
+            said = " ".join(part for index, part in enumerate(parts) if part not in parts[:index])
             entry["causes"].add(value.get("blocker") or "LINKEDIN_CONTACTS_" + str(value.get("error_type") or "FAILED"), at,
                                 said or None, where=name, log_href=link)
     found = []
@@ -1098,6 +1139,7 @@ def codex_failures(home=None, finished=False):
 
 
 NEEDS_YOU = "needs-you"
+EARLIER_AFTER = dt.timedelta(hours=24)   # owner 2026-10-24: older items fold into "Earlier"
 
 
 def page_of(entries, number, size=LIST_LIMIT):
@@ -1149,20 +1191,36 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=Non
             section["unavailable"] = section["key"] != "scheduler"
     oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     newest_first = lambda entries: sorted(entries, key=lambda entry: entry["at"] or oldest, reverse=True)
+    # Not failures (owner 2026-10-24): questions waiting on Approvals and answered jobs waiting for their
+    # next run show calmly under Needs you, apart from `needs_you` and the sections (so Report a problem
+    # and doctor never count them).
+    calm = newest_first(entry for section in sections.values() for entry in section["entries"] if entry["calm"])
+    calm = [entry for entry in calm if entry["calm"] == "question"] + [entry for entry in calm if entry["calm"] != "question"]
+    calm_more, calm = max(0, len(calm) - LIST_LIMIT), calm[:LIST_LIMIT]
     # What needs the user is listed once, under Needs you (Overview's needs-you link lands there).
-    needs = newest_first(entry for section in sections.values() for entry in section["entries"] if entry["you"])
+    needs = newest_first(entry for section in sections.values() for entry in section["entries"]
+                         if entry["you"] and not entry["calm"])
     focus = section
+    earlier_than = now - EARLIER_AFTER
     for section in sections.values():
-        section["entries"] = newest_first(entry for entry in section["entries"] if not entry["you"])
+        listed = newest_first(entry for entry in section["entries"] if not entry["you"] and not entry["calm"])
+        # Owner 2026-10-24: items last seen over a day ago fold into a collapsed "Earlier" per group; the split
+        # is made on the whole list (recent first), then paged, so "Earlier (N)" counts all of them.
+        earlier = [entry for entry in listed if entry["at"] is not None and entry["at"] < earlier_than]
+        section["earlier_total"] = len(earlier)
+        section["entries"] = [entry for entry in listed if not (entry["at"] is not None and entry["at"] < earlier_than)] + earlier
         section["total"] = len(section["entries"])
         section["entries"], section["paging"] = page_of(section["entries"], page if section["key"] == focus else 1)
         section["more"] = 0 if section["key"] == focus else max(0, section["total"] - LIST_LIMIT)
         section["paging"] = section["paging"] if section["key"] == focus else None
+        section["recent"] = [entry for entry in section["entries"] if entry["at"] is None or entry["at"] >= earlier_than]
+        section["earlier"] = [entry for entry in section["entries"] if entry["at"] is not None and entry["at"] < earlier_than]
     needs_total = len(needs)
     needs, needs_paging = page_of(needs, page if focus == NEEDS_YOU else 1)
     ordered = [sections["scheduler"]] + [sections[key] for key, _ in GROUPS]
     shown = [section for section in ordered if section["entries"] or section["unavailable"]]
-    return {"sections": shown, "needs_you": needs, "nothing": not shown and not needs, "unreadable": reader.broken,
+    return {"sections": shown, "needs_you": needs, "needs_calm": calm, "needs_calm_more": calm_more, "nothing": not shown and not needs,
+            "unreadable": reader.broken,
             "when": fmt, "recent_days": RECENT_DAYS, "needs_paging": needs_paging if focus == NEEDS_YOU else None,
             "needs_more": 0 if focus == NEEDS_YOU else max(0, needs_total - LIST_LIMIT), "needs_total": needs_total}
 
@@ -1455,7 +1513,21 @@ def logs_view(logs, secrets, component="all", level="all", query="", day="", zon
             lines = filter_lines(found["lines"], query, day, zone)
             streams.append({"name": name, "label": "%s: %s" % (label, level_label.lower()), "state": found["state"],
                             "lines": lines, "id": stream_id(name), "older": found["older"], "before": end})
-    return {"streams": streams, "component": component, "level": level, "query": query, "day": day,
+    # Owner 2026-10-24: an empty or missing log gets no box of its own; they are named on one line.
+    quiet = {}
+    for stream in streams:
+        if not stream["lines"] and stream["before"] is None and stream["state"] in ("ok", "missing") \
+                and (stream["state"] == "missing" or stream["older"] is None):
+            stream["quiet"] = True
+            kind = "nomatch" if (query or day) and stream["state"] == "ok" else stream["name"].rsplit(".", 2)[1]
+            label = dict(COMPONENTS).get(stream["name"].split(".", 1)[0], stream["name"])
+            quiet.setdefault(kind, [])
+            if label not in quiet[kind]:
+                quiet[kind].append(label)
+    words = {"stderr": "No errors from", "stdout": "No output from", "nomatch": "No matching lines in"}
+    quiet_lines = ["%s: %s." % (words[kind], ", ".join(quiet[kind])) for kind in ("stderr", "stdout", "nomatch") if quiet.get(kind)]
+    return {"streams": streams, "boxes": [stream for stream in streams if not stream.get("quiet")], "quiet": quiet_lines,
+            "component": component, "level": level, "query": query, "day": day,
             "components": COMPONENTS, "levels": LEVELS, "tail_bytes": LOG_TAIL_BYTES, "line_limit": LOG_LINES}
 
 
@@ -1477,9 +1549,42 @@ _FOLDER_NAME = re.compile(r"[A-Za-z0-9._-]{1,120}\Z")
 FOLDER_COMPONENTS = {"application-browser": "applications", "application-recovery": "applications",
                      "application-connection-manual": "applications", "email-check": "applications",
                      "linkedin-contacts": "launchd", "outreach-history": "launchd"}
-FOLDER_WORDS = {"application-browser": "Browser session", "application-recovery": "Application recovery decision",
-                "application-connection-manual": "Manual check", "email-check": "Mailbox check",
+FOLDER_WORDS = {"application-browser": "Browser session", "application-recovery": "Recovery decision",
+                "application-connection-manual": "Manual check", "email-check": "Email check",
                 "linkedin-contacts": "Contact finder run", "outreach-history": "Outreach history check"}
+# Folders whose kind alone names the run (owner 2026-10-24: "Email check", not "Mailbox check check-x1y2").
+NAMED_BY_KIND = {"email-check", "application-connection-manual", "outreach-history"}
+_DECISION_FOLDER = re.compile(r"application-recovery/(decision-[A-Za-z0-9_]{1,40})")
+
+
+def run_names(reader):
+    """{recovery decision folder name: "Company, Role"} from the job events that recorded the folder
+    (`application_recovery_decision`: APPLICATION_RECOVERY_DECIDED/PREPARED carry its artifacts), so the
+    Runs list names what each decision was about (owner 2026-10-24). Folders nothing names are absent."""
+    keys = {}
+    for row in reader.rows("SELECT job_key,detail FROM application_events WHERE event LIKE 'APPLICATION_RECOVERY%' "
+                           "AND detail LIKE '%application-recovery/decision-%'", (), "application_events"):
+        for folder in set(_DECISION_FOLDER.findall(str(row["detail"] or ""))):
+            keys.setdefault(folder, row["job_key"])
+    jobs = {}
+    for key in set(keys.values()):
+        found = reader.rows("SELECT employer,payload FROM application_jobs WHERE job_key=?", (key,), "application_jobs")
+        payload = overview._json(found[0]["payload"]) if found else None
+        payload = payload if isinstance(payload, dict) else {}
+        company = payload.get("company") or (found[0]["employer"] if found else None)
+        role = payload.get("role") or payload.get("title")
+        if company:
+            jobs[key] = str(company)[:80] + (", " + str(role)[:80] if role else "")
+    return {folder: jobs[key] for folder, key in keys.items() if key in jobs}
+
+
+def folder_label(base, name, names=None):
+    """What a session folder's run was about: "Recovery decision · Company, Role", "Email check"; the
+    folder's id only when nothing is recorded."""
+    if base in NAMED_BY_KIND:
+        return FOLDER_WORDS[base]
+    about = (names or {}).get(name) if base == "application-recovery" else None
+    return "%s \u00b7 %s" % (FOLDER_WORDS[base], about) if about else "%s %s" % (FOLDER_WORDS[base], name)
 
 
 # Per-session browser traces (owner, 2026-10-24): not listed under Runs. Each stays reachable from its
@@ -1745,7 +1850,8 @@ def run_view(reader, root, logs, run, secrets, fmt=str, older=None, records_page
         folder = paths.reports(root) / base / name
         if not _inside(folder, paths.reports(root) / base) or not folder.is_dir():
             return None
-        title = "%s %s" % (FOLDER_WORDS[base], name)
+        names = run_names(reader) if base == "application-recovery" else None
+        title = folder_label(base, name, names if isinstance(names, dict) else None)
         files = _folder_files(folder, secrets, older)
     oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     files, files_paging = page_of(sorted(files, key=lambda entry: entry["at"] or oldest, reverse=True), files_page, RUN_FILES)
@@ -1773,17 +1879,17 @@ def runs_list(root, logs, component="all", day="", zone=None):
     return runs_paged(root, logs, component, day, zone)[0]
 
 
-def runs_paged(root, logs, component="all", day="", zone=None, part=None, page=1):
+def runs_paged(root, logs, component="all", day="", zone=None, part=None, page=1, names=None):
     """(runs, parts): each component's first RUNS_LISTED runs, or page `page` of component `part`;
     parts is [{component, label, more, paging}] for each component with more than one page."""
     import log_retention
     found = []
     try:
-        names = os.listdir(logs)
+        listed = os.listdir(logs)
     except OSError:
-        names = []
-    research = {}
-    for name in names:
+        listed = []
+    research, industries = {}, {}
+    for name in listed:
         if log_retention.WORKER_NAME.fullmatch(name) and not (Path(logs) / name).is_symlink():
             try:
                 at = dt.datetime.fromtimestamp(os.lstat(Path(logs) / name).st_mtime, dt.timezone.utc)
@@ -1791,8 +1897,13 @@ def runs_paged(root, logs, component="all", day="", zone=None, part=None, page=1
                 continue
             attempt = name[:36]
             research[attempt] = max(filter(None, (research.get(attempt), at)))
-    found += [{"component": "research", "label": "Research run %s" % attempt[:8], "at": at,
-               "href": run_href("research", attempt)} for attempt, at in research.items()]
+            label = name[37:].split(".", 1)[0]
+            if label:
+                industries.setdefault(attempt, set()).add(label)
+    found += [{"component": "research", "at": at, "href": run_href("research", attempt),
+               "label": ("Research \u00b7 %d industr%s" % (len(industries[attempt]), "y" if len(industries[attempt]) == 1 else "ies")
+                         if industries.get(attempt) else "Research run %s" % attempt[:8])}
+              for attempt, at in research.items()]
     for base, pattern in log_retention.TRACE_DIRECTORIES:
         folder = paths.reports(root) / base
         if base in BROWSER_SESSION_FOLDERS or base not in FOLDER_WORDS or not folder.is_dir() or folder.is_symlink():
@@ -1804,7 +1915,7 @@ def runs_paged(root, logs, component="all", day="", zone=None, part=None, page=1
                 at = dt.datetime.fromtimestamp(entry.lstat().st_mtime, dt.timezone.utc)
             except OSError:
                 continue
-            found.append({"component": FOLDER_COMPONENTS[base], "label": "%s %s" % (FOLDER_WORDS[base], entry.name),
+            found.append({"component": FOLDER_COMPONENTS[base], "label": folder_label(base, entry.name, names),
                           "at": at, "href": run_href("dir", base + "/" + entry.name)})
     if component != "all":
         found = [entry for entry in found if entry["component"] == component]
@@ -1948,9 +2059,13 @@ def register(app, templates, layout, home, root, config, token, database, connec
         context["logs"] = logs_view(logs, secrets, component, level, q, day, zone, stream_older)
         for stream in context["logs"]["streams"]:
             older_links(stream, params, stream["id"])
+        try:   # names only label the Runs list; a read that fails leaves the folder ids
+            names = overview.snapshot(database, lambda connection: run_names(overview.Reader(connection)), connect_read_only)
+        except Exception:
+            names = None
         context["runs"], context["runs_parts"] = runs_paged(
             root, logs, context["logs"]["component"], context["logs"]["day"], zone, params.get("runs_part"),
-            number(params, "runs_page"))
+            number(params, "runs_page"), names if isinstance(names, dict) else None)
         if run:
             found = find_run(run, secrets, file_older, params)
             for entry in (found or {}).get("files") or []:

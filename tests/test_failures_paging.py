@@ -353,11 +353,11 @@ class PageTest(unittest.TestCase):
         self.assertIn("day=2026-10-22", more)
         second = self.get(more.split("#")[0])
         self.assertIn("Page 2 of 2 (35)", second.text)
-        self.assertIn("Research run 00000000", second.text)
-        self.assertNotIn("Research run 00000022", second.text)
+        self.assertIn("research%3A00000000-", second.text)   # labelled "Research · 1 industry"
+        self.assertNotIn("research%3A00000022-", second.text)
         [back] = self.hrefs(second.text, "Previous")
         self.assertIn("day=2026-10-22", back)
-        self.assertIn("Research run 00000022", self.get(back.split("#")[0]).text)
+        self.assertIn("research%3A00000022-", self.get(back.split("#")[0]).text)
         self.assertNotIn("more Research runs", self.get("/failures", {"day": "2026-10-23"}).text)
 
 
@@ -389,8 +389,8 @@ class PageTest(unittest.TestCase):
         runs = page.text[page.text.index('id="runs-title"'):]
         self.assertNotIn("Browser session", runs)
         self.assertNotIn("Contact finder run run-abc123", runs)
-        self.assertIn("Application recovery decision decision-1", runs)   # other run entries stay
-        self.assertIn("Research run 7feefb1b", runs)
+        self.assertIn("Recovery decision decision-1", runs)   # other run entries stay (no job recorded: its id)
+        self.assertIn("Research \u00b7 1 industry", runs)
         job = self.get("/failures", {"run": "job:acme:1"})
         self.assertIn("request-7vesc5ha/stderr.log", run_part(job.text))
         self.assertIn("browser said hello", run_part(job.text))

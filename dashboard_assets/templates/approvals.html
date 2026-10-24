@@ -10,6 +10,7 @@
   </nav>
 {% endif %}{% endmacro %}
 {% set v = view %}{% set cards = flash.cards or {} %}{% set top = flash.top %}
+<div class="approvals-page">
 <h1 class="title">Approvals</h1>
 <p class="muted approvals-mode">Mode: <strong>{{ "Review" if review else "Automatic" }}</strong>. <a href="/settings#mode">Change it in Settings</a>.</p>
 {% if top %}
@@ -17,10 +18,11 @@
 {% if top.kept %}<label class="approvals-kept">Your text (not saved; copy it if you need it)<textarea readonly rows="4">{{ top.kept }}</textarea></label>{% endif %}
 {% endif %}
 
-<section class="card approvals-section" id="messages" aria-labelledby="messages-title">
+{% set quiet = not v.messages and not v.unreadable and v.paging.messages.total == 0 %}
+<section class="card approvals-section{{ ' approvals-empty' if quiet }}" id="messages" aria-labelledby="messages-title">
   <h2 id="messages-title">Messages waiting</h2>
   {% if not review %}
-  <p>Automatic mode is on: messages are sent without waiting. See them on <a href="/sent">Networking &amp; Referrals</a>.</p>
+  <p class="{{ 'muted' if quiet }}">Automatic mode is on: messages are sent without waiting. See them on <a href="/sent">Networking &amp; Referrals</a>.</p>
   {% if v.messages %}<p class="muted">These were kept for review. Approve or reject each one.</p>{% endif %}
   {% elif not v.messages %}
   <p class="muted">Nothing is waiting for you.</p>
@@ -39,26 +41,27 @@
 </section>
 {% endif %}
 
-<section class="card approvals-section" id="questions" aria-labelledby="questions-title">
+<section class="card approvals-section{{ ' approvals-empty' if not v.questions }}" id="questions" aria-labelledby="questions-title">
   <h2 id="questions-title">Questions for you</h2>
   {% if not v.questions %}<p class="muted">No questions right now.</p>{% endif %}
   {% for q in v.questions %}{% with item = q, f = cards.get(q.dom) %}{% include "approvals_question.html" %}{% endwith %}{% endfor %}
   {{ pager(v, "questions", "questions") }}
 </section>
 
-<section class="card approvals-section" id="notes" aria-labelledby="notes-title">
+<section class="card approvals-section{{ ' approvals-empty' if not v.notes }}" id="notes" aria-labelledby="notes-title">
   <h2 id="notes-title">Notes for you</h2>
   {% if not v.notes %}<p class="muted">No notes right now.</p>{% endif %}
   {% for n in v.notes %}{% with item = n, f = cards.get(n.dom) %}{% include "approvals_note.html" %}{% endwith %}{% endfor %}
   {{ pager(v, "notes", "notes") }}
 </section>
 
-<section class="card approvals-section" id="notices" aria-labelledby="notices-title">
+<section class="card approvals-section{{ ' approvals-empty' if not v.notices }}" id="notices" aria-labelledby="notices-title">
   <h2 id="notices-title">Recent notices</h2>
   {% if not v.notices %}<p class="muted">No notices yet.</p>{% else %}
-  <ul class="approvals-notices">{% for n in v.notices %}<li>{% if n.at %}<span class="muted">{{ v.when(n.at) }}</span> {% endif %}{{ n.text }}</li>{% endfor %}</ul>
+  <ul class="approvals-notices">{% for n in v.notices %}<li>{% if n.at and v.when(n.at) %}<span class="muted approvals-notice-time">{{ v.when(n.at) }}</span> {% endif %}<span>{{ n.text }}</span>{% if n.href %} <a href="{{ n.href }}">{{ n.link }}</a>{% endif %}</li>{% endfor %}</ul>
   {% endif %}
   {{ pager(v, "notices", "notices") }}
 </section>
+</div>
 <script src="/static/approvals.js" defer></script>
 {% endblock %}

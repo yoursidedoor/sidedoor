@@ -344,7 +344,7 @@ class Page(unittest.TestCase):
         database.commit()
         database.close()
         page = pages.text_of(self.get().text)
-        self.assertIn("The AI call failed. SUBSCRIPTION_EXECUTOR_FAILED the model said no", page)
+        self.assertIn("The AI call failed. the model said no SUBSCRIPTION_EXECUTOR_FAILED", page)   # words, error, then the code
         self.assertIn("See its log", page)
         run = self.get(run="task:t5")
         self.assertEqual(run.status_code, 200)

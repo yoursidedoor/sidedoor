@@ -19,7 +19,8 @@ Five lists, each read from the record the rest of the product already writes:
   the "form not readable" note; other questions that answer makes stale are then closed and their
   jobs made due again (`decision_transport.refresh_stale`).
 - Notes for you: `reply_tools.open_flags` (by rowid), with the person's name when one is on record.
-- Recent notices: `notification_outbox` rows the Dashboard transport delivered.
+- Recent notices: `notification_outbox` rows the Dashboard transport delivered. Each is shown in plain words
+  (`notice_view`: company and role from the job, a link to it or the right page); the stored text is unchanged.
 
 A page load (GET) writes nothing (`overview_page.snapshot`). Every action is a POST behind the
 dashboard's token cookie and Origin check; with htmx it answers with its own card only (the other
@@ -33,7 +34,9 @@ GET /approvals is the one that answers.
 import datetime as dt
 import hashlib
 import json
+import re
 import sqlite3
+import urllib.parse
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -165,6 +168,15 @@ def judge_verdict(database, action_id, evidence, held_decision=None):
 def conversation(database, action):
     """The conversation so far for a reply: the person's recorded messages, oldest first, at most nine."""
     people = [person for person in (action.get("profile"), action.get("resolved_profile")) if isinstance(person, str)]
+    # engagement_events store a person under the profile key ("linkedin.com/in/x"); a reply action
+    # carries the inbox's profile URL, so both spellings are read (else the thread never showed).
+    import orchestrator
+    for person in list(people):
+        try:
+            people.append(orchestrator.profile_key(person))
+        except ValueError:
+            pass
+    people = list(dict.fromkeys(people))
     if not people or not _has(database, "engagement_events"):
         return []
     rows = database.execute("SELECT kind,occurred_at,payload FROM engagement_events WHERE identity IN (%s) AND kind IN (%s) "
@@ -173,10 +185,16 @@ def conversation(database, action):
     found = []
     for kind, occurred_at, payload in reversed(rows):
         value = _object(payload) or {}
-        text = next((value.get(key) for key in ("text", "message", "body") if isinstance(value.get(key), str)), None)
+        text = next((value.get(key) for key in ("text", "message", "body") if isinstance(value.get(key), str)), None) \
+            or _event_text(value)
         found.append({"who": "Them" if kind == "inbound" else "You", "at": overview_page._utc(occurred_at),
                       "text": text or "(message text not on record)"})
     return found
+
+
+def _event_text(payload):
+    import networking_page   # where the inbox reader and the decoder put a message's text (inbox.text, raw...)
+    return networking_page._message_text(payload, None)
 
 
 def card_of(database, item):
@@ -194,11 +212,17 @@ def card_of(database, item):
             "stage": item["stage"], "revisable": bool(item["revisable"]) and item["stage"] == "MESSAGE",
             "kind": "Invitation in a prepared campaign" if item["stage"] == "LAUNCH" else PURPOSE_WORDS.get(item["purpose"], "Message"),
             "recipient": item["recipient"] or "Someone", "company": item["company"], "title": title,
+            "role": _role_line(title, item["company"]),
             "linkedin": linkedin_url(item["profile"]), "why": why, "text": text, "length": len(text), "limit": item["limit"],
             "judge": judge_verdict(database, item["action_id"], item["evidence"] if item["stage"] == "MESSAGE" else None,
                                    held.get("agent_decision")),
             "conversation": conversation(database, action) if item["purpose"] == "REPLY" else [],
             "edited": edited, "held_at": overview_page._utc(item["held_at"]) if item["held_at"] else None}
+
+
+def _role_line(title, company):
+    import networking_page   # "Title at Company", the Networking page's rule (owner, 2026-10-24)
+    return networking_page.role_line(title, company)
 
 
 def messages(database, page=1, only=None):
@@ -241,7 +265,7 @@ def refused(database, only=None, page=1):
         if only is not None and item["action_id"] != only:
             continue
         reasons = list(dict.fromkeys(GATE_WORDS.get(gate, GENERIC_GATE) for gate in item["gates"])) or [GENERIC_GATE]
-        found.append(dict(item, dom=dom("refused", item["action_id"]), reasons=reasons,
+        found.append(dict(item, dom=dom("refused", item["action_id"]), reasons=reasons, role=_role_line(None, item["company"]),
                           kind=PURPOSE_WORDS.get(item["purpose"], "Message"), linkedin=linkedin_url(item["profile"]),
                           approved=overview_page._utc(item["approved_at"]) if item["approved_at"] else None))
     return found
@@ -254,6 +278,20 @@ def _words(code):
 def question_words(label, semantic, field):
     """The question as the form asks it (its label, owner 2026-10-24), else its meaning in words."""
     return " ".join(label.split()) if isinstance(label, str) and label.strip() else _words(semantic or field)
+
+
+PROSE_TYPES = {"long_text", "textarea", "paragraph"}
+PROSE_LABEL = 80   # a question this long asks for a few sentences, not a value
+
+
+def answer_control(answer_type, options, question, operational=False):
+    """radio (yes/no, or up to five choices), select (more choices), textarea (prose: the unreadable-form
+    note, a long-text type or a long question) or text (a single line: a URL, a handle, a number)."""
+    if options:
+        return "radio" if len(options) <= 5 else "select"
+    if operational or answer_type in PROSE_TYPES or len(question or "") > PROSE_LABEL:
+        return "textarea"
+    return "text"
 
 
 def question_count(database, now):
@@ -290,12 +328,16 @@ def questions(database, now, only=None, page=1):
             expires = dt.datetime.fromtimestamp(int(expires_at) / 1000, dt.timezone.utc)
         except (TypeError, ValueError, OverflowError, OSError):
             expires = None
+        company, role_name = job_names(employer, role) if employer or role.get("company") else ("An employer", None)
+        question = FORM_NOT_READABLE_WORDS if operational else question_words(label, semantic, field)
+        kind = "text" if operational else answer_type
+        options = ["Yes", "No"] if kind == "boolean" else [choice for choice in choices if isinstance(choice, str)] \
+            if kind == "choice" and isinstance(choices, list) else []
         found.append({"dom": dom("question", identifier), "id": identifier, "payload_hash": payload_hash, "job_key": job_key,
-                      "employer": employer or role.get("company") or "An employer",
-                      "role": role.get("role") or role.get("title"),
+                      "employer": company, "role": role_name or role.get("role") or role.get("title"),
+                      "control": answer_control(kind, options, question, operational), "options": options,
                       "url": role.get("url") if str(role.get("url") or "").startswith("https://") else None,
-                      "question": FORM_NOT_READABLE_WORDS if operational else question_words(label, semantic, field),
-                      "answer_type": "text" if operational else answer_type,
+                      "question": question, "answer_type": kind,
                       "choices": [choice for choice in choices if isinstance(choice, str)] if isinstance(choices, list) else [],
                       "expires": expires})
     return found
@@ -354,9 +396,139 @@ def notice_count(database):
 def notices(database, page=1):
     if not _has(database, "notification_outbox"):
         return []
-    rows = database.execute("SELECT message,updated_at FROM notification_outbox WHERE " + DASHBOARD_NOTICE
+    rows = database.execute("SELECT event_key,message,updated_at FROM notification_outbox WHERE " + DASHBOARD_NOTICE
                             + " ORDER BY updated_at DESC LIMIT ? OFFSET ?", (NOTICE_LIMIT, (page - 1) * NOTICE_LIMIT)).fetchall()
-    return [{"text": message, "at": overview_page._utc(updated_at)} for message, updated_at in rows]
+    return [notice_view(database, event_key, message, overview_page._utc(updated_at)) for event_key, message, updated_at in rows]
+
+
+# --- Recent notices in plain words (owner, 2026-10-24, A1) ---------------------------------------
+# Display only: the stored message (what Telegram or the relay got) is never changed. Each notice is
+# read by its event key's shape, the keys the writers use: "<job key>:submitted" and
+# "<job key>:<CODE>" (applications.notify), "<job key>:HUMAN_CHECK:<request>" (application_browser),
+# "daily-report:<day>[:<part>]" (reporting), "settled-page-confirmations:<time>" (applications),
+# "reply:<task>:..." (reply_worker) and "decision:<id>" (decision_transport). The job is looked up in
+# application_jobs by the key's own prefixes (a job key holds colons: "<employer>:unresolved:<hash>").
+# Any other shape shows its message cleaned of ids and timestamps and shortened.
+NOTICE_CHARACTERS = 180
+APPLICATIONS = "/applications"
+_ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?")
+_UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+_HEX = re.compile(r"\b(?:unresolved:|url-identity:)?[0-9a-f]{16,}\b")
+_URL = re.compile(r"https?://\S+")
+_CODE = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+
+
+def _job_of(database, event_key):
+    """(job key, company, role) of the longest application_jobs key that prefixes `event_key` with a
+    colon after it, or None."""
+    if not _has(database, "application_jobs"):
+        return None
+    parts = event_key.split(":")
+    candidates = [":".join(parts[:index]) for index in range(len(parts) - 1, 0, -1)]
+    if not candidates:
+        return None
+    rows = database.execute("SELECT job_key,employer,payload FROM application_jobs WHERE job_key IN (%s)"
+                            % ",".join("?" * len(candidates)), candidates).fetchall()
+    if not rows:
+        return None
+    key, employer, payload = max(rows, key=lambda row: len(row[0]))
+    return (key,) + job_names(employer, _object(payload) or {})
+
+
+def _capitalized(name):
+    return " ".join(word[:1].upper() + word[1:] for word in name.split()) if name == name.lower() else name
+
+
+def job_names(employer, payload):
+    """(company, role) as the Applications page shows them: the role ingest recorded, else the employer
+    key capitalized; the role may be None."""
+    def text(value):
+        return value.strip() if isinstance(value, str) and value.strip() else None
+    company = text(payload.get("company")) or (_capitalized(employer.strip()) if text(employer) else None)
+    return company or "A company", text(payload.get("role")) or text(payload.get("title"))
+
+
+def _job_href(key):
+    return APPLICATIONS + "?" + urllib.parse.urlencode({"job": key})
+
+
+def _code_words(code):
+    import applications_page
+    import failures_page
+    return failures_page.cause_words(code) or applications_page.code_words(code)
+
+
+def cleaned(text):
+    """A message with links, timestamps, ids and codes taken out, at most NOTICE_CHARACTERS long."""
+    text = " ".join(str(text or "").split())
+    for pattern in (_URL, _ISO, _UUID, _HEX):   # with the little word that pointed at it ("at <time>")
+        text = re.compile(r"(?:\b(?:at|on|for|since|until|by|from)\s+)?(?:" + pattern.pattern + ")").sub("", text)
+    text = _CODE.sub(lambda match: match.group(0).replace("_", " ").lower(), text)
+    text = re.sub(r"\s+([.,;:])", r"\1", re.sub(r"\s{2,}", " ", text)).strip(" /:;,")
+    text = re.sub(r"(?:[/:]\s*){2,}", ": ", text)
+    if len(text) > NOTICE_CHARACTERS:
+        text = text[:NOTICE_CHARACTERS - 1].rsplit(" ", 1)[0].rstrip(" ,;:") + "\u2026"
+    return text or "A notice from Sidedoor."
+
+
+def _daily(database, day):
+    """The daily summary in one line, from its saved report (daily_reports.payload), else just its day."""
+    try:
+        label = dt.date.fromisoformat(day)
+        label = "%s %d" % (label.strftime("%b"), label.day)
+    except ValueError:
+        label = None
+    head = "Daily summary" + (" for " + label if label else "")
+    row = database.execute("SELECT payload FROM daily_reports WHERE day=?", (day,)).fetchone() \
+        if _has(database, "daily_reports") else None
+    data = ((_object(row[0]) or {}).get("outcomes_24h") if row else None) or {}
+    if not isinstance(data, dict) or not data:
+        return head + "."
+    def count(value):
+        return len(value) if isinstance(value, list) else sum(value.values()) if isinstance(value, dict) else 0
+    submitted = sum(1 for item in data.get("submitted") or [] if isinstance(item, dict) and not item.get("submitted_at"))
+    parts = [(submitted, "application submitted", "applications submitted"),
+             (count(data.get("discovered")), "new job found", "new jobs found"),
+             (count(data.get("invitations")), "invitation sent", "invitations sent"),
+             (count(data.get("inbound")), "message received", "messages received")]
+    return head + ": " + ", ".join("%d %s" % (number, one if number == 1 else many) for number, one, many in parts) + "."
+
+
+def notice_view(database, event_key, message, at):
+    """{"text", "href", "link", "at"}: one Recent notice in plain words."""
+    key = str(event_key or "")
+    found = {"at": at, "href": None, "link": None}
+    if key.startswith("daily-report:"):
+        day = key.split(":")[1] if key.count(":") >= 1 else ""
+        return dict(found, text=_daily(database, day), href="/", link="See Overview")
+    if key.startswith("settled-page-confirmations:"):
+        return dict(found, text="Applications were confirmed by their own confirmation pages.",
+                    href=APPLICATIONS + "?show=submitted", link="See submitted applications")
+    if key.startswith("reply:"):
+        return dict(found, text="A reply got stuck, so no reply was sent.", href="/sent", link="See Networking")
+    if key.startswith("decision:"):
+        row = database.execute("SELECT job_key FROM user_decisions WHERE id=?", (key.split(":", 1)[1],)).fetchone() \
+            if _has(database, "user_decisions") else None
+        job = _job_of(database, row[0] + ":") if row and row[0] else None
+        what = " about " + _named(job) if job else ""
+        return dict(found, text="Sidedoor asked you a question" + what + ".", href="/approvals#questions", link="See questions")
+    job = _job_of(database, key)
+    if job is None:
+        if ":HUMAN_CHECK:" in key:
+            return dict(found, text="Sidedoor's browser asked for a human check (a CAPTCHA) and waited for you to tick it.")
+        return dict(found, text=cleaned(message))
+    rest = key[len(job[0]) + 1:]
+    if rest == "submitted":
+        text = "Application submitted and confirmed."
+    elif rest.startswith("HUMAN_CHECK:"):
+        text = "Sidedoor's browser asked for a human check (a CAPTCHA) and waited for you to tick it."
+    else:
+        text = _code_words(rest)
+    return dict(found, text=_named(job) + ": " + text, href=_job_href(job[0]), link="See the application")
+
+
+def _named(job):
+    return job[1] + (" (" + job[2] + ")" if job[2] else "")
 
 
 def _when(config):
@@ -582,7 +754,10 @@ def register(app, templates, layout, *, home, root, config):
             value = raw.casefold() in {"yes", "true"} if answer_type == "boolean" else raw
             title = role.get("role") or role.get("title")
             asked = question_words(label, semantic, field)
-            company = employer or role.get("company") or "a job"
+            # The company as the posting writes it, as Applications shows it (owner, 2026-10-24), then
+            # the stored employer key.
+            company = (role.get("company") if isinstance(role.get("company"), str) and role.get("company").strip()
+                       else None) or employer or "a job"
             context = "Your answer to \"%s\" for %s%s" % (asked, company, ", " + str(title) if title else "")
             try:
                 choices = _json(row_choices) if row_choices else None

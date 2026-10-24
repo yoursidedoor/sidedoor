@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="402" height="464" viewBox="68 8 402 464"><defs><linearGradient id="mtop" gradientUnits="userSpaceOnUse" x1="150" y1="60" x2="330" y2="170"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#F7F2EA"/></linearGradient>
+<linearGradient id="mleft" gradientUnits="userSpaceOnUse" x1="96" y1="120" x2="230" y2="360"><stop offset="0" stop-color="#F1E9DC"/><stop offset="1" stop-color="#DCCFBC"/></linearGradient>
+<linearGradient id="mright" gradientUnits="userSpaceOnUse" x1="270" y1="150" x2="420" y2="330"><stop offset="0" stop-color="#CDBDA6"/><stop offset="1" stop-color="#AC9A82"/></linearGradient>
+<linearGradient id="mld" gradientUnits="userSpaceOnUse" x1="136.0" y1="201.0" x2="208.0" y2="351.0"><stop offset="0" stop-color="#D7C9B4"/><stop offset="1" stop-color="#C2B39B"/></linearGradient>
+<linearGradient id="mor" gradientUnits="userSpaceOnUse" x1="380" y1="210" x2="400" y2="370"><stop offset="0" stop-color="#DA7039"/><stop offset="1" stop-color="#A2461D"/></linearGradient>
+<linearGradient id="mar" gradientUnits="userSpaceOnUse" x1="90" y1="400" x2="340" y2="400"><stop offset="0" stop-color="#F08A4B"/><stop offset="1" stop-color="#C25526"/></linearGradient>
+<linearGradient id="min" gradientUnits="userSpaceOnUse" x1="304.0" y1="240.8" x2="304.0" y2="351.0"><stop offset="0" stop-color="#F5A95C"/><stop offset="1" stop-color="#FFE6B5"/></linearGradient>
+<radialGradient id="mred" cx="163.0" cy="243.14999999999998" r="40" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#F24A3E"/><stop offset="1" stop-color="#B91C22"/></radialGradient>
+<linearGradient id="mgloss" gradientUnits="userSpaceOnUse" x1="0" y1="224.14999999999998" x2="0" y2="256.15"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.75"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient>
+<linearGradient id="mao" gradientUnits="userSpaceOnUse" x1="0" y1="250" x2="0" y2="380"><stop offset="0" stop-color="#3A2A1A" stop-opacity="0"/><stop offset="1" stop-color="#3A2A1A" stop-opacity="0.22"/></linearGradient></defs><polygon points="256.00,25.00 416.00,105.00 256.00,185.00 96.00,105.00" fill="url(#mtop)"/>
+<polygon points="96.00,105.00 256.00,185.00 256.00,375.00 96.00,295.00" fill="url(#mleft)"/>
+<polygon points="256.00,185.00 416.00,105.00 416.00,295.00 256.00,375.00" fill="url(#mright)"/>
+<polygon points="96.00,105.00 256.00,185.00 256.00,375.00 96.00,295.00" fill="url(#mao)"/>
+<polygon points="256.00,185.00 416.00,105.00 416.00,295.00 256.00,375.00" fill="url(#mao)" opacity="0.8"/>
+<polyline points="96.00,105.00 256.00,185.00 416.00,105.00" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linejoin="round" opacity="0.95"/>
+<polyline points="256.00,185.00 256.00,375.00" fill="none" stroke="#FFFFFF" stroke-width="2.2" opacity="0.55"/>
+<polyline points="96.00,105.00 256.00,25.00 416.00,105.00" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linejoin="round" opacity="0.9"/>
+<polygon points="136.00,201.00 208.00,237.00 208.00,351.00 136.00,315.00" fill="url(#mld)"/>
+<polygon points="136.00,201.00 208.00,237.00 208.00,246.00 136.00,210.00" fill="#3A2A1A" opacity="0.22"/>
+<polygon points="136.00,201.00 144.00,205.00 144.00,319.00 136.00,315.00" fill="#3A2A1A" opacity="0.16"/>
+<line x1="208.0" y1="237.0" x2="208.0" y2="351.0" stroke="#FFFFFF" stroke-width="2.4" opacity="0.8"/>
+<polygon points="304.00,240.80 371.20,207.20 371.20,317.40 304.00,351.00" fill="url(#min)"/>
+<polygon points="304.00,240.80 314.00,248.80 314.00,353.00 304.00,351.00" fill="#C9782F" opacity="0.55"/>
+<polygon points="371.20,207.20 455.88,228.77 455.88,338.97 371.20,317.40" fill="url(#mor)"/>
+<line x1="455.9" y1="228.8" x2="455.9" y2="339.0" stroke="#7E3112" stroke-width="3" opacity="0.7"/>
+<circle cx="437.2" cy="286.0" r="3.6" fill="#FBE3C8" opacity="0.9"/>
+<circle cx="172.0" cy="254.14999999999998" r="31" fill="url(#mred)"/>
+<circle cx="172.0" cy="254.14999999999998" r="30" fill="none" stroke="#7A0E12" stroke-width="2" opacity="0.35"/>
+<rect x="152.625" y="250.56999999999996" width="38.75" height="11.16" rx="5.58" fill="#5A0A0D" opacity="0.30"/>
+<rect x="152.625" y="248.56999999999996" width="38.75" height="11.16" rx="5.58" fill="#FFFFFF"/>
+<ellipse cx="172.0" cy="239.26999999999998" rx="22.32" ry="13.02" fill="url(#mgloss)" opacity="0.65"/>
+<path d="M92,398 C158,448 268,456 336,386" fill="none" stroke="url(#mar)" stroke-width="21" stroke-linecap="round"/><polygon points="361.08,360.18 356.88,411.86 331.82,390.30 309.54,365.88" fill="url(#mar)" stroke="url(#mar)" stroke-width="8.8" stroke-linejoin="round"/>
+<path d="M98,395 C158,442 268,449 330,384" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" opacity="0.28"/></svg>

@@ -105,16 +105,40 @@ class GatherTest(unittest.TestCase):
         owner, waiting = overview_page._blocked(overview_page.Reader(self.database))
         view = self.gather()
         counts = view["counts"]
-        pairs = {"needs_you": overview["right_now"]["blocked"], "retrying": overview["right_now"]["retrying"],
+        pairs = {"needs_you": overview["needs"]["applications"], "retrying": overview["right_now"]["retrying"],
                  "confirming": overview["right_now"]["confirming"], "submitted_today": overview["submitted"]}
         for show, expected in pairs.items():
             self.assertEqual(counts[show], expected, show)
             self.assertEqual(self.gather(show=show)["list"]["total"], expected, show)
-        self.assertEqual(sorted(self.keys(show="needs_you")), sorted(owner))
+        self.assertEqual(sorted(self.keys(show="needs_you")),
+                         sorted(overview_page.blocked_on_owner_keys(overview_page.Reader(self.database), self.now)))
+        self.assertEqual(self.keys(show="needs_you"), ["spent"])   # the asked and the answered job are not here
         self.assertEqual(sorted(self.keys(show="retrying")), sorted(waiting))
         self.assertEqual(sorted(self.keys(show="confirming")), ["confirming", "submitting"])
         self.assertEqual(self.keys(show="submitted_today"), ["today"])
         self.assertEqual(counts["all"], 10)
+
+    def test_waiting_to_retry_badge_chip_and_overview_agree(self):
+        """Owner 2026-10-24: "Waiting to retry" is every job whose badge says so (RETRY_WAIT plus the
+        BLOCKED automatic waits); "Queued" is QUEUED only. Badge counts == chip counts == Overview."""
+        db = self.database
+        job(db, "later-1", "RETRY_WAIT", "PREFLIGHT_TRANSIENT", next_at="2026-10-22T17:25:00+00:00")
+        job(db, "later-2", "RETRY_WAIT", "ANSWERING_RETRY")
+        job(db, "auto", "BLOCKED", "CAPTCHA_REQUIRED")
+        job(db, "owner", "BLOCKED", "DESIGNATED_RESUME_MISMATCH")
+        job(db, "queued", "QUEUED")
+        db.commit()
+        badges = [item["state"] for item in self.gather()["list"]["jobs"]]
+        counts, overview = self.gather()["counts"], self.overview()
+        self.assertEqual(badges.count("Waiting to retry"), 3)
+        self.assertEqual(counts["retrying"], 3)
+        self.assertEqual(overview["right_now"]["retrying"], 3)
+        self.assertEqual(sorted(self.keys(show="retrying")), ["auto", "later-1", "later-2"])
+        self.assertEqual(badges.count("Queued"), 1)
+        self.assertEqual(counts["queued"], 1)
+        self.assertEqual(self.keys(show="queued"), ["queued"])
+        self.assertEqual(counts["needs_you"], overview["needs"]["applications"])
+        self.assertEqual(badges.count("Blocked, needs you"), counts["needs_you"])
 
     def test_needs_you_says_what_to_do_and_waits_say_they_retry(self):
         """Worked example 2."""
@@ -161,7 +185,7 @@ class GatherTest(unittest.TestCase):
         self.addCleanup(empty.close)
         for database in (None, empty):
             view = applications_page.gather(database, CONFIG, self.home, now=self.now)
-            self.assertEqual(view["list"], {"jobs": [], "total": 0, "page": 1, "pages": 1})
+            self.assertEqual(view["list"], {"jobs": [], "groups": [], "total": 0, "page": 1, "pages": 1})
             self.assertEqual(set(view["counts"].values()), {0})
             self.assertEqual(applications_page.gather(database, CONFIG, self.home, job="x", now=self.now)["job"], None)
 
@@ -285,7 +309,8 @@ class GatherTest(unittest.TestCase):
                                                 json.dumps({"review": review, "answers": {field: "I like robots."}, "resume_sha256": sha})))
         db.commit()
         duplicate = self.gather(job="dup")["job"]
-        self.assertEqual(duplicate["closing"], {"other": "Acme Robotics Robotics Engineer (Remote)", "reason": "Same title and job id."})
+        self.assertEqual(duplicate["closing"], {"other": "Acme Robotics, Robotics Engineer (Remote)", "other_key": "original",
+                                                 "reason": "Same title and job id."})
         self.assertEqual(duplicate["history"][0]["text"], "Closed as a duplicate: Same posting as another job Sidedoor already has.")
         out = self.gather(job="out")["job"]
         self.assertEqual(out["closed"], applications_page.CODE_WORDS["OUTSIDE_CONFIRMED_SCOPE"])
@@ -299,6 +324,60 @@ class GatherTest(unittest.TestCase):
         for key in ("dup", "out", "gone", "original"):
             self.assertIsNone(RAW_CODE.search(visible_text(self.gather(job=key))), key)
         self.assertTrue(self.gather(job="missing")["detail_missing"])
+
+    def test_every_closed_kind_shows_its_specific_reason(self):
+        db = self.database
+        retain = ". Retain evidence; do not submit outside the resolved search policy"
+        def closed(key, state, code, note=None, review=None):
+            job(db, key, state, code)
+            db.execute("UPDATE application_jobs SET next_action=? WHERE job_key=?", (note, key))
+            if review is not None:
+                db.execute("INSERT INTO application_reviews VALUES (?,?,?,?,?)",
+                           ("r-" + key, key, self.inside.isoformat(), code, json.dumps(review)))
+        hubs = "This role can be hybrid in our San Francisco, New York City, or Seattle hubs."
+        closed("scope", "INELIGIBLE", "OUTSIDE_CONFIRMED_SCOPE", "AI judged level out of scope: Staff role" + retain,
+               {"scope_fit": {"level": {"in_scope": False, "reason": "A staff role, above your target levels."}}})
+        closed("geo", "INELIGIBLE", "OUTSIDE_CONFIRMED_SCOPE", "The read observed hiring geography excludes the candidate" + retain,
+               {"facts": {"hiring_geography_includes_candidate": False},
+                "browser_evidence": [{"pointer": "/facts/hiring_geography_includes_candidate", "quote": hubs}]})
+        closed("shut", "INELIGIBLE", "OUTSIDE_CONFIRMED_SCOPE", "The read observed the role is not open" + retain, {"facts": {"open": False}})
+        closed("abroad", "INELIGIBLE", "OUTSIDE_CONFIRMED_SCOPE", "Location DE is outside the user's countries" + retain,
+               {"facts": {"country": "DE"}})
+        closed("citizen", "INELIGIBLE", "CLEARANCE_OR_CITIZENSHIP_REQUIRED",
+               "The posting requires US citizenship, which the owner's recorded answers do not meet. Retain evidence; do not submit.")
+        closed("walled", "ABANDONED", "ACCESS_BLOCKED_3_TIMES", "Abandoned: 3 application sessions stopped (AUTHENTICATION_REQUIRED)")
+        app_event(db, "walled", "APPLICATION_ACCESS_BLOCKS_SPENT", self.inside,
+                  {"blocks": [{"code": "AUTHENTICATION_REQUIRED"}, {"code": "CAPTCHA_REQUIRED"}, {"code": "AUTHENTICATION_REQUIRED"}]})
+        closed("recovered", "ABANDONED", "APPLICATION_RECOVERY_ABANDONED", "Retain terminal abandonment and its evidence; do not automatically reopen")
+        app_event(db, "recovered", "APPLICATION_ABANDONED", self.inside, {"reason": "The posting now redirects to the careers home page"})
+        closed("uploads", "EXHAUSTED", "FILE_UPLOAD_FAILED_3_TIMES", "Given up: ...")
+        app_event(db, "uploads", "APPLICATION_UPLOAD_FAILURES_SPENT", self.inside, {"failures": [{}, {}, {}]})
+        closed("tries", "EXHAUSTED", "RETRIES_EXHAUSTED", "Inspect failure evidence and explicitly requeue only after resolution")
+        app_event(db, "tries", "RETRY_WAIT", self.inside, {"code": "INSPECTION_INCOMPLETE"})
+        closed("dup", "DUPLICATE", "SAME_POSTING_AS_EXISTING_JOB", "Same posting as original; this posting is handled there")
+        job(db, "original", "QUEUED")
+        app_event(db, "dup", "SAME_POSTING_LINKED", self.inside, {"same_as": "original", "reason": "Same title and job id."})
+        db.commit()
+        expected = {
+            "scope": "A staff role, above your target levels.",
+            "geo": "The posting says: \u201c" + hubs + "\u201d Sidedoor judged that doesn't include you.",
+            "shut": "The posting says the role is no longer open.",
+            "abroad": "The role is in DE, outside the countries in your search.",
+            "citizen": "The posting requires US citizenship, which your recorded answers do not meet.",
+            "walled": "The application site asked for a human check or a sign-in each of the 3 times Sidedoor tried, so nothing was submitted.",
+            "recovered": "The posting now redirects to the careers home page.",
+            "uploads": "The site did not take the résumé or a required file in 3 tries, each stopped before anything was submitted.",
+            "tries": "Its last try stopped on this: " + applications_page.CODE_WORDS["INSPECTION_INCOMPLETE"],
+            "dup": "Same title and job id.",
+        }
+        for key, reason in expected.items():
+            view = self.gather(job=key)
+            self.assertEqual(view["job"]["reason"], reason, key)
+            self.assertIsNone(RAW_CODE.search(visible_text(view)), key)
+        self.assertEqual(self.gather(job="dup")["job"]["closing"]["other_key"], "original")
+        listed = {item["key"]: item for item in self.gather()["list"]["jobs"]}
+        self.assertEqual(listed["geo"]["reason"], expected["geo"])
+        self.assertIsNone(listed["original"]["reason"])
 
     # --- review fixes A1-A9 ---------------------------------------------------------------------
 
@@ -320,7 +399,7 @@ class GatherTest(unittest.TestCase):
         written |= set(re.findall(r'(?:hold|wait_for_adapter)\((?:[^()]|\([^()]*\))*?\bnow, "([A-Z_]+)"', source, re.S))
         written |= {"INELIGIBLE"}   # assess() returns it to hold through a variable
         self.assertIn("WAITING_BROWSER", written)
-        filtered = {state for states in applications_page.STATE_FILTERS.values() for state in states} | {"BLOCKED"}
+        filtered = {state for states in applications_page.STATE_FILTERS.values() for state in states} | {"BLOCKED", "RETRY_WAIT"}
         for state in written:
             self.assertTrue(state in applications_page.STATE_WORDS or state == "BLOCKED", state)
             self.assertIn(state, filtered, state)
@@ -337,6 +416,8 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.gather(job="browser")["job"]["history"][0]["text"],
                          "Waiting for the browser: The browser has not picked this up yet.")
         counts = self.gather()["counts"]
+        job(db, "later", "RETRY_WAIT", "PREFLIGHT_TRANSIENT")   # "Waiting to retry", not "Queued"
+        db.commit()
         disjoint = ("needs_you", "retrying", "confirming", "submitted", "queued", "waiting_browser", "ineligible",
                     "duplicate", "given_up")
         self.assertEqual(sum(counts[key] for key in disjoint), counts["all"])
@@ -355,7 +436,26 @@ class GatherTest(unittest.TestCase):
         self.assertTrue(item["needs_you"])
         self.assertEqual(item["problem"], applications_page.FORM_NOT_READABLE_WORDS)
         self.assertNotIn("only you can answer", item["todo"])
-        self.assertIn("apply yourself", item["todo"])
+        self.assertNotIn("apply yourself", item["todo"])
+        self.assertIn("couldn't read this form", item["todo"])
+
+    def test_a4c_only_a_sign_in_or_human_check_says_apply_yourself(self):
+        job(self.database, "gaveup", "ABANDONED", "ACCESS_BLOCKED_3_TIMES")
+        job(self.database, "other", "BLOCKED", "DESIGNATED_RESUME_MISMATCH")
+        self.database.commit()
+        todos = {item["key"] if "key" in item else item.get("job_key"): item["todo"] for item in self.gather(show="all")["list"]["jobs"]}
+        texts = list(todos.values())
+        self.assertTrue(any(text and "apply yourself" in text for text in texts))
+        self.assertEqual(sum(1 for text in texts if text and "apply yourself" in text), 1)
+
+    def test_a4b_answered_owner_questions_never_say_apply_yourself(self):
+        # 2026-10-24: InsForge after the owner answered both cards showed "apply yourself", which could
+        # make the owner apply by hand while Sidedoor submits (a double application).
+        job(self.database, "answered", "BLOCKED", "UNKNOWN_REQUIRED_ANSWERS:unidentified-question:github_profile:5b77")
+        self.database.commit()
+        item = self.gather()["list"]["jobs"][0]
+        self.assertNotIn("apply yourself", item["todo"])
+        self.assertIn("continues this application on its next run", item["todo"])
 
     def test_a5_the_authorization_hold_links_to_no_missing_control(self):
         job(self.database, "auth", "BLOCKED", "APPLICATION_AUTHORIZATION_REQUIRED")
@@ -391,9 +491,44 @@ class GatherTest(unittest.TestCase):
             db.execute("INSERT INTO desktop_requests(request_id,binding,job_key,operation,payload,state,created_at,expires_at,"
                        "lease_until) VALUES (?,'b',?,'investigate','{}','CLAIMED',?,?,?)", (key, key, lease, lease, lease))
         db.commit()
-        jobs = {item["key"]: item for item in self.gather(show="reading")["list"]["jobs"]}
-        self.assertEqual(jobs["wall"]["state"], "Reading now")
+        view = self.gather(show="reading")
+        self.assertEqual([item["key"] for item in view["list"]["jobs"]], ["wall"])   # the Reading chip counts by the badge
+        self.assertEqual((view["list"]["jobs"][0]["state"], view["counts"]["reading"]), ("Reading now", 1))
+        jobs = {item["key"]: item for item in self.gather()["list"]["jobs"]}
         self.assertEqual((jobs["owner"]["state"], jobs["owner"]["reading"]), ("Blocked, needs you", True))
+
+
+    def test_p1_owner_answers_read_calm_and_jobs_sit_under_headings(self):
+        """Owner, 2026-10-24: waiting on an answer is calm with a button; an answered one continues on
+        its own; the list is grouped Needs you, In progress, Submitted, Closed across pages."""
+        db = self.database
+        job(db, "asked", "BLOCKED", "UNKNOWN_REQUIRED_ANSWERS:salary", updated="2026-10-21T10:00:00+00:00")
+        job(db, "answered", "BLOCKED", "UNKNOWN_REQUIRED_ANSWERS:start", updated="2026-10-21T18:00:00+00:00")
+        job(db, "resume", "BLOCKED", "DESIGNATED_RESUME_MISMATCH", updated="2026-10-21T09:00:00+00:00")
+        job(db, "queued", "QUEUED", updated="2026-10-21T19:00:00+00:00")
+        job(db, "done", "SUBMITTED", receipt=json.dumps({"evidence_kind": "page_confirmation", "armed_at": self.inside.isoformat()}),
+            updated="2026-10-21T20:00:00+00:00")
+        job(db, "gone", "EXHAUSTED", "FILE_UPLOAD_FAILED_3_TIMES", updated="2026-10-21T21:00:00+00:00")
+        job(db, "copy", "DUPLICATE", "EXISTING_APPLICATION", updated="2026-10-21T22:00:00+00:00")
+        question(db, "q", "asked", self.now)
+        db.commit()
+        listing = self.gather()["list"]
+        jobs = {item["key"]: item for item in listing["jobs"]}
+        asked, answered = jobs["asked"], jobs["answered"]
+        self.assertEqual((asked["state"], asked["tone"], asked["attention"], asked["needs_you"]),
+                         ("Waiting for your answer", "info", False, False))   # a question only (one rule)
+        self.assertEqual((asked["todo_href"], asked["todo_label"]), ("/approvals#questions", "Answer on Approvals"))
+        self.assertEqual((answered["state"], answered["attention"], answered["group"]), ("Continues on the next run", False, "progress"))
+        self.assertTrue(jobs["resume"]["attention"])
+        self.assertEqual(jobs["done"]["submitted_at"], self.inside)
+        self.assertEqual([item["key"] for item in listing["jobs"]], ["resume", "queued", "answered", "asked", "done", "copy", "gone"])
+        self.assertEqual([(group["label"], len(group["jobs"])) for group in listing["groups"]],
+                         [("Needs you", 1), ("In progress", 3), ("Submitted", 1), ("Closed", 2)])
+        self.assertEqual(self.gather()["counts"]["needs_you"], 1)      # the one needs-you rule: only the résumé
+        with mock.patch.object(applications_page, "PAGE_SIZE", 3):
+            pages = [self.gather(page=number)["list"] for number in (1, 2, 3)]
+        self.assertEqual([[group["key"] for group in item["groups"]] for item in pages],
+                         [["needs_you", "progress"], ["progress", "submitted", "closed"], ["closed"]])
 
 
 @unittest.skipUnless(DEPENDENCIES, "dashboard packages (fastapi, httpx) not installed")
@@ -469,12 +604,37 @@ class ApplicationsPageTest(unittest.TestCase):
         overview = self.get("/").text
         for show in ("needs_you", "retrying", "confirming", "submitted_today"):
             self.assertIn('href="/applications?show=%s"' % show, overview)
-        self.assertIn('href="/applications?show=needs_you">3</a>', overview)
+        # Overview's one Needs you card (owner, 2026-10-24): "3 applications blocked on you" [Open].
+        needs = overview[overview.index('id="needs-title"'):overview.index('id="now-title"')]
+        self.assertRegex(needs, r'<span class="overview-number">3</span>\s*<span class="overview-needs-what">applications blocked on you</span>'
+                                r'\s*<a class="button overview-needs-go" href="/applications\?show=needs_you">Open</a>')
+        self.assertNotIn("Blocked, needs you", overview)
         page = self.get(show="needs_you").text
         self.assertEqual(page.count('class="card app-row'), 3)
         for company in ("One Co", "Two Co", "Three Co"):
             self.assertIn(company, page)
         self.assertNotIn("Wall Co", page)
+
+    def test_p2_page_hides_empty_filters_and_explains_closed_jobs(self):
+        database = database_with_schema(self.root)
+        job(database, "original", "SUBMITTED", company="One Co", role="Engineer",
+            receipt=json.dumps({"evidence_kind": "page_confirmation", "armed_at": "2026-10-21T17:00:00+00:00"}))
+        job(database, "copy", "DUPLICATE", "SAME_POSTING_AS_EXISTING_JOB", company="One Co", role="Engineer II")
+        app_event(database, "copy", "SAME_POSTING_LINKED", "2026-10-21T17:00:00+00:00", {"same_as": "original"})
+        job(database, "recorded", "DUPLICATE", "EXISTING_APPLICATION", company="Two Co")
+        job(database, "gone", "ABANDONED", "ACCESS_BLOCKED_3_TIMES", company="Three Co")
+        database.commit()
+        database.close()
+        page = self.get().text
+        self.assertIn(">Duplicate <span", page)
+        self.assertNotIn(">Queued <span", page)                                   # 0 jobs: hidden
+        self.assertIn(">Queued <span", self.get(show="queued").text)              # unless selected
+        self.assertIn('Same job as: <a href="/applications?job=original">One Co, Engineer</a>', page)
+        self.assertIn("Same job as an earlier application", page)
+        self.assertIn("The site asked for a sign-in or a human check three times.", page)
+        self.assertIn("Submitted ", page.split("One Co")[1])
+        for heading in ("Submitted", "Closed"):
+            self.assertIn('class="app-group-title" id="app-group-%s"' % heading.lower(), page)
 
 
 class PhoneWidthTest(unittest.TestCase):

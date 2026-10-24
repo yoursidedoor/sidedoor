@@ -463,7 +463,10 @@ class SettingsPageTest(unittest.TestCase):
         self.assertIn("<dt>Good until</dt><dd>Dec 31, ", page)  # local, readable (E8.T2 review fix 9)
         self.assertIn("<dt>Last successful check</dt><dd>Oct 1, ", page)  # the signed server time
         self.assertIn(settings_page.NO_PORTAL, page)  # no billing_portal_url in this config
-        self.assertIn("Trial.", page)  # no trial end date signed: no countdown
+        self.assertIn('<span class="chip chip-info">Trial</span></p>', page)  # no trial end date signed: no countdown
+        # One status line (owner, 2026-10-24): no repeated "Trial." note, no [Activate] beside an active key.
+        self.assertNotIn('<p class="note note-info" role="status">Trial.</p>', page)
+        self.assertNotIn('action="/settings/license/activate"', page)
         self.assertNotIn(LICENSE_KEY, outside_box(page, LICENSE_KEY, "s-license-key"))
         self.assertIn('data-reveal="s-license-key"', page)
         signed = relay_answer(self.home)
@@ -472,8 +475,27 @@ class SettingsPageTest(unittest.TestCase):
             response = self.client.post("/settings/license/activate", headers=HTMX).text
         self.assertEqual(LICENSE_KEY, post.call_args[0][1]["key"])
         linkedin.assert_called_once()
-        self.assertIn("Active: Active.", response)
+        self.assertIn('Status: <span class="chip chip-success">Active</span></p>', response)
+        self.assertNotIn("Active: Active.", response)  # the saved success line repeats the status: not shown
         self.assertNotIn(LICENSE_KEY, outside_box(response, LICENSE_KEY, "s-license-key"))
+
+    def test_an_expired_key_keeps_activate_and_one_status_line(self):
+        # Owner, 2026-10-24: one status line; [Activate] only when not active (an expired key renewed on
+        # the website is checked again through it).
+        (self.home / "license.key").write_text(LICENSE_KEY + "\n")
+        entitlement_file(self.home, valid=False)
+        page = self.client.get("/settings").text
+        self.assertIn('Status: <span class="chip chip-error">Expired</span> <span class="license-status-error">'
+                      'Sidedoor is paused. Renew to continue.</span></p>', page)
+        self.assertIn('action="/settings/license/activate"', page)
+        self.assertEqual(None, settings_page.status_detail({"label": "Trial: 3 days left", "text": "Trial: 3 days left."}))
+
+    def test_the_guide_column_is_empty_until_a_guide_opens(self):
+        page = self.client.get("/settings").text
+        self.assertIn('<div class="setup-layout guide-on-demand">', page)
+        self.assertIn('<aside class="guide-panel card" id="guide-panel" aria-live="polite"></aside>', page)
+        self.assertIn("Every message is shown on the Networking &amp; Referrals page.", page)
+        self.assertIn("<h3>", self.client.get("/setup/guide/license", headers=HTMX).text)
 
     def test_manage_subscription_opens_the_billing_portal_or_falls_back_to_support(self):
         portal = "https://billing.stripe.com/p/login/test"

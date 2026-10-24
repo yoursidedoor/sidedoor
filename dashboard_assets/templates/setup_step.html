@@ -122,7 +122,7 @@
   {% elif step.number == 4 %}
   <form class="mode" method="post" action="/setup/mode" hx-post="/setup/mode" hx-trigger="change" hx-target="#step-4" hx-swap="outerHTML">
     <label class="choice"><input type="radio" name="mode" value="automatic"{% if step.state.mode != "review" %} checked{% endif %}>
-      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, replies and follow-ups on its own, within its safety rules. Every message is shown on the Sent page.</span></label>
+      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, replies and follow-ups on its own, within its safety rules. Every message is shown on the Networking &amp; Referrals page.</span></label>
     <label class="choice"><input type="radio" name="mode" value="review"{% if step.state.mode == "review" %} checked{% endif %}>
       <span><strong>Review.</strong> Sidedoor drafts them and waits for you to approve each one on the Approvals page. Research and applications still run on their own.</span></label>
     <noscript><button class="button" type="submit">Save</button></noscript>

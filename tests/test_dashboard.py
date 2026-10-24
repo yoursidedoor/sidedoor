@@ -73,6 +73,13 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(client.get("/", headers={"host": "evil.example:%d" % PORT}).status_code, 400)
         self.assertEqual(client.get("/", headers={"host": "127.0.0.1:1"}).status_code, 400)
 
+    def test_pages_keep_the_origin_on_plain_form_posts(self):
+        # Under "no-referrer" a browser sends "Origin: null" on a plain <form method=post> (Update now was
+        # refused, 2026-10-24); "same-origin" keeps our own Origin and still sends no referrer elsewhere.
+        client = self.client()
+        self.assertEqual(client.get("/").headers["referrer-policy"], "same-origin")
+        self.assertEqual(client.post("/", headers={"origin": "null"}).status_code, 403)
+
     def test_cross_origin_post_is_refused(self):
         client = self.signed_in()
         self.assertEqual(client.post("/", headers={"origin": "http://evil.example"}).status_code, 403)
@@ -93,7 +100,9 @@ class DashboardTest(unittest.TestCase):
         client = self.signed_in()
         page = client.get("/applications").text
         self.assertIn('src="/brand/yoursidedoor-logo.png"', page)
-        self.assertIn('href="/brand/yoursidedoor-icon-512.png"', page)
+        for icon in ("yoursidedoor-icon-win-32.png", "yoursidedoor-icon-win-16.png", "yoursidedoor-apple-touch-180.png"):
+            self.assertIn('href="/brand/%s"' % icon, page)
+            self.assertEqual(client.get("/brand/" + icon).status_code, 200)
         self.assertNotIn("<script>", page)
         for key, label, path in dashboard.TABS + (dashboard.SETUP_TAB,):
             self.assertIn(f'href="{path}"', page)
