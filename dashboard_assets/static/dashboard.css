@@ -256,6 +256,12 @@ pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 
 .fail-fix { display: inline-block; margin-top: 8px; }
 .fail-detail { margin-top: 8px; }
 .fail-detail code { overflow-wrap: anywhere; }
+.fail-reasons { margin: 6px 0 0; padding-left: 18px; font-size: 0.95em; }
+.fail-reason { margin: 2px 0; overflow-wrap: anywhere; }
+.fail-reason code { font-size: 0.9em; }
+.fail-error { color: var(--muted); }
+.fail-runs { padding-left: 18px; }
+.fail-runs li { margin: 2px 0; overflow-wrap: anywhere; }
 .log-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; margin: 0 0 12px; }
 .log-filters label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 0.875rem; min-width: 0; }
 .log-filters select, .log-filters input { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 10px; min-width: 0; max-width: 100%; }

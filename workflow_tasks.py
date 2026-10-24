@@ -261,6 +261,8 @@ def claim(database, task_id, now, lease_seconds=300):
                          (hashlib.sha256(token.encode()).hexdigest(), expiry, now, task_id))
         record(database, task_id, "CLAIMED", now, {"attempt": row["attempts"] + 1})
         database.commit()
+        import log
+        log.enter_task(task_id)   # its lines carry its own [task:<id>] (Failures page run view)
         return {"status": "CLAIMED", "task_id": task_id, "token": token, "lease_until": expiry}
     except BaseException:
         database.rollback()
@@ -295,6 +297,8 @@ def finish(database, task_id, token, now, result, evidence, status="COMPLETE", b
                                (status, encoded(result), encoded(evidence), blocker, next_action, next_at, now, task_id, token_hash))
     if changed.rowcount != 1:
         raise ValueError("Task changed during completion")
+    import log
+    log.leave_task(task_id)
     detail = {"result": result, "evidence": evidence}
     if blocker:
         # Kept with the event so a reader can tell a failed try from a wait (the dashboard's Failures
@@ -325,6 +329,8 @@ def provider_wait(database, task_id, token, now, wait, result=None):
                                provider_limits.NEXT_ACTION, wait.next_at, now, task_id, token_hash))
     if changed.rowcount != 1:
         raise ValueError("Task changed during completion")
+    import log
+    log.leave_task(task_id)
     record(database, task_id, provider_limits.EVENT, now, dict(wait.detail(), attempt=row["attempts"],
            max_attempts_before=row["max_attempts"], max_attempts_after=row["max_attempts"] + 1,
            deadline=row["deadline"], deadline_extended=False))
@@ -348,6 +354,8 @@ def compute_wait(database, task_id, token, now, next_at, blocker, result=None, n
                                next_at, now, task_id, token_hash))
     if changed.rowcount != 1:
         raise ValueError("Task changed during completion")
+    import log
+    log.leave_task(task_id)
     record(database, task_id, "COMPUTE_WAIT", now, {"attempt": row["attempts"], "max_attempts_after": row["max_attempts"] + 1,
                                                      "resume_at": next_at})
     return "RETRY_WAIT"

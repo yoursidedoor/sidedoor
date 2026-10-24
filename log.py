@@ -22,6 +22,8 @@ handler sees it. If redaction cannot run, the secrets cannot be read, or the cre
 redaction is not complete, the message is replaced (WITHHELD), never written as given.
 """
 
+import contextlib
+import contextvars
 import logging
 import os
 import sys
@@ -37,10 +39,58 @@ WITHHELD = "Not shown: it may contain a secret."
 # commands and `serve`) every record also reads the install's known secrets afresh
 # (`failures_page.secrets_of`, which uses the credential store's own per-process cache), so a key
 # saved after the first line is still redacted; no snapshot is kept here.
-_state = {"job": None, "extra": (), "configured": False, "stdout_info": False, "config": None}
+_state = {"tag": None, "job": None, "extra": (), "configured": False, "stdout_info": False, "config": None}
 _lock = threading.Lock()
 _secrets_lock = threading.Lock()   # one read of the secrets at a time (a first load racing a line)
 _busy = threading.local()
+
+
+_tag = contextvars.ContextVar("sidedoor_log_tag", default=None)
+_block = contextvars.ContextVar("sidedoor_log_block", default=None)   # the enclosing `tagged` block's own tag
+
+
+def run_tag(kind, ident):
+    """The short tag a run's lines carry ("task:1a2b3c4d5e6f"), also what the Failures page searches
+    a stream for: the kind and the first 12 characters of the id (a job's whole key, which is
+    readable and whose start is shared by an employer's jobs)."""
+    return "%s:%s" % (kind, str(ident)[:80] if kind == "job" else str(ident)[:12])
+
+
+@contextlib.contextmanager
+def tagged(kind, ident):
+    """Every line written inside carries `[<run_tag>]` after the job name, so a stream line can be
+    matched to its Failures item (2026-10-23). Nested tags replace the outer one; the end restores
+    exactly what was in force before, whatever claims inside did."""
+    value = run_tag(kind, ident)
+    token, block = _tag.set(value), _block.set(value)
+    try:
+        yield
+    finally:
+        _block.reset(block)
+        _tag.reset(token)
+
+
+def enter_task(task_id):
+    """A workflow task was claimed (`workflow_tasks.claim`): the lines written while it runs carry its
+    own `[task:<id>]`, inside the hourly step that runs it (2026-10-23, review rounds 2-3). Only inside a
+    `tagged` block (an hourly step, an application job, a finder run); outside one nothing changes, so a
+    claim never tags the rest of a process. A claim that ends without `leave_task` is replaced by the
+    next claim, and the block's end restores the outer tag."""
+    if _block.get() is not None:
+        _tag.set(run_tag("task", task_id))
+
+
+def leave_task(task_id):
+    """The task's claim ended (finish, provider_wait, compute_wait): the enclosing block's own tag comes
+    back, never another task's."""
+    block = _block.get()
+    if block is not None:
+        _tag.set(block)
+
+
+def set_tag(kind, ident):
+    """The tag for the rest of this process's lines outside any `tagged` block (one research run)."""
+    _state["tag"] = run_tag(kind, ident) if ident else None
 
 
 class SecretsUnavailable(Exception):
@@ -122,7 +172,8 @@ class RedactFilter(logging.Filter):
         if getattr(record, "_sidedoor_redacted", False):   # the logger's filter already ran
             return True
         record._sidedoor_redacted = True
-        record.job = job_name()
+        tag = _tag.get() or _state.get("tag")
+        record.job = job_name() + (" [%s]" % tag if tag else "")
         name = record.name
         record.component = name[len(ROOT) + 1:] if name.startswith(ROOT + ".") else name
         if getattr(_busy, "on", False):  # a log line written while collecting the secrets

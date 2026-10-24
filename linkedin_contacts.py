@@ -40,6 +40,7 @@ Nothing here sends anything.
 import datetime as dt
 import hashlib
 import json
+import log
 from pathlib import Path
 import re
 import tempfile
@@ -849,6 +850,9 @@ def run_one(root, database, config, item, now, executor=None):
         # Sidedoor's browser runtime missing, or a Chrome already on its profile (E7.T1 review fix 2):
         # deferred like a busy browser, with no run row, no compute and no try.
         code = browser_runtime.check_available(database, config, "LINKEDIN_CONTACTS_BROWSER_", "linkedin-contact-discovery")
+        import setup_steps
+        if not code and setup_steps.codex_wait(config):
+            code = "CODEX_NOT_FOUND"   # no usable Codex: deferred like a busy browser, no run row, no try
         if code:
             return {"company": item["company"], "state": BROWSER_BUSY, "code": code}
         return _run_one(root, database, config, item, now, executor)
@@ -880,7 +884,8 @@ def _run_one(root, database, config, item, now, executor=None):
     started = dt.datetime.now(dt.timezone.utc)
     summary = {"company": item["company"], "run_id": run_id, "directory": str(directory), **marks}
     try:
-        executor(config, prompt, directory, COMPUTE_SECONDS)
+        with log.tagged("finder", run_id):   # the run's lines carry its id (Failures page, 2026-10-23)
+            executor(config, prompt, directory, COMPUTE_SECONDS)
         output = browser.read(directory / "output.json", 65536)
         trace = browser.read(directory / "trace.jsonl", 32 * 1024 * 1024)
         result = json.loads(output, object_pairs_hook=reply_worker._unique_object)
@@ -906,6 +911,13 @@ def _run_one(root, database, config, item, now, executor=None):
         limit = provider_limits.wait_of(error)
         summary.update(state="FAILED", error_type=type(error).__name__,
                        blocker=str(error)[:300] if isinstance(error, ValueError) else "LINKEDIN_CONTACTS_" + type(error).__name__)
+        if not isinstance(error, ValueError):
+            # What it said (redacted, bounded) and where it was raised, for the Failures page (2026-10-23).
+            import traceback
+            summary["error"] = log.redact(str(error))[:300]
+            frames = traceback.extract_tb(error.__traceback__) if error.__traceback__ else []
+            if frames:
+                summary["raised_at"] = "%s:%s %s" % (Path(frames[-1].filename).name, frames[-1].lineno, frames[-1].name)
         if limit:
             # Refused by the provider for usage before any read: a wait, not a spent run.
             summary.update(state=provider_limits.CODE, blocker=provider_limits.CODE, provider=limit.detail())

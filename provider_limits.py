@@ -25,6 +25,19 @@ which (no stated reset: BACKOFF_SECONDS; a refused key KEY_REFUSED_SECONDS, whil
 held, `openai_auth.note_wait`). The classification is made here, when the failure is recorded,
 and stored with it (the CODE on the saved result); saved artifacts are never re-read under it
 (`artifact_limited` stays the plan's line only). In ChatGPT mode nothing here changes.
+
+Out of credit at OpenRouter (2026-10-23; on 2026-10-13 OpenRouter's 402s were counted as failed tries
+and five jobs were abandoned): a Codex call pointed at OpenRouter (`openai_auth.OPENROUTER_PROVIDER` in
+its command) whose TERMINAL error names a 402 with "Payment Required" or credits, and a direct call
+(`text_model.complete`) refused with HTTP 402, are the same capacity wait with kind OUT_OF_CREDIT
+(resume after BACKOFF_SECONDS). The direct call keeps raising its TextModelHTTPError, chained to the
+wait (`raise error from limit`), so `wait_of` finds it through every caller's wrapping.
+
+Banners (dashboard.layout, `banners`): the latest ChatGPT plan usage-limit wait (CHATGPT_WAIT_FILE)
+until its reset passes or a later Codex call to OpenAI succeeds, and the latest OpenRouter credit wait
+(CREDIT_WAIT_FILE) until a later OpenRouter call (direct or through Codex) succeeds. Both files are
+written best effort, in the Sidedoor home, beside `openai_auth.WAIT_FILE`; a failed write never turns a
+wait into a failure.
 """
 
 import datetime as dt
@@ -49,6 +62,18 @@ _RESET = re.compile(r"try again at (?P<month>[A-Z][a-z]{2}) (?P<day>\d{1,2})(?:s
                     r"(?P<hour>\d{1,2}):(?P<minute>\d{2}) (?P<meridiem>AM|PM)\.?$")
 
 
+OUT_OF_CREDIT = "openrouter_out_of_credit"
+CHATGPT_WAIT_FILE = "chatgpt-usage-wait.json"
+CODEX_NOT_FOUND = "codex_not_found"          # setup_steps.with_codex found no usable Codex (2026-10-23)
+CODEX_WAIT_FILE = "codex-not-found.json"
+CODEX_WORDS = "Sidedoor can't find Codex. Open Setup to find it again."
+CODEX_WORDS_FINISHED = "Sidedoor can't find Codex. Open Settings to find it again."
+CREDIT_WAIT_FILE = "openrouter-credit-wait.json"
+CREDITS_URL = "https://openrouter.ai/settings/credits"
+CHATGPT_USAGE_URL = "https://chatgpt.com/codex/settings/usage"
+_CREDIT = re.compile(r"\b402\b(?=.*(?:payment required|credit))|(?:payment required|credit).*\b402\b", re.IGNORECASE)
+
+
 class ProviderUsageLimit(RuntimeError):
     """The provider refused the turn for usage. `next_at` is an ISO UTC instant."""
 
@@ -60,6 +85,7 @@ class ProviderUsageLimit(RuntimeError):
         if kind is not None:
             import openai_auth
             self.kind, message = kind, openai_auth.redact(message)
+        message = str(message)
         self.message = message[:500]
         self.observed_at = now.isoformat()
         stated = reset_time(message)
@@ -109,14 +135,12 @@ def message_in(text):
     return found[0] if found else None
 
 
-def match_in(text, api=False):
-    """(message, kind): the plan's usage-limit line (kind None, anywhere, as before E0.T8) or, with
-    `api`, an API billing refusal in the call's terminal error, its last error line or event (kind
-    from openai_auth.billing_kind); else None."""
+def _scan(text):
+    """(the plan's usage-limit message or None, the call's terminal error or None)."""
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
     if not isinstance(text, str):
-        return None
+        return None, None
     terminal = None
     for line in text.splitlines():
         line = line.strip()
@@ -139,11 +163,34 @@ def match_in(text, api=False):
             return message, None
         if isinstance(message, str):
             terminal = message
+    return None, terminal
+
+
+def match_in(text, api=False):
+    """(message, kind): the plan's usage-limit line (kind None, anywhere, as before E0.T8) or, with
+    `api`, an API billing refusal in the call's terminal error, its last error line or event (kind
+    from openai_auth.billing_kind); else None."""
+    plan, terminal = _scan(text)
+    if plan:
+        return plan, None
     if not api or terminal is None:
         return None
     import openai_auth
     kind = openai_auth.billing_kind(terminal)
     return (terminal, kind) if kind else None
+
+
+def credit_refusal(message):
+    """True when an error names OpenRouter's out-of-credit refusal: a 402 beside "Payment Required"
+    or "credit" (e.g. "402 Payment Required: This request requires more credits ...")."""
+    return isinstance(message, str) and bool(_CREDIT.search(message))
+
+
+def _openrouter(command):
+    if command is None:
+        return False
+    import openai_auth
+    return openai_auth.OPENROUTER_PROVIDER in command
 
 
 def _api(command):
@@ -155,9 +202,10 @@ def _api(command):
 
 def _limit(found, now):
     limit = ProviderUsageLimit(found[0], now, kind=found[1])
-    if limit.kind is not None:
-        import openai_auth
-        openai_auth.note_wait(limit.kind, limit.next_at, now=dt.datetime.fromisoformat(limit.observed_at))
+    if limit.kind is None:
+        return noted(limit)
+    import openai_auth
+    openai_auth.note_wait(limit.kind, limit.next_at, now=dt.datetime.fromisoformat(limit.observed_at))
     return limit
 
 
@@ -183,32 +231,28 @@ def check(returncode, *paths, now=None, command=None):
     `command` (E0.T8): the Codex command that ran, so an OpenAI API billing refusal is told apart."""
     if not returncode:
         return None
-    api = _api(command)
-    for path in paths:
-        if not api:  # ChatGPT sign-in: exactly as before E0.T8
-            message = message_in(_read(path))
-            if message:
-                return ProviderUsageLimit(message, now)
-            continue
-        found = match_in(_read(path), True)
-        if found:
-            return _limit(found, now)
-    return None
+    return _classify(command, now, (_read(path) for path in paths))
 
 
 def check_output(returncode, *texts, now=None, command=None):
     """`check` for output held only in memory (never written anywhere)."""
     if not returncode:
         return None
-    api = _api(command)
+    return _classify(command, now, (text[-MAX_ARTIFACT_BYTES:] if isinstance(text, (str, bytes)) else None
+                                     for text in texts))
+
+
+def _classify(command, now, texts):
+    api, routed = _api(command), _openrouter(command)
     for text in texts:
-        tail = text[-MAX_ARTIFACT_BYTES:] if isinstance(text, (str, bytes)) else None
         if not api:  # ChatGPT sign-in: exactly as before E0.T8
-            message = message_in(tail)
-            if message:
-                return ProviderUsageLimit(message, now)
+            plan, terminal = _scan(text)
+            if plan:
+                return noted(ProviderUsageLimit(plan, now))
+            if routed and credit_refusal(terminal):   # Codex pointed at OpenRouter, out of credit
+                return noted(ProviderUsageLimit(terminal, now, kind=OUT_OF_CREDIT))
             continue
-        found = match_in(tail, True)
+        found = match_in(text, True)
         if found:
             return _limit(found, now)
     return None
@@ -272,3 +316,108 @@ def decision_limited(detail):
     if not isinstance(artifacts, dict):
         return False
     return artifact_limited(*(artifacts.get(key) for key in ("log", "trace") if isinstance(artifacts.get(key), str)))
+
+
+# --- the waits the dashboard shows (2026-10-23) ---------------------------------------------------------
+
+def _home(home=None):
+    if home is not None:
+        return Path(home)
+    import user_profile
+    return user_profile.home()
+
+
+def noted(limit, home=None):
+    """Record `limit` for the banner when it is the ChatGPT plan limit (kind None) or OpenRouter out of
+    credit; returns `limit`. Times only, never the provider's text. Best effort."""
+    name = {None: CHATGPT_WAIT_FILE, OUT_OF_CREDIT: CREDIT_WAIT_FILE, CODEX_NOT_FOUND: CODEX_WAIT_FILE}.get(limit.kind)
+    if name is None:
+        return limit
+    try:
+        import openai_auth
+        openai_auth._write_private(_home(home) / name, json.dumps(
+            {"observed_at": limit.observed_at, "resume_at": limit.next_at, "stated_reset": limit.stated_reset}) + "\n")
+    except Exception:
+        pass
+    return limit
+
+
+def out_of_credit(message, now=None, home=None):
+    """The wait for a direct OpenRouter call refused with HTTP 402 (`text_model.complete`), recorded."""
+    return noted(ProviderUsageLimit(message, now, kind=OUT_OF_CREDIT), home)
+
+
+def clear(name, home=None):
+    try:
+        (_home(home) / name).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def succeeded(command, home=None):
+    """A Codex call exited 0: pointed at OpenRouter, the credit wait ends; otherwise the ChatGPT one."""
+    clear(CREDIT_WAIT_FILE if _openrouter(command) else CHATGPT_WAIT_FILE, home)
+
+
+def _recorded(name, home):
+    try:
+        value = json.loads((_home(home) / name).read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) and isinstance(value.get("observed_at"), str) else None
+    except Exception:
+        return None
+
+
+def _local_clock(stamp):
+    try:
+        moment = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone()
+    except (AttributeError, ValueError):
+        return None
+    text = moment.strftime("%I:%M %p").lstrip("0")
+    today = dt.datetime.now(moment.tzinfo).date()
+    return text if moment.date() == today else "%s on %s %s %d" % (text, moment.strftime("%a"), moment.strftime("%b"),
+                                                                    moment.day)
+
+
+def codex_missing(home=None):
+    """The recorded Codex-not-found wait ({"observed_at", ...}) while it lasts, else None."""
+    return _recorded(CODEX_WAIT_FILE, home)
+
+
+def codex_fix(finished):
+    """(words, the button's label and link): the Codex step of Setup, or Settings once Setup is finished
+    (the Setup tab is hidden then, owner 2026-10-21)."""
+    if finished:
+        return CODEX_WORDS_FINISHED, "Open Settings", "/settings#connection-codex"
+    return CODEX_WORDS, "Open Setup", "/setup#step-6"
+
+
+def out_of_credit_shown(home=None):
+    """True while the OpenRouter out-of-credit banner shows."""
+    return _recorded(CREDIT_WAIT_FILE, home) is not None
+
+
+def banners(home=None, now=None, finished=False):
+    """The dashboard banners for the waits above, most urgent first. Each clears by itself."""
+    now = _utc(now)
+    found = []
+    if codex_missing(home):
+        words, label, href = codex_fix(finished)
+        found.append({"tone": "error", "text": words, "action_label": label, "action_href": href})
+    credit = _recorded(CREDIT_WAIT_FILE, home)
+    if credit:
+        found.append({"tone": "error", "text": "Your OpenRouter account is out of credits. Sidedoor's AI work is paused "
+                      "until you add credits.", "action_label": "Add credits", "action_href": CREDITS_URL,
+                      "external": True})
+    usage = _recorded(CHATGPT_WAIT_FILE, home)
+    if usage:
+        try:
+            reset = _utc(usage.get("resume_at"))
+        except (AttributeError, TypeError, ValueError):
+            reset = None
+        if reset is not None and reset > now:
+            found.append({"tone": "warning", "text": "Your ChatGPT usage limit is reached. Sidedoor pauses its AI work "
+                          "and picks up again at about %s." % _local_clock(reset.isoformat()),
+                          "action_label": "See your usage", "action_href": CHATGPT_USAGE_URL, "external": True})
+        elif reset is not None:
+            clear(CHATGPT_WAIT_FILE, home)   # the reset passed: the wait is over
+    return found

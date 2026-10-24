@@ -518,10 +518,14 @@ class EmailCheckTests(unittest.TestCase):
 
         config = {"codex": "codex", "model": "m"}
         profile = root / "profile"
-        address = setup_steps.read_signed_in_account("https://mail.google.com/", "/opt/codex", profile, config=config,
+        codex = root / "bin" / "codex"   # a usable Codex: the email check never runs without one (2026-10-23)
+        codex.parent.mkdir()
+        codex.write_text("#!/bin/sh\n")
+        codex.chmod(0o755)
+        address = setup_steps.read_signed_in_account("https://mail.google.com/", str(codex), profile, config=config,
                                                      executor=scripted, root=root)
         self.assertEqual(address, "Alex@Example.com")
-        self.assertEqual((seen["operation"], seen["profile"], seen["codex"]), ("webmail", str(profile), "/opt/codex"))
+        self.assertEqual((seen["operation"], seen["profile"], seen["codex"]), ("webmail", str(profile), str(codex)))
         self.assertIn('"--operation","webmail"', seen["command"])
         self.assertIn('"webmail_url": "https://mail.google.com/"', seen["prompt"])
         self.assertTrue(profile.is_dir())
@@ -529,6 +533,12 @@ class EmailCheckTests(unittest.TestCase):
     def test_unreadable_or_missing_runtime(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, True)
+        codex = root / "codex"
+        codex.write_text("#!/bin/sh\n")
+        codex.chmod(0o755)
+        found = mock.patch.object(setup_steps, "find_codex", return_value=str(codex))
+        found.start()
+        self.addCleanup(found.stop)
         def nothing(config, prompt, directory, timeout):
             (directory / "output.json").write_text(json.dumps({"signed_in_account": None, "reason": "Sign-in page"}))
         self.assertIsNone(setup_steps.read_signed_in_account("https://mail.google.com/", None, root / "p",

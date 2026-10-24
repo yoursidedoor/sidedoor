@@ -247,6 +247,7 @@
     <span class="htmx-indicator muted">Checking...</span>
   </form>
   {% if s.reason == "unreadable" %}<p class="muted">Use "Open Sidedoor's browser" and "I'm done" in <a href="#step-8">step 8</a>, then Run check.</p>{% endif %}
+  {% if s.reason == "codex_missing" %}<p><a class="button button-quiet" href="#step-6">Open Setup's Codex step</a></p>{% endif %}
 
   {% elif step.number == 10 %}
   {% if step.login_supported %}

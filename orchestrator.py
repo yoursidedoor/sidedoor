@@ -549,7 +549,8 @@ def worker_step(database, parent_run_id, name, function):
         claim = workflow_tasks.claim(database, task_id, now, lease_seconds=21600)
         if claim["status"] != "CLAIMED":
             return {"state": claim["status"], "task_id": task_id}
-        result = function()
+        with log.tagged("task", task_id):   # the step's lines carry its task (Failures page, 2026-10-23)
+            result = function()
         result = result if isinstance(result, dict) else {"state": "COMPLETE", "result": result}
         with database:
             # The step's record keeps its small fields; the caller (and the cycle's report files)
@@ -1248,10 +1249,17 @@ def research(root, config, database, pipeline, observation):
     if config.get("scope") == "monitor_existing_pipeline" or not config.get("research_enabled", True):
         return {"state": "DISABLED_BY_MONITOR_ONLY_SCOPE"}
     daily_schedule.initialize(database, config["timezone"])
+    import setup_steps
+    if setup_steps.codex_wait(config):
+        # No usable Codex (2026-10-23): research never starts and claims no attempt of the day; the
+        # day's turn is recorded (CODEX_WAIT) so other work does not yield all day, and research runs
+        # on the first check after Codex is found again.
+        return daily_schedule.codex_wait(database, config, dt.datetime.now(dt.timezone.utc))
     claim = daily_schedule.claim(database, config, dt.datetime.now(dt.timezone.utc))
     if claim["state"] != "CLAIMED":
         return claim
     research_id = claim["id"]
+    log.set_tag("research", research_id)   # this run's lines carry its id (Failures page, 2026-10-23)
     RESEARCH_STOP.clear()
 
     def interrupted(signum, frame):
@@ -1278,6 +1286,7 @@ def research(root, config, database, pipeline, observation):
         final = {"state": "INTERRUPTED" if RESEARCH_STOP.is_set() else "FAILED",
                  "error": f"Parallel research failed ({type(error).__name__}); inspect per-industry reports for {research_id}"}
     finally:
+        log.set_tag("research", None)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     final["schedule"] = daily_schedule.finish(database, config, research_id, final, dt.datetime.now(dt.timezone.utc))
@@ -1394,7 +1403,7 @@ def research_turn_pending(config, database, now=None, read_only=False):
         pending = json.loads(saved[0]).get("state") == "AUTHORIZED" if saved else False
     except (TypeError, ValueError, AttributeError):
         pending = False
-    return pending and row[0] not in {"RUNNING", "COMPLETE"}
+    return pending and row[0] not in {"RUNNING", "COMPLETE", daily_schedule.CODEX_WAIT}
 
 
 def settle_idle_browser_reservations(root, database):

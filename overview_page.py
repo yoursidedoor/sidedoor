@@ -241,6 +241,8 @@ def research(reader, config, now, running):
         upcoming = {"label": "Running now"}
     elif state in ("COMPLETE", "EXHAUSTED"):
         upcoming = {"at": workflow_tasks.next_day_start(now, zone, hour)}
+    elif state == "CODEX_WAIT":   # no usable Codex: starts once it is found again (daily_schedule.codex_wait)
+        upcoming = {"label": "Once Sidedoor finds Codex"}
     elif state == "RETRY_WAIT" and _utc(today[0]["next_retry_at"]) and _utc(today[0]["next_retry_at"]) > now:
         upcoming = {"at": _utc(today[0]["next_retry_at"])}
     elif config.get("research_enabled") is False:

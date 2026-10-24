@@ -14,6 +14,7 @@ from unittest import mock
 import answering_agent
 import answering_fixtures
 import applications
+import provider_limits
 import text_model
 import test_answering_agent as base
 from test_answering_agent import FakeModel, entry, us_review, OFFICE_ATTENDANCE, NOW
@@ -224,29 +225,29 @@ class DirectCallTests(base.ResumeFixture):
         self.assertEqual([booking.split(":")[0] for booking in bookings],
                          ["application-answering", "application-answering-judge"])
 
-    def test_a_402_is_an_ordinary_retry_with_its_status_and_never_the_key(self):
+    def test_a_402_is_a_capacity_wait_with_its_status_and_never_the_key(self):
+        # 2026-10-23 (owner): out of OpenRouter credit is a capacity wait, never a counted retry.
         error = {"error": {"message": "This request requires more credits. key " + SECRET, "code": 402}}
         result = self.run_direct(lambda body: (402, json.dumps(error).encode()))
         key = self.key(OFFICE_ATTENDANCE)
         self.assertEqual((result["answers"], result["unknown"]), ({}, [key]))
-        self.assertEqual(result["audit"]["outcome"], "ANSWERING_EXECUTOR_FAILED")
-        self.assertNotIn("provider_wait", result["audit"])  # ANSWERING_RETRY, not a capacity hold
+        self.assertEqual(result["audit"]["outcome"], provider_limits.CODE)
+        self.assertEqual(result["audit"]["provider_wait"]["kind"], provider_limits.OUT_OF_CREDIT)
         self.assertEqual(result["audit"]["calls"][0]["http_status"], 402)
         saved = self.database.execute("SELECT audit FROM application_answering_attempts").fetchone()[0]
         self.assertIn("HTTP 402", saved)
         self.assertNotIn(SECRET, saved)
 
-    def test_a_judge_402_uses_the_answering_ais_answer(self):
-        # G3 (owner, 2026-10-22): a failed judge call is treated like an objection with no untrue fact.
+    def test_a_judge_402_is_a_capacity_wait_not_a_failed_judge(self):
+        # G3 uses the answer over a FAILED judge call; out of credit (2026-10-23) is a capacity wait,
+        # which G3 never uses an answer over: the question stays open for the next cycle.
         def reply(body):
             if answering_fixtures.is_judge_prompt(body["messages"][-1]["content"]):
                 return 402, b'{"error": {"message": "credits", "code": 402}}'
             return self.model_reply(body)
         result = self.run_direct(reply)
-        record = result["answers"][self.key(OFFICE_ATTENDANCE)]
-        self.assertEqual((record["value"], record["judge"]["judge_failed"], result["unknown"]),
-                         ("Yes", "ANSWERING_EXECUTOR_FAILED", []))
-        self.assertEqual(result["audit"]["outcome"], "ANSWERING_EXECUTOR_FAILED")
+        self.assertEqual((result["answers"], result["unknown"]), ({}, [self.key(OFFICE_ATTENDANCE)]))
+        self.assertEqual(result["audit"]["outcome"], provider_limits.CODE)
 
     def test_a_timeout_is_answering_timeout(self):
         def reply(body):
@@ -496,7 +497,7 @@ class LengthCutSettlementTests(base.ResumeFixture):
 
     def test_an_http_402_keeps_its_whole_booking(self):
         result = self.run_direct(lambda body: (402, b'{"error": {"message": "credits", "code": 402}}'), timeout=600)
-        self.assertEqual(result["audit"]["outcome"], "ANSWERING_EXECUTOR_FAILED")
+        self.assertEqual(result["audit"]["outcome"], provider_limits.CODE)
         self.assertEqual(self.settled(), {})
         booked = self.database.execute("SELECT seconds FROM worker_compute_reservations").fetchone()[0]
         self.assertEqual(booked, 600)

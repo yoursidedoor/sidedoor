@@ -56,6 +56,21 @@ def next_daily_time(now, config):
     return scheduled.isoformat()
 
 
+CODEX_WAIT = "CODEX_WAIT"
+
+
+def codex_wait(database, config, now):
+    """No usable Codex at research time (2026-10-23): the day's row is written as CODEX_WAIT with no
+    attempt, so the hourly cycle and the applications job count research as having had its turn
+    (`orchestrator.research_turn_pending`) instead of yielding all day. `claim` treats it like a day
+    with no attempt yet: research starts the same day once Codex is found, spending no attempt."""
+    day = due_day(now, config)
+    with database:
+        database.execute("INSERT OR IGNORE INTO research_days(" + DAY_COLUMNS + ") VALUES (?,?,0,NULL,NULL,NULL,0)",
+                         (day, CODEX_WAIT))
+    return {"state": "CODEX_NOT_FOUND", "day": day, "next_action": "Find Codex again in Setup or Settings"}
+
+
 def claim(database, config, now):
     day = due_day(now, config)
     database.execute("BEGIN IMMEDIATE")
@@ -115,6 +130,43 @@ def compute_wait_retry(result, now):
     return moment.isoformat()
 
 
+LONG_WAIT_KINDS = (None, "openrouter_out_of_credit", "codex_not_found")   # the ChatGPT plan limit has kind None
+
+
+def provider_wait(result):
+    """True when every industry still waiting waits on the provider for something only the user or the
+    clock ends: the ChatGPT usage limit, OpenRouter out of credit, or no usable Codex (2026-10-23).
+    Those never count toward the day's tries, past the cap below too. The cap on ordinary compute waits
+    stays: it bounds how many times one day's research is claimed (each claim starts a run that plans
+    and reserves before it finds the shared budget empty). A provider wait is bounded anyway: its retry
+    is at most COMPUTE_WAIT_HORIZON away (`compute_wait_retry`), and the day itself ends."""
+    import provider_limits
+    industries = [industry for industry in result.get("industries") or [] if isinstance(industry, dict)
+                  and industry.get("state") == "COMPUTE_WAIT"]
+    if not industries:
+        return False
+    for industry in industries:
+        wait = industry.get("compute_wait") if isinstance(industry.get("compute_wait"), dict) else {}
+        provider = wait.get("provider") if isinstance(wait.get("provider"), dict) else None
+        if wait.get("reason") != provider_limits.CODE or provider is None or provider.get("kind") not in LONG_WAIT_KINDS:
+            return False
+    return True
+
+
+def long_wait_retry(result, now, config):
+    """A provider wait (`provider_wait`) whose reset is past COMPUTE_WAIT_HORIZON (a ChatGPT limit can
+    state one up to provider_limits.MAX_WAIT away): the day waits until that reset, or until the next
+    service day starts if that is sooner (the next day then waits likewise), spending no tries."""
+    value = result.get("next_retry_at")
+    try:
+        moment = dt.datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        moment = None
+    if moment is None or moment.tzinfo is None or moment <= now:
+        return None
+    return min(moment, dt.datetime.fromisoformat(next_daily_time(now, config))).isoformat()
+
+
 def finish(database, config, attempt_id, result, now):
     row = database.execute("SELECT * FROM research_days WHERE attempt_id=? AND state='RUNNING'", (attempt_id,)).fetchone()
     if not row:
@@ -122,10 +174,12 @@ def finish(database, config, attempt_id, result, now):
     success = result["state"] == "COMPLETE"
     waits = row["compute_wait_attempts"]
     waiting = None if success else compute_wait_retry(result, now)
+    if not success and waiting is None and provider_wait(result):
+        waiting = long_wait_retry(result, now, config)
     retry_at = None
     if success:
         state = "COMPLETE"
-    elif waiting and waits < config["research_max_attempts"]:
+    elif waiting and (waits < config["research_max_attempts"] or provider_wait(result)):
         # A wait is recorded and bounded, never erased: the attempt row survives with its real
         # count, and `compute_wait_attempts` says how many of those attempts were waits rather
         # than investigations. No compute limit is raised and no usage is discarded.

@@ -195,6 +195,10 @@ def execute(config, prompt, directory, timeout):
     with tempfile.TemporaryDirectory(prefix="history-work-", dir=directory) as working, \
             (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
+            import setup_steps
+            missing = setup_steps.codex_wait(config)
+            if missing:   # no usable Codex: never started; a wait (2026-10-23)
+                raise RuntimeError("HISTORY_BROWSER_CODEX_NOT_FOUND") from missing
             arguments = command(config, directory)
             worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
                 stderr=errors, text=True, encoding="utf-8", cwd=working,

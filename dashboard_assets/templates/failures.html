@@ -5,6 +5,17 @@
   <p class="muted fail-meta">
     {% if f.at %}{{ v.when(f.at) }}{% endif %}{% if f.count > 1 %}{% if f.at %} · {% endif %}{{ f.count }} times in the last {{ v.recent_days }} days{% endif %}
   </p>
+  {% if f.reasons %}
+  <ul class="fail-reasons">
+    {% for r in f.reasons %}
+    <li class="fail-reason">{% if r.where %}<strong>{{ r.where }}:</strong> {% endif %}{% if r.words %}{{ r.words }} {% endif %}<code>{{ r.code }}</code>{% if r.error %} <span class="fail-error">{{ r.error }}</span>{% endif %}
+      <span class="muted">({% if r.count > 1 %}{{ r.count }} times, last {% endif %}{% if r.at %}{{ v.when(r.at) }}{% else %}time not recorded{% endif %})</span>
+      {% if r.log_href %}<a href="{{ r.log_href }}">See its log</a>{% endif %}</li>
+    {% endfor %}
+    {% if f.reasons_more %}<li class="muted">+{{ f.reasons_more }} more{% if f.reasons_href %} <a href="{{ f.reasons_href }}">See the logs</a>{% endif %}</li>{% endif %}
+  </ul>
+  {% endif %}
+  {% if f.log_href and not (f.reasons and f.reasons[0].log_href == f.log_href) %}<p class="fail-log-link"><a href="{{ f.log_href }}">See its log</a></p>{% endif %}
   {% if f.fix %}<a class="button button-quiet fail-fix" href="{{ f.fix.href }}">{{ f.fix.label }}</a>{% endif %}
   {% if f.detail %}<details class="fail-detail"><summary>Technical details</summary><code>{{ f.detail }}</code></details>{% endif %}
   {% if f.log %}<details class="fail-detail" open><summary>The end of its error log</summary><pre class="log-lines">{% for line in f.log %}{{ line }}
@@ -57,6 +68,33 @@
   <p><a class="button button-quiet" href="/failures/doctor">Run checks</a></p>
 </section>
 
+{% if run_view %}
+<section id="run" class="fail-section" aria-labelledby="run-title">
+  {% set rv = run_view %}
+  <h2 id="run-title">{% if rv.missing %}This run's records{% else %}{{ rv.title }}{% endif %}</h2>
+  {% if rv.missing %}<p class="muted">Sidedoor has no records for this run (they may have been removed after their time limit).</p>{% else %}
+  <p class="muted">What Sidedoor recorded for this run, newest first, with secrets removed. <a href="/failures#logs">Back to all logs</a></p>
+  {% if rv.records %}<pre class="log-lines run-records">{% for r in rv.records %}{% if r.at %}{{ rv.when(r.at) }}  {% endif %}{{ r.text }}
+{% endfor %}</pre>{% endif %}
+  {% for file in rv.files %}
+  <details class="card log-stream" open>
+    <summary>{{ file.name }} <span class="muted">({% if file.state == "missing" %}gone{% elif file.state == "unreadable" %}can't be read{% elif file.lines %}last {{ file.lines | length }} line{{ "s" if file.lines | length != 1 }}{% if file.at %}, {{ rv.when(file.at) }}{% endif %}{% else %}empty{% endif %})</span></summary>
+    {% if file.lines %}<pre class="log-lines">{% for line in file.lines %}{{ line }}
+{% endfor %}</pre>{% endif %}
+  </details>
+  {% endfor %}
+  {% if rv.tagged %}
+  <details class="card log-stream" open>
+    <summary>Its lines in the logs <span class="muted">(tagged {{ rv.tag }})</span></summary>
+    <pre class="log-lines">{% for line in rv.tagged %}{{ line }}
+{% endfor %}</pre>
+  </details>
+  {% endif %}
+  {% if not rv.records and not rv.files and not rv.tagged %}<p class="muted">Nothing is recorded for this run any more.</p>{% endif %}
+  {% endif %}
+</section>
+{% endif %}
+
 <section id="logs" class="fail-section" aria-labelledby="logs-title">
   {% set l = logs %}
   <h2 id="logs-title">Logs</h2>
@@ -77,9 +115,16 @@
     <label class="log-search">Search
       <input type="search" name="q" value="{{ l.query }}" maxlength="200">
     </label>
+    <label>Day
+      <input type="date" name="day" value="{{ l.day }}">
+    </label>
     <button class="button" type="submit">Show</button>
   </form>
   <p><a class="button button-quiet" href="/failures/logs.txt" download>Download for a support issue</a></p>
+  <h3 id="runs-title">Runs</h3>
+  {% if runs %}
+  <ul class="fail-runs">{% for r in runs %}<li><a href="{{ r.href }}">{{ r.label }}</a> <span class="muted">{{ r.component_label }}, {{ v.when(r.at) if v else r.at }}</span></li>{% endfor %}</ul>
+  {% else %}<p class="muted">No run files are kept{% if l.day or l.component != "all" %} for this choice{% endif %}.</p>{% endif %}
   {% for s in l.streams %}
   <details class="card log-stream" id="{{ s.id }}"{% if s.lines and (l.query or s.name.endswith("stderr.log")) %} open{% endif %}>
     <summary>{{ s.label }} <span class="muted">({% if s.state == "missing" %}no log yet{% elif s.state == "unreadable" %}can't be read{% elif s.lines %}{{ s.lines | length }} line{{ "s" if s.lines | length != 1 }}{% elif l.query %}no matches{% else %}empty{% endif %})</span></summary>

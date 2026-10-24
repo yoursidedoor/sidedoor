@@ -35,6 +35,7 @@ import re
 import unicodedata
 
 import research_recovery
+import provider_limits
 import text_model
 import workflow_tasks
 
@@ -256,7 +257,21 @@ def cycle(root, database, config, now=None, executor=None, runtime=None):
             outcome = "JUDGED"
         except Exception as error:
             judged, outcome = None, _failure(error)
+            waited = provider_limits.wait_of(error)
+        else:
+            waited = None
         finished = dt.datetime.now(dt.timezone.utc).isoformat()
+        if waited:
+            # A provider wait (OpenRouter out of credit, 2026-10-23) is not a try: nothing is
+            # recorded against the evidence, and the rest waits for the next cycle.
+            with database:
+                try:
+                    workflow_tasks.refund_compute(database, action, started.isoformat(), finished, finished, "POSTING_JUDGMENT_FINISHED")
+                except ValueError:
+                    pass
+            results.append({"evidence_id": value["evidence_id"], "job_key": value["job_key"], "state": provider_limits.CODE,
+                            "verdict": None})
+            break
         with database:
             try:
                 workflow_tasks.refund_compute(database, action, started.isoformat(), finished, finished, "POSTING_JUDGMENT_FINISHED")
@@ -449,12 +464,17 @@ def same_job(root, database, config, job, now, executor=None, runtime=None, befo
         judged, outcome = validate_same_job(raw, value), "JUDGED"
     except Exception as error:
         outcome = _failure(error)
+        waited = provider_limits.wait_of(error)
+    else:
+        waited = None
     finished = dt.datetime.now(dt.timezone.utc).isoformat()
     with database:
         try:
             workflow_tasks.refund_compute(database, action, started.isoformat(), finished, finished, "SAME_JOB_JUDGMENT_FINISHED")
         except ValueError:
             pass
+        if waited:   # a provider wait spends none of the day's MAX_ATTEMPTS (2026-10-23)
+            return None
         database.execute("INSERT INTO same_job_attempts VALUES (?,?,?,?)", (job["job_key"], digest, finished, outcome))
         if judged:
             database.execute("INSERT OR IGNORE INTO same_job_judgments VALUES (?,?,?,?,?,?,?,?,?)",

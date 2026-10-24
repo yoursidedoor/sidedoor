@@ -460,6 +460,9 @@ def _run_direct(root, config, prompt, timeout, role, calls):
         unavailable.settle = error.finish_reason == "length"  # cut at max_tokens: settled by duration (J8)
         raise unavailable from None
     except text_model.TextModelError as error:
+        limit = provider_limits.wait_of(error)
+        if limit:   # OpenRouter out of credit (HTTP 402): a capacity wait, as _run_injected treats one
+            raise failed(provider_limits.CODE, error) from limit
         raise failed("ANSWERING_EXECUTOR_FAILED", error) from None
     except OSError as error:  # the key file could not be read
         raise failed("ANSWERING_EXECUTOR_UNAVAILABLE", error) from None

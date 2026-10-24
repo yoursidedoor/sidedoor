@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 import portable
 import openai_auth
 import provider_limits
+import setup_steps
 import workflow_tasks
 import paths
 
@@ -125,6 +126,9 @@ def _execute(config, prompt, directory, timeout):
     worker = None
     with tempfile.TemporaryDirectory(prefix="agent-web-") as working, (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
+            missing = setup_steps.codex_wait(config)
+            if missing:   # no usable Codex: never started; a wait, no try spent (2026-10-23)
+                raise RuntimeError("CODEX_NOT_FOUND") from missing
             arguments = _command(config, directory)
             worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
                                       stderr=errors, text=True, encoding="utf-8", cwd=working,

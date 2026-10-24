@@ -44,12 +44,20 @@ Sources (why each is a real failure):
 - notifications (`notification_outbox`, `notifications._dispatch`): FAILED, UNCERTAIN (reconciled at
   most 5 times, then said to have stopped, F7), and PENDING rows carrying an error.
 
-Codes never show: each failure has plain words, and an unknown worker or code gets generic ones.
+Each failure has a plain-words headline and next step (an unknown worker or code gets generic ones).
+Under it (owner, 2026-10-23: "why dont we display the actual failure reasons?") are its recorded
+causes: plain words where a wording exists, the code, the recorded error (redacted, bounded), where it
+applies, how often and when, and "See its log", which opens that run's own records and files
+(`run_view`: task events, research step logs, a session folder's stderr / output / trace tail and the
+stream lines tagged with the run, `log.tagged`). The contact finder's failed and unfinished runs are
+listed too (`finder_failures`). Report a problem still sends the item codes only.
 Indexes these reads use are created by the writers' schema setup (workflow_tasks.initialize,
 applications.initialize, outreach.initialize, orchestrator.connect).
 """
 
+import contextvars
 import datetime as dt
+import json
 import os
 import re
 import stat
@@ -161,15 +169,158 @@ def _plural(count, words):
 
 
 def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=None, detail=None, log=None, href=None,
-          job=None, moments=(), slots=(), code=None):
+          job=None, moments=(), slots=(), code=None, reasons=None, refs=None, log_href=None):
     """One failure. `todo` always says what happens next or what to do; `fix` is {"label", "href"}.
     `job` names the scheduler job ("run", "research", "applications") whose exit this failure
     explains, and `moments` when each such failure happened (F1: one item per real failure). `code` is a
-    short program code for the Report a problem summary (report_problem); it is never shown here."""
+    short program code for the Report a problem summary (report_problem); it is never shown here.
+    `reasons` (a Causes, 2026-10-23) are the recorded causes shown under the headline: at most
+    REASON_LIMIT distinct ones, newest first, each {"words", "code", "count", "at", "where", "error",
+    "log_href"}, plus `reasons_more` and `reasons_href` (the Logs view of that component). `refs` are
+    the item's own ids (task, research run, finder run, job key, round slot) and `log_href` opens that
+    run's own records and files (`run_view`)."""
+    shown, more = reasons.top() if reasons is not None else ([], 0)
     return {"group": group, "text": text, "todo": todo, "at": at, "count": max(1, int(count or 1)), "retry_at": retry_at,
             "you": you, "fix": fix, "detail": detail, "log": log or [], "href": href, "job": job,
             "moments": [moment for moment in moments if moment is not None] or ([at] if job and at else []),
-            "slots": list(slots), "code": code}
+            "slots": list(slots), "code": code, "reasons": shown, "reasons_more": more,
+            "reasons_href": reasons.more_href if reasons is not None else None, "refs": dict(refs or {}),
+            "log_href": log_href or (shown[0]["log_href"] if shown else None)}
+
+
+# --- Recorded causes (2026-10-23: "why dont we display the actual failure reasons?") ---------------
+
+REASON_LIMIT = 3
+ERROR_CHARACTERS = 300
+# Plain words for codes the Applications page has no wording for; any other code shows alone.
+CAUSE_WORDS = {
+    "WORKER_EXCEPTION": "The step stopped with an error in Sidedoor's code.",
+    "SUBSCRIPTION_EXECUTOR_FAILED": "The AI call failed.",
+    "SUBSCRIPTION_EXECUTOR_UNAVAILABLE": "The AI program could not be started.",
+    "CLASSIFICATION_TIMEOUT": "The AI took too long to answer.",
+    "CLASSIFICATION_INTERRUPTED": "The AI call was interrupted (Sidedoor was closed or restarted).",
+    "CLASSIFICATION_OUTPUT_MISSING": "The AI gave no answer.",
+    "CLASSIFICATION_OUTPUT_EXCEEDS_LIMIT": "The AI's answer was too long.",
+    "CLASSIFICATION_FIELD_TOO_LONG": "Part of the AI's answer was too long.",
+    "CLASSIFICATION_LOCAL_VALIDATION_FAILED": "The AI's answer did not pass Sidedoor's checks.",
+    "OUTREACH_AI_TRANSIENT_FAILURE": "The AI check could not finish.",
+    "LINKEDIN_CONTACTS_INTERRUPTED": "The search was interrupted (Sidedoor was closed or restarted).",
+    "LINKEDIN_CONTACTS_RESULT_BINDING_INVALID": "The search's answer did not match what was asked.",
+    "LINKEDIN_CONTACTS_LIMITS_INVALID": "The search went past its limits.",
+    "LINKEDIN_CONTACTS_CONTACT_CONTROL_CLICKED": "The search clicked a button that contacts someone, so its result was thrown away.",
+    "LINKEDIN_CONTACTS_UNKNOWN": "The search could not finish on LinkedIn.",
+    "FINDER_RETRIES_EXHAUSTED": "The search failed 3 times for this research run, so Sidedoor stopped trying.",
+    "RESEARCH_DEADLINE_EXHAUSTED": "The run hit its time limit before this industry finished.",
+    "RECOVERY_DECISIONS_EXHAUSTED": "Its steps kept failing and recovery gave up.",
+    "RECOVERY_DECISION_FAILED": "Working out another way to search failed.",
+    "NO_SUPPORTED_ALTERNATIVE": "No other way to search was left to try.",
+    "NO_SUPPORTED_RECOVERY_EXECUTOR": "No way to recover was available.",
+    "RECOVERY_UNAVAILABLE": "Recovery could not run.",
+    "RESEARCH_INTERRUPTED": "It was stopped before it finished (Sidedoor was closed or restarted).",
+    "RESEARCH_FAILED": "It stopped with an error.",
+    "NOTIFICATION_RECONCILIATION_EXHAUSTED": "Sidedoor checked 5 times and could not confirm delivery.",
+}
+
+
+def cause_words(code):
+    root = _code(code)
+    return CAUSE_WORDS.get(root) or applications_page.CODE_WORDS.get(root)
+
+
+def _bounded(text, secrets):
+    if text is None or text == "":
+        return None
+    text = redact_text(text, secrets)
+    return text if len(text) <= ERROR_CHARACTERS else text[:ERROR_CHARACTERS - 1] + "\u2026"
+
+
+def run_href(kind, ident):
+    return "/failures?" + urllib.parse.urlencode({"run": "%s:%s" % (kind, ident)}) + "#run"
+
+
+_ZONE = contextvars.ContextVar("failures_page_zone", default=None)   # the user's zone, set by gather / the route
+
+
+def local_day(moment, zone=None):
+    """The date of `moment` in the user's configured time zone (the dates the page shows), else UTC."""
+    zone = zone or _ZONE.get()
+    return (moment.astimezone(zone) if zone else moment).date().isoformat()
+
+
+def logs_href(component, moment=None):
+    query = {"component": component}
+    if moment is not None:
+        query["day"] = local_day(moment)
+    return "/failures?" + urllib.parse.urlencode(query) + "#logs"
+
+
+class Causes:
+    """Distinct recorded causes of one item, by code root and where (company, industry, person, job)."""
+
+    def __init__(self, secrets=(), more_href=None):
+        self.secrets, self.more_href, self.found = secrets, more_href, {}
+
+    def add(self, code, at=None, error=None, where=None, log_href=None):
+        root = _code(code)[:120] or "UNKNOWN"
+        where = str(where)[:120] if where else None
+        entry = self.found.setdefault((root, where), {"words": cause_words(root), "code": root, "count": 0, "at": None,
+                                                      "where": where, "error": None, "log_href": None})
+        entry["count"] += 1
+        if entry["at"] is None or (at is not None and at >= entry["at"]):
+            entry["at"] = at or entry["at"]
+            entry["error"] = _bounded(error, self.secrets) or entry["error"]
+            entry["log_href"] = log_href or entry["log_href"]
+
+    def top(self, limit=REASON_LIMIT):
+        oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        ordered = sorted(self.found.values(), key=lambda entry: entry["at"] or oldest, reverse=True)
+        return ordered[:limit], max(0, len(ordered) - limit)
+
+
+def _error_text(value):
+    """The recorded error text of a result or detail dict: its error, the last of its errors, or where
+    Sidedoor's code raised (`orchestrator.failure_detail`) and the end of a failed AI call's stderr."""
+    if not isinstance(value, dict):
+        return None
+    parts = []
+    for key in ("error", "last_error", "message", "reason"):
+        if isinstance(value.get(key), str) and value[key].strip():
+            parts.append(value[key])
+            break
+    for key in ("errors", "launch_errors"):
+        listed = value.get(key)
+        if not parts and isinstance(listed, list) and listed and isinstance(listed[-1], dict):
+            if isinstance(listed[-1].get("error"), str):
+                parts.append(listed[-1]["error"])
+    if value.get("error_type") and not parts:
+        parts.append(str(value["error_type"]) + (" at " + str(value["raised_at"]) if value.get("raised_at") else ""))
+    failure = value.get("executor_failure") if isinstance(value.get("executor_failure"), dict) else value.get("executor")
+    if isinstance(failure, dict):
+        tail = failure.get("stderr_tail") if isinstance(failure.get("stderr_tail"), list) else []
+        bits = ["exit %s" % failure["exit_code"]] if failure.get("exit_code") is not None else []
+        if failure.get("http_status") is not None:
+            bits.append("HTTP %s" % failure["http_status"])
+        if isinstance(failure.get("error"), str):
+            bits.append(failure["error"])
+        if tail:
+            bits.append(str(tail[-1]))
+        if bits:
+            parts.append("AI call: " + "; ".join(bits))
+    return " ".join(parts) or None
+
+
+def _result_code(value, fallback):
+    if isinstance(value, dict):
+        for key in ("blocker", "code", "error_code", "blocker_code"):
+            if isinstance(value.get(key), str) and value[key]:
+                return value[key]
+        not_sent = value.get("not_sent")
+        if isinstance(not_sent, dict) and isinstance(not_sent.get("reason"), str):
+            return not_sent["reason"]
+        error = value.get("error")
+        if isinstance(error, str) and re.match(r"[A-Za-z_][A-Za-z0-9_]*: ", error):
+            return error.split(":", 1)[0]
+    return fallback
 
 
 def _at(fmt, moment):
@@ -203,15 +354,17 @@ def worker_words(worker):
 TRY_EVENTS = ("RETRY_WAIT", "BLOCKED", "UNCERTAIN", "EXHAUSTED")
 
 
-def _counts(reader, row, since):
+def _counts(reader, row, since, out=None):
     """(failed in the window, failed ever, waits ever) from the task's own events (F8/F12).
     `workflow_tasks.finish` records the blocker with a RETRY_WAIT/EXHAUSTED event: one with a
     budget/capacity blocker is a wait, not a try. claim's own EXHAUSTED ({}) ended no try. An older
     event without the blocker counts as a failure, except the latest one when the task's current
-    blocker is a wait (it is that wait)."""
+    blocker is a wait (it is that wait). `out` (a list) collects (code, moment, error text) of each
+    failed try in the window."""
     events = reader.rows("SELECT id,at,event,detail FROM workflow_task_events WHERE task_id=? ORDER BY id",
                          (row["task_id"],), "workflow_task_events")
     failed = ever = waited = 0
+    causes = []
     for index, event in enumerate(events):
         kind = event["event"]
         if kind in WAIT_EVENTS:
@@ -234,12 +387,19 @@ def _counts(reader, row, since):
         moment = overview._utc(event["at"])
         if moment is not None and moment >= since:
             failed += 1
+            result = (detail or {}).get("result") if isinstance((detail or {}).get("result"), dict) else {}
+            code = (detail or {}).get("blocker") if isinstance(detail, dict) and detail.get("blocker") else None
+            if code is None and kind == "UNCERTAIN":
+                code = "LEASE_EXPIRED_MID_RUN"
+            causes.append((code or _result_code(result, row["blocker"] or kind), moment, _error_text(result)))
+    if out is not None:
+        out.extend(causes)
     return failed, ever, waited
 
 
-def task_failures(reader, now, fmt):
+def task_failures(reader, now, fmt, secrets=()):
     """Tasks with a real failed try in the window (F8/F12: counted from the failure events
-    themselves, never from waits), one item per worker and kind."""
+    themselves, never from waits), one item per worker and kind, with the tries' recorded causes."""
     since = _since(now)
     rows = reader.rows("""SELECT t.task_id, t.worker, t.status, t.blocker, t.next_at, t.updated_at, t.effect, t.parent_run_id
         FROM workflow_tasks t
@@ -249,7 +409,8 @@ def task_failures(reader, now, fmt):
     grouped = {}
     for row in _recent(rows, since, "updated_at"):
         status = row["status"]
-        failed, ever, waited = _counts(reader, row, since)
+        tries = []
+        failed, ever, waited = _counts(reader, row, since, tries)
         if status == "RETRY_WAIT":
             if not failed:
                 continue   # only waits in the window: clears on its own
@@ -262,10 +423,18 @@ def task_failures(reader, now, fmt):
             kind = "crashed"
         worker = str(row["worker"] or "")
         key = (worker_words(worker), kind, worker in HOURLY_STEPS)
+        component = "applications" if worker in ("applications", "agent-investigation") else "launchd"
         entry = grouped.setdefault(key, {"count": 0, "at": None, "retry_at": None, "moments": [], "job": None, "slots": [],
-                                         "code": "%s:%s" % (kind.upper(), worker.split(":", 1)[0])})
+                                         "code": "%s:%s" % (kind.upper(), worker.split(":", 1)[0]), "tasks": [],
+                                         "causes": Causes(secrets, logs_href(component))})
         entry["count"] += max(1, failed)
         moment = overview._utc(row["updated_at"])
+        link = run_href("task", row["task_id"])
+        for code, at, error in tries:
+            entry["causes"].add(code, at, error, log_href=link)
+        if not tries:   # ran out of time, or a crash recorded before events kept the cause
+            entry["causes"].add(row["blocker"] or kind.upper(), moment, log_href=link)
+        entry["tasks"].append((moment, row["task_id"]))
         entry["at"] = max(filter(None, (entry["at"], moment)), default=None)
         if kind == "crashed" and worker in HOURLY_STEPS:
             entry["job"] = "applications" if worker == "applications" else "run"
@@ -304,8 +473,12 @@ def task_failures(reader, now, fmt):
             text = "%s stopped with an error." % name
             todo = ("Nothing you need to do. It runs again on Sidedoor's next round." if hourly
                     else "Nothing you need to do. Sidedoor moves on to its other work.")
+        oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        newest = max(entry["tasks"], key=lambda pair: pair[0] or oldest)[1]
         found.append(_item(group, text, todo, entry["at"], entry["count"], entry["retry_at"], job=entry["job"],
-                           moments=entry["moments"], slots=entry["slots"], code=entry["code"]))
+                           moments=entry["moments"], slots=entry["slots"], code=entry["code"], reasons=entry["causes"],
+                           refs={"task_ids": [task for _, task in entry["tasks"]][:20]},
+                           log_href=run_href("task", newest)))
     return found
 
 
@@ -340,7 +513,8 @@ def cycle_failures(reader, now, crashed_slots=()):
             slots.append(str(row["slot"]))
         if matching:
             found.append(_item("scheduler", text, "Nothing you need to do. It runs again at the start of the next hour.",
-                               max(matching), len(matching), job="run", moments=matching, slots=slots, code="ROUND_" + state))
+                               max(matching), len(matching), job="run", moments=matching, slots=slots, code="ROUND_" + state,
+                               refs={"slots": slots}, log_href=logs_href("launchd", max(matching))))
     return found
 
 
@@ -390,7 +564,9 @@ def scheduler_failures(loop, config, now, fmt, log_tail=None, secrets=()):
             todo, fix = "It runs again once Sidedoor is running. Start it on Overview.", {"label": "Open Overview", "href": "/"}
         stem = scheduler_loop.LOG_NAMES.get(job)
         log = log_tail(stem + ".stderr.log") if log_tail and stem else None
-        entry = _item("scheduler", text, todo, moment, fix=fix, log=log, code="JOB_EXIT:" + str(job))
+        component = {"run": "launchd"}.get(job, job if job in ("research", "applications") else "sidedoor")
+        entry = _item("scheduler", text, todo, moment, fix=fix, log=log, code="JOB_EXIT:" + str(job),
+                      refs={"job": job}, log_href=logs_href(component, moment))
         entry["exited"] = job
         found.append(entry)
     if loop.get("last_error"):
@@ -422,7 +598,45 @@ def _day_label(day):
     return "%s %s %d" % (date.strftime("%a"), date.strftime("%b"), date.day)
 
 
-def research_failures(reader, config, now, fmt):
+def _research_label(industry):
+    import parallel_research
+    return parallel_research._label(industry)
+
+
+def research_causes(result, attempt_id, at, secrets=()):
+    """One cause per industry that did not complete (its state or abandonment reason, the code, its
+    error), and the run's own error; each links to that industry's step logs (`run_view`)."""
+    causes = Causes(secrets, logs_href("research", at))
+    result = result if isinstance(result, dict) else {}
+    industries = result.get("industries")
+    grouped = {}   # (code, error) -> [(name, link)]: one line for industries that stopped the same way
+    for industry in industries if isinstance(industries, list) else []:
+        if not isinstance(industry, dict) or str(industry.get("state") or "").upper() in ("COMPLETE", "WAITING_SHARED_RESEARCH"):
+            continue
+        name = str(industry.get("industry") or "An industry")
+        state = str(industry.get("state") or "UNKNOWN").upper()
+        code = industry.get("abandonment_reason") or ("RESEARCH_" + state if state in ("INTERRUPTED", "FAILED") else state)
+        label = None
+        try:
+            label = _research_label(name) if industry.get("industry") else None
+        except Exception:
+            pass
+        link = run_href("research", "%s:%s" % (attempt_id, label) if label else attempt_id) if attempt_id else None
+        grouped.setdefault((_code(code), str(industry.get("error") or "")), []).append((name, link))
+    for (code, error), names in grouped.items():
+        if len(names) == 1:
+            causes.add(code, at, error or None, where=names[0][0], log_href=names[0][1])
+        else:
+            shown = ", ".join(name for name, _ in names[:6]) + (", ..." if len(names) > 6 else "")
+            causes.add(code, at, error or None, where="%d industries (%s)" % (len(names), shown),
+                       log_href=run_href("research", attempt_id) if attempt_id else None)
+    if result.get("error"):
+        causes.add("RESEARCH_" + str(result.get("state") or "FAILED").upper(), at, result.get("error"),
+                   log_href=run_href("research", attempt_id) if attempt_id else None)
+    return causes
+
+
+def research_failures(reader, config, now, fmt, secrets=()):
     zone = config.get("timezone") or "America/Los_Angeles"
     hour = config.get("research_hour", workflow_tasks.day_start_hour(config))
     today = workflow_tasks.service_date(now, zone, hour)
@@ -440,6 +654,9 @@ def research_failures(reader, config, now, fmt):
         tries = max(1, (day["attempts"] or 0) - (day["compute_wait_attempts"] or 0))
         at = overview._utc(attempt[0]["started_at"]) if attempt else None
         reason = _research_reason(result)
+        causes = research_causes(result, day["attempt_id"], at, secrets)
+        extra = {"reasons": causes, "refs": {"research_id": day["attempt_id"], "day": day["day"]},
+                 "log_href": run_href("research", day["attempt_id"]) if day["attempt_id"] else None}
         if day["day"] == today:
             text = "Research didn't finish today: %s." % reason
             retry = overview._utc(day["next_retry_at"]) if day["next_retry_at"] else None
@@ -452,11 +669,11 @@ def research_failures(reader, config, now, fmt):
                 retry = None
                 todo = ("It used all of today's tries. Nothing you need to do: research runs again %s."
                         % _at(fmt, workflow_tasks.next_day_start(now, zone, hour)))
-            found.append(_item("research", text, todo, at, tries, retry, job="research"))
+            found.append(_item("research", text, todo, at, tries, retry, job="research", **extra))
         else:
             found.append(_item("research", "Research didn't finish on %s: %s." % (_day_label(day["day"]), reason),
                                "Nothing you need to do. That day is over; research runs again every day.", at, tries,
-                               job="research"))
+                               job="research", **extra))
     return found
 
 
@@ -466,7 +683,46 @@ def _job_link(key):
     return "/applications?" + urllib.parse.urlencode({"job": key})
 
 
-def application_failures(reader, now, fmt):
+ANSWERING_ATTEMPTS = 3   # the latest answering attempts whose stuck questions are shown
+
+
+def question_name(key):
+    """A question key's readable part ("unidentified-question:office_attendance_2_3:529c..." ->
+    "office attendance 2 3"): the name before its fingerprint, never the answer."""
+    parts = str(key or "").split(":")
+    name = parts[1] if len(parts) >= 3 else parts[0]
+    return name.replace("_", " ").strip()[:80] or "a question"
+
+
+def answering_causes(reader, job_key, limit=ANSWERING_ATTEMPTS):
+    """[(question, why, at)] from the job's latest answering attempts (application_answering_attempts
+    audit): each question left unknown with its judge or repair reason, and each refused one. Newest
+    attempt first; one entry per question."""
+    found, seen = [], set()
+    rows = reader.rows("SELECT created_at,outcome,audit FROM application_answering_attempts WHERE job_key=? "
+                       "ORDER BY created_at DESC LIMIT ?", (job_key, limit), "application_answering_attempts")
+    for row in rows:
+        audit = overview._json(row["audit"]) or {}
+        at = overview._utc(row["created_at"])
+        verdicts = {}
+        for verdict in audit.get("verdicts") or []:
+            if isinstance(verdict, dict) and verdict.get("question_key"):
+                verdicts[verdict["question_key"]] = verdict
+        refused = {item.get("question_key"): item.get("reason") for item in audit.get("refused") or []
+                   if isinstance(item, dict)}
+        for key in list(audit.get("unknown") or []) + list(refused):
+            if not isinstance(key, str) or key in seen:
+                continue
+            seen.add(key)
+            verdict = verdicts.get(key, {})
+            judge = verdict.get("judge") if isinstance(verdict.get("judge"), dict) else {}
+            why = (refused.get(key) or verdict.get("reason") or judge.get("reason") or verdict.get("outcome")
+                   or verdict.get("status") or row["outcome"])
+            found.append((question_name(key), str(why), at))
+    return found
+
+
+def application_failures(reader, now, fmt, secrets=()):
     """Owner holds (Needs you, as Overview counts them) and held jobs whose blocker is a failed
     attempt. Words and next steps are the Applications page's own (`applications_page.job_view`).
     Given-up jobs are not listed here: they live under Applications' "Given up" (owner, D5)."""
@@ -475,12 +731,14 @@ def application_failures(reader, now, fmt):
     owner_keys = set(owner)
     asked = {row[0] for row in overview._pending_questions(reader, now)}
     codes = application_failure_codes()
-    counts = {}
-    for key, detail in reader.rows("SELECT job_key,detail FROM application_events WHERE event IN ('BLOCKED','RETRY_WAIT') "
-                                   "AND at>=?", (overview._prefilter(since),), "application_events"):
+    counts, recorded_causes = {}, {}
+    for key, detail, moment in reader.rows("SELECT job_key,detail,at FROM application_events WHERE event IN ('BLOCKED','RETRY_WAIT') "
+                                           "AND at>=?", (overview._prefilter(since),), "application_events"):
         recorded = overview._json(detail) or {}
         if _code(recorded.get("code")) in codes:   # F8: only failed attempts count, never waits or holds
             counts[key] = counts.get(key, 0) + 1
+            recorded_causes.setdefault(key, []).append((recorded.get("code"), overview._utc(moment), _error_text(recorded)
+                                                        or (recorded.get("next_action") if isinstance(recorded.get("next_action"), str) else None)))
     rows = reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,updated_at,receipt FROM application_jobs "
                        "WHERE state IN ('BLOCKED','RETRY_WAIT') ORDER BY updated_at DESC", (), "application_jobs")
     found = []
@@ -495,15 +753,27 @@ def application_failures(reader, now, fmt):
         link = {"label": "Open application", "href": _job_link(key)}
         at = overview._utc(row["updated_at"])
         code = _code(row["blocker"]) or "APPLICATION_" + str(row["state"])
+        causes = Causes(secrets, logs_href("applications", at))
+        extra = {"reasons": causes, "refs": {"job_key": key}, "log_href": run_href("job", key)}
+        for recorded, moment, error in recorded_causes.get(key, []):
+            causes.add(recorded, moment, error, where=name, log_href=extra["log_href"])
+        if code == "ANSWERING_RETRY":
+            # Why each question is still open (the answering audit), not the event's next action.
+            causes = Causes(secrets, causes.more_href)
+            extra["reasons"] = causes
+            for question, why, moment in answering_causes(reader, key):
+                causes.add("ANSWERING_RETRY", moment, why, where="Question: " + question, log_href=extra["log_href"])
+        if not causes.found:
+            causes.add(row["blocker"] or code, at, where=name, log_href=extra["log_href"])
         if view["needs_you"]:
             found.append(_item("applications", "%s: %s" % (name, view["problem"]), view["todo"], at, you=True,
                                fix={"label": view["todo_label"], "href": view["todo_href"]} if view["todo_href"] else link,
-                               href=_job_link(key), code=code))
+                               href=_job_link(key), code=code, **extra))
         else:
             retry = view["next_at"]
             found.append(_item("applications", "%s: %s" % (name, view["problem"]), "Nothing you need to do. " + view["todo"],
                                at, counts.get(key, 1), retry if retry is not None and retry > now else None, fix=link,
-                               href=_job_link(key), code=code))
+                               href=_job_link(key), code=code, **extra))
     return found
 
 
@@ -523,12 +793,31 @@ def reply_retry_state(result):
     return "REPLY_RETRYING" if attempts < reply_execution.MAX_SEND_ATTEMPTS and not stopped else "UNCERTAIN_NO_RETRY"
 
 
-def outreach_failures(reader, now):
+def _intent_errors(reader, action_ids):
+    """The failed campaign writes of these actions (`outreach_campaign._record_failure`): {action_id: result}."""
+    if not action_ids:
+        return {}
+    ids = sorted(action_ids)[:500]
+    rows = reader.rows("SELECT action_id,result FROM outreach_campaign_intents WHERE state IN ('RETRY_WAIT','WRITE_FAILED') "
+                       "AND action_id IN (%s)" % ",".join("?" * len(ids)), ids, "outreach_campaign_intents")
+    return {row["action_id"]: overview._json(row["result"]) or {} for row in rows}
+
+
+def _person(payload, result=None):
+    for value in (payload or {}, result or {}):
+        for key in ("recipient", "name", "profile", "company"):
+            if isinstance(value.get(key), str) and value[key].strip():
+                return value[key]
+    return None
+
+
+def outreach_failures(reader, now, secrets=()):
     since = _since(now)
     found = []
     states = ACTION_RETRYING + ACTION_FINAL
-    rows = reader.rows("SELECT state,payload,claimed_at,result FROM outreach_actions WHERE state IN (%s)" % ",".join("?" * len(states)),
-                       states, "outreach_actions")
+    rows = reader.rows("SELECT action_id,state,payload,claimed_at,result FROM outreach_actions WHERE state IN (%s)"
+                       % ",".join("?" * len(states)), states, "outreach_actions")
+    writes = _intent_errors(reader, {row["action_id"] for row in rows if row["state"] in ("WRITE_RETRY_WAIT", "WRITE_FAILED")})
     grouped = {}
     for row in rows:
         at = overview._utc(row["claimed_at"]) if row["claimed_at"] else None
@@ -545,9 +834,13 @@ def outreach_failures(reader, now):
         if (state in ACTION_FINAL or state == "CONTACTED_ELSEWHERE") and (at is None or at < since):
             continue
         words = PURPOSE_WORDS.get(str(payload.get("purpose") or ""), MESSAGE_WORDS)
-        entry = grouped.setdefault((state, words), {"count": 0, "at": None})
+        entry = grouped.setdefault((state, words), {"count": 0, "at": None, "causes": Causes(secrets, logs_href("launchd", at)),
+                                                    "ids": []})
         entry["count"] += 1
         entry["at"] = max(filter(None, (entry["at"], at)), default=None)
+        result = writes.get(row["action_id"]) or overview._json(row["result"]) or {}
+        entry["causes"].add(_result_code(result, state), at, _error_text(result), where=_person(payload, result))
+        entry["ids"].append(row["action_id"])
     for (state, words), entry in grouped.items():
         count = entry["count"]
         if state == "INVITE_RETRY_WAIT":
@@ -578,8 +871,9 @@ def outreach_failures(reader, now):
             if words == PURPOSE_WORDS["REPLY"]:
                 todo = ("Nothing you need to do. Sidedoor keeps checking the conversation but won't send %s again, so "
                         "nobody gets a reply twice." % ("it" if count == 1 else "them"))
-        found.append(_item("outreach", text, todo, entry["at"], count, code=state))
-    launches = reader.rows("SELECT state,claimed_at FROM outreach_attempts WHERE state IN ('LAUNCH_RETRY_WAIT','LAUNCH_FAILED')",
+        found.append(_item("outreach", text, todo, entry["at"], count, code=state, reasons=entry["causes"],
+                           refs={"action_ids": entry["ids"][:20]}))
+    launches = reader.rows("SELECT identity,state,claimed_at,result FROM outreach_attempts WHERE state IN ('LAUNCH_RETRY_WAIT','LAUNCH_FAILED')",
                            (), "outreach_attempts")
     for state, text, todo in (("LAUNCH_RETRY_WAIT", "didn't start", "Nothing you need to do. Sidedoor will try again on its own, up to 3 tries."),
                               ("LAUNCH_FAILED", "couldn't be started after 3 tries", "Nothing you need to do. Sidedoor won't try these again.")):
@@ -588,22 +882,114 @@ def outreach_failures(reader, now):
             matching = _recent(matching, since, "claimed_at")
         if matching:
             at = max(filter(None, (overview._utc(row["claimed_at"]) for row in matching)), default=None)
+            causes = Causes(secrets, logs_href("launchd", at))
+            for row in matching:
+                result = overview._json(row["result"]) or {}
+                causes.add(_result_code(result, state), overview._utc(result.get("error_at")) or overview._utc(row["claimed_at"]),
+                           _error_text(result), where=_person(result) or row["identity"])
             found.append(_item("outreach", "%s %s." % (_plural(len(matching), ("invitation campaign", "invitation campaigns")), text),
-                               todo, at, len(matching), code=state))
+                               todo, at, len(matching), code=state, reasons=causes,
+                               refs={"identities": [row["identity"] for row in matching][:20]}))
+    return found
+
+
+# --- Contact finder (linkedin_contacts, linkedin_contact_runs) ------------------------------------------------
+
+def _finder_tries(reader):
+    """(key_of, settled, tries) with the runtime's own grouping (`linkedin_contacts._finder_runs`): keyed
+    by (research plan id, company), a run's research_result_id mapped to its rw_results plan, so a
+    settled company never shows as failing and "N of 3" is the count FINDER_RETRIES_EXHAUSTED uses."""
+    import linkedin_contacts
+    plans = {row["id"]: row["plan_id"] for row in reader.rows("SELECT id,plan_id FROM rw_results", (), "rw_results")}
+
+    def key_of(value, company):
+        return (plans.get(value.get("research_result_id")) or value.get("research_plan_id"), company)
+
+    if not reader.has("linkedin_contact_runs", "rw_results"):
+        return key_of, set(), {}
+    settled, tries, _ = linkedin_contacts._finder_runs(reader.database)
+    return key_of, settled, tries
+
+
+def finder_failures(reader, now, fmt, secrets=()):
+    """Contact-finder runs in the window that failed (error, interrupted, refused results) or could not
+    finish (outcome UNKNOWN, with the model's own reason and its research_failure_diagnosis), one item
+    per company and research run, with the tries used out of 3. Waits never get a run row
+    (DEFERRED_BROWSER_BUSY, DEFERRED_COMPUTE) or are PROVIDER_WAIT rows and stay out; FOUND and
+    NONE_FOUND settle a company and are not failures."""
+    import linkedin_contacts
+    since = _since(now)
+    rows = reader.rows("SELECT run_id,company,started_at,state,finished_at,result FROM linkedin_contact_runs WHERE started_at>=? "
+                       "AND state IN ('FAILED','COMPLETE')", (overview._prefilter(since),), "linkedin_contact_runs")
+    key_of, settled_keys, tries = _finder_tries(reader) if rows else (lambda value, company: (None, company), set(), {})
+    grouped = {}
+    for row in _recent(rows, since, "started_at"):
+        value = overview._json(row["result"]) or {}
+        if row["state"] == "COMPLETE" and value.get("outcome") != "UNKNOWN":
+            continue
+        if row["state"] == "FAILED" and linkedin_contacts._provider_refused(row):
+            continue   # the provider refused for usage: a wait
+        key = key_of(value, row["company"])
+        name = str(value.get("company") or row["company"])
+        at = overview._utc(row["finished_at"]) or overview._utc(row["started_at"])
+        entry = grouped.setdefault(key, {"name": name, "at": None, "count": 0, "runs": [],
+                                         "causes": Causes(secrets, logs_href("launchd", at))})
+        entry["count"] += 1
+        entry["at"] = max(filter(None, (entry["at"], at)), default=None)
+        entry["runs"].append((at, row["run_id"]))
+        link = run_href("finder", row["run_id"])
+        if row["state"] == "COMPLETE":
+            reason = " ".join(str(part) for part in (value.get("reason"), ("Why research could not: %s" % value[
+                "research_failure_diagnosis"]) if value.get("research_failure_diagnosis") else None) if part)
+            entry["causes"].add("LINKEDIN_CONTACTS_UNKNOWN", at, reason, where=name, log_href=link)
+        else:
+            said = " ".join(str(part) for part in (value.get("error_type"), value.get("error"),
+                                                    "at " + value["raised_at"] if value.get("raised_at") else None) if part)
+            entry["causes"].add(value.get("blocker") or "LINKEDIN_CONTACTS_" + str(value.get("error_type") or "FAILED"), at,
+                                said or None, where=name, log_href=link)
+    found = []
+    for key, entry in grouped.items():
+        settled = key in settled_keys
+        used = tries.get(key, 0) if key[0] is not None else entry["count"]   # no plan: the runtime never schedules it
+        newest = max(entry["runs"], key=lambda pair: pair[0] or dt.datetime.min.replace(tzinfo=dt.timezone.utc))[1]
+        if settled:
+            continue   # a later run found people (or found nobody relevant): settled
+        if used >= linkedin_contacts.MAX_FINDER_TRIES:
+            entry["causes"].add("FINDER_RETRIES_EXHAUSTED", entry["at"], where=entry["name"])
+            text = "Finding people to contact at %s failed %d of %d tries, so Sidedoor stopped trying." % (
+                entry["name"], min(used, linkedin_contacts.MAX_FINDER_TRIES), linkedin_contacts.MAX_FINDER_TRIES)
+            todo = "Nothing you need to do. The next research run that covers this company tries again."
+        else:
+            text = "Finding people to contact at %s didn't work (%d of %d tries used)." % (
+                entry["name"], used, linkedin_contacts.MAX_FINDER_TRIES)
+            todo = "Nothing you need to do. Sidedoor tries again on a later hourly round."
+        found.append(_item("outreach", text, todo, entry["at"], entry["count"], code="FINDER_FAILED", reasons=entry["causes"],
+                           refs={"finder_run_ids": [run for _, run in entry["runs"]], "company": key[1],
+                                 "research_plan_id": key[0]}, log_href=run_href("finder", newest)))
     return found
 
 
 # --- Notifications --------------------------------------------------------------------------------------------
 
-def notification_failures(reader, now, fmt):
+def notification_failures(reader, now, fmt, secrets=()):
     since = _since(now)
     columns = {row[1] for row in reader.rows("PRAGMA table_info(notification_outbox)", (), "notification_outbox")}
     checks = "reconcile_attempts" if "reconcile_attempts" in columns else "0"
-    rows = reader.rows("SELECT state,next_at,last_error,attempts,updated_at," + checks + " AS checks FROM notification_outbox "
+    transport = ",".join(("%s AS %s" % (name, name)) if name in columns else "NULL AS %s" % name
+                         for name in ("send_error", "reconcile_error"))
+    rows = reader.rows("SELECT state,next_at,last_error,attempts,updated_at," + transport + "," + checks + " AS checks FROM notification_outbox "
                        "WHERE state IN ('FAILED','UNCERTAIN') OR (state='PENDING' AND last_error IS NOT NULL AND attempts>0)",
                        (), "notification_outbox")
     words = ("notification", "notifications")
     found = []
+
+    def causes(rows):
+        found = Causes(secrets, logs_href("launchd"))
+        for row in rows:
+            # The transport's own code first (notifications._dispatch: BRIDGE_HTTP_400, RELAY_SEND_...).
+            found.add(row["reconcile_error"] or row["send_error"] or row["last_error"] or row["state"],
+                      overview._utc(row["updated_at"]))
+        return found
     failed = _recent([row for row in rows if row["state"] == "FAILED"], since, "updated_at")
     unsure = _recent([row for row in rows if row["state"] == "UNCERTAIN"], since, "updated_at")   # F7: the window
     # notifications._dispatch reconciles an UNCERTAIN row at most 5 times, then stops for good.
@@ -616,26 +1002,26 @@ def notification_failures(reader, now, fmt):
         found.append(_item("connections", "%s couldn't be delivered." % _plural(len(failed), words),
                            "Nothing you need to do. Sidedoor stopped trying; anything that needs you also shows on this dashboard.",
                            max(filter(None, (overview._utc(row["updated_at"]) for row in failed)), default=None), len(failed),
-                           code="NOTIFICATION_FAILED"))
+                           code="NOTIFICATION_FAILED", reasons=causes(failed)))
     if unsure:
         found.append(_item("connections", "Sidedoor couldn't confirm whether %s arrived." % _plural(len(unsure), words),
                            "Nothing you need to do. Sidedoor checks before sending again, so nothing arrives twice.",
                            max(filter(None, (overview._utc(row["updated_at"]) for row in unsure)), default=None), len(unsure),
-                           code="NOTIFICATION_UNCERTAIN"))
+                           code="NOTIFICATION_UNCERTAIN", reasons=causes(unsure)))
     if stopped:
         found.append(_item("connections", "Sidedoor couldn't confirm whether %s arrived, and has stopped checking."
                            % _plural(len(stopped), words),
                            "Nothing you need to do. Sidedoor won't send %s again; anything that needs you also shows on "
                            "this dashboard." % ("it" if len(stopped) == 1 else "them"),
                            max(filter(None, (overview._utc(row["updated_at"]) for row in stopped)), default=None), len(stopped),
-                           code="NOTIFICATION_UNCONFIRMED"))
+                           code="NOTIFICATION_UNCONFIRMED", reasons=causes(stopped)))
     if waiting:
         retry = min(filter(lambda moment: moment is not None and moment > now,
                            (overview._utc(row["next_at"]) if row["next_at"] else None for row in waiting)), default=None)
         found.append(_item("connections", "%s didn't go through yet." % _plural(len(waiting), words),
                            "Nothing you need to do. Sidedoor will try again %s." % (_at(fmt, retry) if retry else "on its own"),
                            max(filter(None, (overview._utc(row["updated_at"]) for row in waiting)), default=None),
-                           len(waiting), retry, code="NOTIFICATION_RETRY"))
+                           len(waiting), retry, code="NOTIFICATION_RETRY", reasons=causes(waiting)))
     return found
 
 
@@ -699,7 +1085,19 @@ def explain_exits(sections, loop_items, reader=None):
             newest["log"] = entry["log"]
 
 
-def gather(database, config, loop, now=None, log_tail=None, secrets=()):
+def codex_failures(home=None, finished=False):
+    """No usable Codex (setup_steps.with_codex, 2026-10-23): AI work waits until Codex is found again."""
+    import provider_limits
+    found = provider_limits.codex_missing(home)
+    if not found:
+        return []
+    words, label, href = provider_limits.codex_fix(finished)
+    return [_item("scheduler", words, "Sidedoor's AI work waits, spending no tries, and carries on by itself once Codex "
+                  "is found.", overview._utc(found.get("observed_at")), you=True, fix={"label": label, "href": href},
+                  code="CODEX_NOT_FOUND")]
+
+
+def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=None, finished=False):
     """Everything the Failures page shows. `database` is a read-only connection or None (no file
     yet); `loop` is the scheduler loop's state (`overview_page.loop_state`); `log_tail(name)` returns
     the redacted tail of logs/<name>. A source that cannot be read marks its group unavailable and
@@ -707,6 +1105,7 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=()):
     now = now or dt.datetime.now(dt.timezone.utc)
     zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
     fmt = lambda moment: overview.when(moment, now, zone)
+    _ZONE.set(zone)
     reader = overview.Reader(database)
     sections = {key: {"key": key, "title": title, "entries": [], "unavailable": False}
                 for key, title in (("scheduler", "Sidedoor itself"),) + GROUPS}
@@ -720,15 +1119,18 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=()):
         for entry in found:
             sections[entry["group"]]["entries"].append(entry)
 
-    add(task_failures, now, fmt, groups=("outreach", "applications", "connections", "other"))
+    add(task_failures, now, fmt, secrets, groups=("outreach", "applications", "connections", "other"))
     crashed = {slot for section in sections.values() for entry in section["entries"] if entry["job"] == "run"
                for slot in entry["slots"]}
     add(cycle_failures, now, crashed, groups=("scheduler",))
-    add(research_failures, config, now, fmt, groups=("research",))
-    add(application_failures, now, fmt, groups=("applications",))
-    add(outreach_failures, now, groups=("outreach",))
-    add(notification_failures, now, fmt, groups=("connections",))
+    add(research_failures, config, now, fmt, secrets, groups=("research",))
+    add(application_failures, now, fmt, secrets, groups=("applications",))
+    add(outreach_failures, now, secrets, groups=("outreach",))
+    add(finder_failures, now, fmt, secrets, groups=("outreach",))
+    add(notification_failures, now, fmt, secrets, groups=("connections",))
     add(browser_failures, now, fmt, groups=("applications", "outreach"))
+    for entry in codex_failures(home, finished):
+        sections[entry["group"]]["entries"].append(entry)
     explain_exits(sections, scheduler_failures(loop if isinstance(loop, dict) else {}, config, now, fmt, log_tail, secrets),
                   None if reader.broken else reader)
     if reader.broken:
@@ -906,12 +1308,30 @@ def _choice(value, options, default="all"):
     return value if value in {key for key, _ in options} else default
 
 
-def logs_view(logs, secrets, component="all", level="all", query=""):
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+
+
+_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))")
+
+
+def _line_day(line, zone):
+    match = _STAMP.match(line)
+    if not match:
+        return None
+    try:
+        return local_day(dt.datetime.fromisoformat(match.group(1).replace("Z", "+00:00")), zone)
+    except ValueError:
+        return None
+
+
+def logs_view(logs, secrets, component="all", level="all", query="", day="", zone=None):
     """Every stream under logs/ (log_retention.STREAMS), filtered by component and level, searched
-    case-insensitively in the redacted lines."""
+    case-insensitively in the redacted lines; `day` (YYYY-MM-DD, UTC as the lines are stamped) keeps
+    only that day's lines."""
     component, level = _choice(component, COMPONENTS), _choice(level, LEVELS)
     query = (query or "").strip()[:SEARCH_CHARACTERS]
     needle = query.casefold()
+    day = day if isinstance(day, str) and _DAY.match(day) else ""
     streams = []
     for key, label in COMPONENTS:
         if component not in ("all", key):
@@ -924,10 +1344,335 @@ def logs_view(logs, secrets, component="all", level="all", query=""):
             lines = redacted_lines(text, secrets) if state == "ok" else []
             if needle:
                 lines = [line for line in lines if needle in line.casefold()]
+            if day:   # the user's local date, as the page shows times (lines are stamped in UTC)
+                lines = [line for line in lines if _line_day(line, zone) == day]
             streams.append({"name": name, "label": "%s: %s" % (label, level_label.lower()), "state": state,
                             "lines": lines, "id": "log-%s-%s" % (key, stream)})
-    return {"streams": streams, "component": component, "level": level, "query": query,
+    return {"streams": streams, "component": component, "level": level, "query": query, "day": day,
             "components": COMPONENTS, "levels": LEVELS, "tail_bytes": LOG_TAIL_BYTES, "line_limit": LOG_LINES}
+
+
+# --- One run's own records and files (2026-10-23: "so users dont have to start running code") -----------
+
+RUN_LINES = 80          # lines shown per file of a run
+RUN_FILES = 12
+RUN_EVENTS = 40
+RUNS_LISTED = 30        # per component on the Runs list
+# Files of a session folder that are shown: what the run reported and printed. Never the prompt or the
+# request it was given (prompt.txt, request.json, schema.json), which carry the user's profile.
+RUN_FILE_NAMES = ("stderr.log", "executor.log", "output.json", "decision.json", "trace.jsonl")
+_RESEARCH_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# Any printable id (a job key can hold spaces and parentheses): task, finder and job ids only reach SQL
+# as parameters. Ids that become part of a file path keep their strict checks in `run_view` (a research
+# uuid and label, a dir: folder name).
+_RUN = re.compile(r"(task|research|finder|job|dir):([^\x00-\x1f\x7f]{1,300})\Z")
+_FOLDER_NAME = re.compile(r"[A-Za-z0-9._-]{1,120}\Z")
+FOLDER_COMPONENTS = {"application-browser": "applications", "application-recovery": "applications",
+                     "application-connection-manual": "applications", "email-check": "applications",
+                     "linkedin-contacts": "launchd", "outreach-history": "launchd"}
+FOLDER_WORDS = {"application-browser": "Browser session", "application-recovery": "Application recovery decision",
+                "application-connection-manual": "Manual check", "email-check": "Mailbox check",
+                "linkedin-contacts": "Contact finder run", "outreach-history": "Outreach history check"}
+
+
+def _inside(path, base):
+    """True when `path` is a real (not linked) entry directly or deeper inside `base`."""
+    try:
+        return not path.is_symlink() and path.resolve().is_relative_to(base.resolve()) and path.resolve() != base.resolve()
+    except (OSError, ValueError):
+        return False
+
+
+PROMPT_WITHHELD = "(The prompt Sidedoor sent and the AI's working are not shown: they hold your profile.)"
+
+
+def codex_safe(text, truncated):
+    """A codex run's printed log without its prompt echo and transcript (as `reply_worker._redacted_lines`
+    keeps its stderr): the header before codex's "user" marker, then only codex's own ERROR/WARN lines
+    (`reply_worker._CODEX_LEVEL`). A tail that began past the header (`truncated`) and shows no marker
+    may be inside the echo, so only those level lines are kept from it too. Other text is unchanged."""
+    import reply_worker
+    lines = text.splitlines()
+    marker = next((index for index, line in enumerate(lines) if line.strip() == "user"), None)
+    gap = next((index for index, line in enumerate(lines) if line.strip() == GAP), None)
+    if marker is not None and gap is not None and marker > gap:
+        marker = None   # the header's own marker is not in the head: nothing before it is a known header
+    if marker is None and not truncated:
+        return text
+    head = lines[:marker] if marker is not None else []
+    rest = lines[marker or 0:]
+    # Inside the echoed prompt (after "user" until codex's own "thinking"/"codex"/"exec" marker; and a
+    # truncated tail with no marker, which may be inside it) only codex's ERROR:/WARN: lines are kept:
+    # the prompt holds Sidedoor's instructions and the user's own text, some lines starting "Error".
+    kept, transcript, echo = [], False, True
+    for index, line in enumerate(rest):
+        bare = line.strip()
+        if bare == GAP:
+            kept.append(line)
+            transcript, echo = False, True      # the tail may begin anywhere: inside the echo until a marker
+            continue
+        if bare in reply_worker._TRANSCRIPT_MARKERS:
+            transcript, echo = True, False      # the model's own text follows: never kept
+        elif bare == "exec":
+            transcript, echo = False, False
+        elif bare == "user":
+            transcript, echo = False, True
+        if reply_worker._CODEX_LEVEL.match(bare):
+            kept.append(line)
+        elif not echo and _CAUSE_LINE.match(bare) and (not transcript or index >= len(rest) - 3):
+            kept.append(line)      # "Error: ...", a fatal or exit line: codex's own cause, or its last words
+    return "\n".join(head + [PROMPT_WITHHELD] + kept)
+
+
+_CAUSE_LINE = re.compile(r"^(?:Error|error|fatal|Fatal|FATAL|panicked|thread '[^']*' panicked)\b[:\s]|^(?:exit|Exit|exited)\b")
+TRACE_NOTE = "(Only this session's error events are shown: its reasoning, messages and tool calls hold your details.)"
+
+
+def trace_errors(text):
+    """A codex --json trace's error events only (type error, turn.failed, or an item that failed), each
+    "<type>: <message>"; reasoning, agent messages and tool arguments and results are dropped."""
+    kept = [TRACE_NOTE]
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = str(event.get("type") or "")
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        message = None
+        if kind == "error":
+            message = event.get("message")
+        elif kind == "turn.failed":
+            message = (event.get("error") or {}).get("message") if isinstance(event.get("error"), dict) else event.get("error")
+        elif item and (str(item.get("status") or "").lower() in ("failed", "error") or item.get("error")):
+            error = item.get("error")
+            message = (error.get("message") if isinstance(error, dict) else error) or "failed (%s)" % item.get("type")
+            kind = "%s %s" % (kind, item.get("type") or "item")
+        if message is not None:
+            kept.append("%s: %s" % (kind, str(message)[:ERROR_CHARACTERS]))
+    return "\n".join(kept)
+
+
+HEAD_BYTES = 4096
+GAP = "(... the middle of this file is not shown ...)"
+
+
+def read_head(path, limit=HEAD_BYTES):
+    """The first `limit` bytes of a regular file (never a link), up to its last whole line, else ""."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return ""
+        data = os.read(descriptor, limit)
+    except OSError:
+        return ""
+    finally:
+        os.close(descriptor)
+    text = data.decode("utf-8", "replace")
+    return text.rsplit("\n", 1)[0] if len(data) >= limit and "\n" in text else text
+
+
+def _file(path, secrets, title=None):
+    state, text = read_tail(path)
+    if state == "ok" and path.name == "trace.jsonl":
+        text = trace_errors(text)
+    elif state == "ok" and path.suffix == ".log":   # research step logs, a session's stderr / executor log
+        try:
+            truncated = os.lstat(path).st_size > LOG_TAIL_BYTES
+        except OSError:
+            truncated = True
+        if truncated:   # codex's header is at the start: a bounded head, the gap, then the tail
+            text = read_head(path) + "\n" + GAP + "\n" + text
+        text = codex_safe(text, truncated)
+    try:
+        at = dt.datetime.fromtimestamp(os.lstat(path).st_mtime, dt.timezone.utc)
+    except OSError:
+        at = None
+    return {"name": title or path.name, "state": state, "at": at,
+            "lines": redacted_lines(text, secrets, RUN_LINES) if state == "ok" else []}
+
+
+def _folder_files(folder, secrets):
+    return [_file(folder / name, secrets, folder.name + "/" + name) for name in RUN_FILE_NAMES
+            if (folder / name).is_file() and not (folder / name).is_symlink()]
+
+
+def _folder_of(root, value, base):
+    """A session folder a stored result names (`directory` or an error's `trace_path`), inside reports/<base>."""
+    folder_root = paths.reports(root) / base
+    for candidate in (value.get("directory"), (value.get("error") or {}).get("trace_path") if isinstance(value.get("error"), dict) else None,
+                      value.get("trace_path")):
+        if isinstance(candidate, str) and candidate:
+            try:
+                path = Path(paths.relocated(candidate))
+            except Exception:
+                path = Path(candidate)
+            path = path if path.is_dir() else path.parent
+            if _inside(path, folder_root):
+                return path
+    return None
+
+
+def run_view(reader, root, logs, run, secrets, fmt=str):
+    """What one run recorded, for a failure's "See its log": its records in the database (task events,
+    application events, a finder run's result) and its own files (research step logs and reports, a
+    session folder's stderr / executor log / output / trace tail), redacted, bounded, newest first, plus
+    the stream lines tagged with it (`log.tagged`). None for a value that is not a run reference."""
+    import log as logging_module
+    match = _RUN.match(run or "")
+    if not match:
+        return None
+    kind, ident = match.groups()
+    records, files, title, tag = [], [], None, None
+
+    def record(at, *parts):
+        records.append({"at": overview._utc(at) if isinstance(at, str) else at,
+                        "text": redact_text(" ".join(str(part) for part in parts if part not in (None, "")), secrets)[:LINE_CHARACTERS]})
+
+    if kind == "task":
+        tag = logging_module.run_tag("task", ident)
+        task = reader.rows("SELECT worker,status,blocker,result FROM workflow_tasks WHERE task_id=?", (ident,), "workflow_tasks")
+        title = "%s (task %s)" % (worker_words(task[0]["worker"])[1], ident[:12]) if task else "Task %s" % ident[:12]
+        for event in reader.rows("SELECT at,event,detail FROM workflow_task_events WHERE task_id=? ORDER BY id DESC LIMIT ?",
+                                 (ident, RUN_EVENTS), "workflow_task_events"):
+            detail = overview._json(event["detail"]) or {}
+            result = detail.get("result") if isinstance(detail.get("result"), dict) else detail
+            record(event["at"], event["event"], detail.get("blocker") or _result_code(result, None), _error_text(result))
+        if task:
+            failure = (overview._json(task[0]["result"]) or {}).get("executor_failure")
+            for line in (failure or {}).get("stderr_tail") or []:
+                record(None, "AI call stderr:", line)
+    elif kind == "research":
+        attempt, _, label = ident.partition(":")
+        if not _RESEARCH_ID.fullmatch(attempt) or (label and not re.fullmatch(r"[a-z0-9-]{1,80}", label)):
+            return None   # not a research run id (daily_schedule.claim: a uuid4): "not found"
+        tag = logging_module.run_tag("research", attempt)
+        title = "Research run %s%s" % (attempt[:8], " (%s)" % label.rsplit("-", 1)[0] if label else "")
+        prefix = attempt + "." + (label + "." if label else "")
+        for folder, suffix in ((Path(logs), ".log"), (paths.reports(root), ".json")):
+            try:
+                names = sorted(entry for entry in os.listdir(folder) if entry.startswith(prefix) and entry.endswith(suffix))
+            except OSError:
+                names = []
+            files += [_file(folder / name, secrets) for name in names if not (folder / name).is_symlink()]
+        row = reader.rows("SELECT started_at,state,result FROM research WHERE id=?", (attempt,), "research")
+        if row:
+            result = overview._json(row[0]["result"]) or {}
+            record(row[0]["started_at"], "Run", row[0]["state"], result.get("error"))
+            industries = result.get("industries")
+            for industry in industries if isinstance(industries, list) else []:
+                if isinstance(industry, dict) and (not label or _research_label(str(industry.get("industry"))) == label):
+                    record(None, industry.get("industry"), industry.get("state"), industry.get("abandonment_reason"),
+                           industry.get("error"))
+    elif kind == "finder":
+        tag = logging_module.run_tag("finder", ident)
+        row = reader.rows("SELECT company,started_at,state,result FROM linkedin_contact_runs WHERE run_id=?", (ident,),
+                          "linkedin_contact_runs")
+        value = overview._json(row[0]["result"]) if row else None
+        title = "Contact finder run at %s" % ((value or {}).get("company") or (row[0]["company"] if row else ident[:12]))
+        if row:
+            value = value or {}
+            record(row[0]["started_at"], row[0]["state"], value.get("outcome"), value.get("blocker"), value.get("error"),
+                   value.get("reason"))
+            if value.get("research_failure_diagnosis"):
+                record(None, "Why research could not:", value["research_failure_diagnosis"])
+            folder = _folder_of(root, value, "linkedin-contacts")
+            files += _folder_files(folder, secrets) if folder else []
+    elif kind == "job":
+        tag = logging_module.run_tag("job", ident)
+        title = "Application %s" % ident
+        for event in reader.rows("SELECT at,event,detail FROM application_events WHERE job_key=? ORDER BY id DESC LIMIT ?",
+                                 (ident, RUN_EVENTS), "application_events"):
+            detail = overview._json(event["detail"]) or {}
+            record(event["at"], event["event"], detail.get("code"), _error_text(detail))
+        for question, why, moment in answering_causes(reader, ident):
+            record(moment, "Question still open:", question, "-", why)
+        for request in reader.rows("SELECT request_id,operation,state,created_at,result FROM desktop_requests WHERE job_key=? "
+                                   "ORDER BY created_at DESC LIMIT 3", (ident,), "desktop_requests"):
+            value = overview._json(request["result"]) or {}
+            record(request["created_at"], "Browser %s request %s:" % (request["operation"], request["request_id"][:12]),
+                   request["state"], _result_code(value.get("error") if isinstance(value.get("error"), dict) else value, None))
+            folder = _folder_of(root, value, "application-browser")
+            files += _folder_files(folder, secrets) if folder else []
+    else:
+        base, _, name = ident.partition("/")
+        if base not in FOLDER_WORDS or not _FOLDER_NAME.match(name) or name in (".", ".."):
+            return None
+        folder = paths.reports(root) / base / name
+        if not _inside(folder, paths.reports(root) / base) or not folder.is_dir():
+            return None
+        title = "%s %s" % (FOLDER_WORDS[base], name)
+        files = _folder_files(folder, secrets)
+    oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    files = sorted(files, key=lambda entry: entry["at"] or oldest, reverse=True)[:RUN_FILES]
+    tagged = []
+    if tag:
+        for stream in log_retention_streams():
+            state, text = read_tail(Path(logs) / stream)
+            tagged += [stream + ": " + line for line in (redacted_lines(text, secrets) if state == "ok" else [])
+                       if "[" + tag + "]" in line]
+    return {"run": run, "title": title, "records": records, "files": files, "tagged": tagged[-LOG_LINES:], "tag": tag,
+            "when": fmt}
+
+
+def log_retention_streams():
+    import log_retention
+    return log_retention.STREAMS
+
+
+def runs_list(root, logs, component="all", day="", zone=None):
+    """The per-run files retention keeps, newest first, by component: research runs (their step logs)
+    and session folders (log_retention.TRACE_DIRECTORIES). Each opens its `run_view`."""
+    import log_retention
+    found = []
+    try:
+        names = os.listdir(logs)
+    except OSError:
+        names = []
+    research = {}
+    for name in names:
+        if log_retention.WORKER_NAME.fullmatch(name) and not (Path(logs) / name).is_symlink():
+            try:
+                at = dt.datetime.fromtimestamp(os.lstat(Path(logs) / name).st_mtime, dt.timezone.utc)
+            except OSError:
+                continue
+            attempt = name[:36]
+            research[attempt] = max(filter(None, (research.get(attempt), at)))
+    found += [{"component": "research", "label": "Research run %s" % attempt[:8], "at": at,
+               "href": run_href("research", attempt)} for attempt, at in research.items()]
+    for base, pattern in log_retention.TRACE_DIRECTORIES:
+        folder = paths.reports(root) / base
+        if base not in FOLDER_WORDS or not folder.is_dir() or folder.is_symlink():
+            continue
+        for entry in folder.glob(pattern):
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                at = dt.datetime.fromtimestamp(entry.lstat().st_mtime, dt.timezone.utc)
+            except OSError:
+                continue
+            found.append({"component": FOLDER_COMPONENTS[base], "label": "%s %s" % (FOLDER_WORDS[base], entry.name),
+                          "at": at, "href": run_href("dir", base + "/" + entry.name)})
+    if component != "all":
+        found = [entry for entry in found if entry["component"] == component]
+    if isinstance(day, str) and _DAY.match(day):
+        found = [entry for entry in found if local_day(entry["at"], zone) == day]
+    found.sort(key=lambda entry: entry["at"], reverse=True)
+    counts, kept = {}, []
+    for entry in found:
+        counts[entry["component"]] = counts.get(entry["component"], 0) + 1
+        if counts[entry["component"]] <= RUNS_LISTED:
+            kept.append(entry)
+    labels = dict(COMPONENTS)
+    for entry in kept:
+        entry["component_label"] = labels.get(entry["component"], entry["component"])
+    return kept
 
 
 def download_text(logs, secrets, now=None):
@@ -972,7 +1717,7 @@ def register(app, templates, layout, home, root, config, token, database, connec
     logs = paths.logs(root)
 
     @app.get("/failures", name="failures")
-    def failures(request: Request, component: str = "all", level: str = "all", q: str = ""):
+    def failures(request: Request, component: str = "all", level: str = "all", q: str = "", day: str = "", run: str = ""):
         context = layout("failures", "Failures and logs")
         if not _redaction_complete(home):
             context["hidden"] = DETAILS_HIDDEN
@@ -980,10 +1725,20 @@ def register(app, templates, layout, home, root, config, token, database, connec
         secrets = secrets_of(home, config, token)
         loop = overview.loop_state(setup_steps.scheduler_running(home))
         context["view"] = overview.snapshot(
-            database, lambda connection: gather(connection, config, loop, secrets=secrets,
+            database, lambda connection: gather(connection, config, loop, secrets=secrets, home=home,
+                                                finished=setup_steps.progress(home)["finished"],
                                                 log_tail=lambda name: tail(logs, name, secrets, JOB_LOG_LINES)),
             connect_read_only)
-        context["logs"] = logs_view(logs, secrets, component, level, q)
+        zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+        context["logs"] = logs_view(logs, secrets, component, level, q, day, zone)
+        context["runs"] = runs_list(root, logs, context["logs"]["component"], context["logs"]["day"], zone)
+        if run:
+            zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+            now = dt.datetime.now(dt.timezone.utc)
+            found = overview.snapshot(database, lambda connection: run_view(
+                overview.Reader(connection), root, logs, run, secrets, lambda moment: overview.when(moment, now, zone)),
+                connect_read_only)
+            context["run_view"] = found if isinstance(found, dict) else {"run": run, "missing": True}
         return templates.TemplateResponse(request, "failures.html", context)
 
     @app.get("/failures/logs.txt")

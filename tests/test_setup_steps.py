@@ -955,7 +955,9 @@ class ResetSetupFileTest(unittest.TestCase):
         text = (self.home / setup_steps.STATE_FILE).read_text()
         self.assertEqual(setup_steps.reset_state(self.home, self.root), {"reset": False})
         self.assertEqual((self.home / setup_steps.STATE_FILE).read_text(), text)
-        self.assertEqual(sorted(path.name for path in self.home.iterdir()), [setup_steps.STATE_FILE])
+        # Besides the state file only its cross-process write lock (2026-10-23), never a backup or a reset copy.
+        self.assertEqual(sorted(path.name for path in self.home.iterdir() if path.name != setup_steps.STATE_LOCK_FILE),
+                         [setup_steps.STATE_FILE])
 
     def test_nothing_rederivable_gives_a_fresh_empty_setup(self):
         (self.home / setup_steps.STATE_FILE).write_text("[]")

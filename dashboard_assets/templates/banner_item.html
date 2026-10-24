@@ -1,0 +1,40 @@
+{# One banner (banners.html; GET /update/banner renders the update banner alone while [Update now] runs). #}
+  <div class="banner banner-{{ banner.tone }}" role="status"{% if banner.poll %} id="update-banner" hx-get="/update/banner?next={{ back | urlencode }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+    <span>{{ banner.text }}</span>
+    {% if banner.action_post %}
+    {% with check_next=back, check_label=banner.action_label %}{% include "license_check.html" %}{% endwith %}
+    {% elif banner.forms %}
+    {% for choice in banner.forms %}
+    <form method="post" action="{{ choice.action }}" class="banner-form">
+      {% for name, value in choice.fields.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+      <input type="hidden" name="next" value="{{ back }}">
+      <button class="button" type="submit">{{ choice.label }}</button>
+    </form>
+    {% endfor %}
+    {% if banner.download_href %}<a class="button" href="{{ banner.download_href }}" target="_blank" rel="noopener noreferrer">{{ banner.action_label }}</a>{% endif %}
+    {% elif banner.form_action %}
+    <form method="post" action="{{ banner.form_action }}" class="banner-form">
+      <input type="hidden" name="next" value="{{ back }}">
+      <button class="button" type="submit">{{ banner.action_label }}</button>
+    </form>
+    {% elif banner.action_href %}
+    <a class="button" href="{{ banner.action_href }}"{% if banner.external %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ banner.action_label }}</a>
+    {% endif %}
+    {% if banner.steps %}<details class="banner-notes"><summary>Or by hand</summary><ol>{% for step in banner.steps %}<li>{{ step }}</li>{% endfor %}</ol></details>{% endif %}
+    {% if banner.notes %}<details class="banner-notes"><summary>What's new</summary><p>{{ banner.notes }}</p></details>{% endif %}
+    {% if banner.dismiss %}
+    <form method="post" action="/update/dismiss" class="banner-dismiss">
+      <input type="hidden" name="version" value="{{ banner.dismiss }}">
+      <input type="hidden" name="next" value="{{ back }}">
+      <button class="banner-second" type="submit">Dismiss</button>
+    </form>
+    {% endif %}
+    {% if banner.dismiss_notice %}
+    <form method="post" action="/update/dismiss" class="banner-dismiss">
+      <input type="hidden" name="notice" value="1">
+      <input type="hidden" name="next" value="{{ back }}">
+      <button class="banner-second" type="submit">{% if banner.dismiss %}Hide the message{% else %}Dismiss{% endif %}</button>
+    </form>
+    {% endif %}
+    {% if banner.second %}<a class="banner-second" href="{{ banner.second.href }}">{{ banner.second.label }}</a>{% endif %}
+  </div>

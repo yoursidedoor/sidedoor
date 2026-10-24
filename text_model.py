@@ -161,13 +161,23 @@ def complete(config, prompt, *, system=None, effort="low", max_tokens=4000, time
     except TimeoutError:
         recorded("timeout")
         raise
-    except TextModelHTTPError:
+    except TextModelHTTPError as error:
         recorded("refused", meta.get("usage"))
+        if str(error.status) == "402" and api_key is None:
+            # Out of credit (2026-10-23): a capacity wait, not a failed try. The error is raised as
+            # before, chained to the wait, so every caller's `provider_limits.wait_of` finds it; a
+            # key under test (`api_key`, Setup and doctor) records nothing.
+            import provider_limits
+            raise error from provider_limits.out_of_credit(str(error))
         raise
     except TextModelResponseError:
         recorded("invalid", meta.get("usage"))
         raise
     recorded("ok", answer["usage"])
+    import provider_limits
+    # A call that worked ends the out-of-credit banner at once: a real call, and also a key test that
+    # passed (Setup's and Settings' Save/Test, doctor --online: each is this call with `api_key`).
+    provider_limits.clear(provider_limits.CREDIT_WAIT_FILE)
     return answer
 
 

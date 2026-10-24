@@ -333,8 +333,9 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             # Once setup is finished the Setup tab stays hidden for good (owner, 2026-10-21); a step
             # that breaks later shows banner 6 pointing to Settings (Settings > Connections is E6.T8).
             broken = []
-            if not progress["done"][6]:
-                broken.append("Codex")
+            import provider_limits
+            if not progress["done"][6] and not provider_limits.codex_missing(home):
+                broken.append("Codex")   # while Codex can't be found, its own banner says so (one banner)
             if not setup_steps.chrome_path():
                 broken.append("Google Chrome")
             for name in broken:
@@ -357,6 +358,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             if not progress["finished"]:
                 api_banner = dict(api_banner, action_href="/setup#step-6")
             banners.append(api_banner)
+        import provider_limits  # out of OpenRouter credits; the ChatGPT usage limit (both clear by themselves)
+        banners.extend(provider_limits.banners(home, finished=progress["finished"]))
         moving = data_move_banner(home, app.state.data_move_error)
         if moving:
             banners.insert(0, moving)  # E9.T1: before anything else, so no one acts on an empty home
@@ -429,6 +432,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         context = layout("overview", "Overview", progress)
         running = setup_steps.scheduler_running(home)
         context.update(finished=progress["finished"], running=running, message=message, message_at=message_at, view=None)
+        import version  # owner, 2026-10-23: "the overview page should show what version of code is installed."
+        context["sidedoor_version"] = version.current()
         import license_clock
         license = license_clock.view(home)
         # E8.T3 (E6.T0 section 11): Expired shows a full-page paywall on Overview with [Renew]; the
@@ -514,10 +519,35 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         import update_check
         form = await request.form()
         version = form.get("version")
-        if isinstance(version, str):
+        if form.get("notice") == "1":  # a failed Mac update's message only; the offer stays
+            await run_in_threadpool(update_check.dismiss_notice, home)
+        elif isinstance(version, str):
             await run_in_threadpool(update_check.dismiss, version, home)
         back = form.get("next") if isinstance(form.get("next"), str) else "/"
         return RedirectResponse(back if _known_page(back) else "/", status_code=303)
+
+    # [Update now] on the update banner (owner, 2026-10-23, B; the built Mac app only): downloads,
+    # checks and, after the user clicks Replace in a native dialog, swaps the app (mac_update).
+    @app.post("/update/install")
+    async def update_install(request: Request):
+        import mac_update
+        form = await request.form()
+        version = form.get("version")
+        if isinstance(version, str) and mac_update.can_install():
+            await run_in_threadpool(mac_update.start_install, version, home if home is not None else user_profile.home())
+        back = form.get("next") if isinstance(form.get("next"), str) else "/"
+        return RedirectResponse(back if _known_page(back) else "/", status_code=303)
+
+    # The update banner alone, polled by itself while [Update now] runs (banner_item.html `poll`),
+    # so its end (a failed check, Not now, the reason) shows without a reload. Read-only.
+    @app.get("/update/banner")
+    def update_banner_fragment(request: Request, next: str = "/"):
+        import update_check
+        found = update_check.banner(home)
+        if found is None:
+            return HTMLResponse("")
+        return HTMLResponse(templates.get_template("banner_item.html").render(
+            banner=found, back=next if _known_page(next) else "/"))
 
     def _known_page(path):
         """A tab, or a sub-path of one (e.g. /setup/guide/x), never another site or a traversal."""
@@ -1203,6 +1233,9 @@ def _serve(open_browser, home, path, start, scheduler, tray=False):
     if login_item.unregistered_login_launch(home=home_path):
         return 0  # start at login was turned off from inside the session: a KeepAlive restart ends here (L3)
     secret = token(home)
+    import mac_update  # A (owner, 2026-10-23): a downloaded copy outside Applications offers to replace
+    if mac_update.offer_move(home_path, running=lambda: running_here(secret), port=PORT):  # before any job
+        return 0
     url = f"http://127.0.0.1:{PORT}{path}?t={secret}"
     try:
         listener = bind()

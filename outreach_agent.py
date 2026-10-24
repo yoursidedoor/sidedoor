@@ -510,7 +510,10 @@ class Adapter(outreach.HeyReachActionAdapter):
                    **({"next_at": error.reset_at.isoformat()} if isinstance(error, SharedBudgetExhausted) else {}),
                    **({"executor": reply_worker.executor_detail(error)} if reply_worker.executor_detail(error) else {})})
             if isinstance(error, reply_worker.Held) and error.retry:
-                raise TimeoutError("OUTREACH_AI_TRANSIENT_FAILURE") from None
+                # A provider wait (usage limit, OpenRouter out of credit) stays chained, so the
+                # callers' provider_limits.wait_of sees a wait, not a failed try (2026-10-23).
+                raise TimeoutError("OUTREACH_AI_TRANSIENT_FAILURE") from (
+                    error if provider_limits.wait_of(error) else None)
             raise
 
     def inspect(self, action, config):

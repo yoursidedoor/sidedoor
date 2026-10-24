@@ -27,6 +27,7 @@ import provider_limits
 import reply_resume
 import reply_tools
 import model_calls
+import setup_steps
 import text_model
 import workflow_tasks
 
@@ -526,6 +527,9 @@ def _codex(config, prompt, schema, timeout, meta):
             try:
                 # stderr is read into memory only (never persisted) so the provider's usage-limit
                 # refusal can be told apart from a failed classification.
+                missing = setup_steps.codex_wait(config)
+                if missing:   # no usable Codex: never started; a wait, no try spent (2026-10-23)
+                    raise Held("CODEX_NOT_FOUND", retry=True) from missing
                 arguments = _command(config, schema_path, output_path)
                 worker = subprocess.Popen(arguments, stdin=subprocess.PIPE,
                                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,

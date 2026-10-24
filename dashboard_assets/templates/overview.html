@@ -19,6 +19,7 @@
 {% endmacro %}
 {% block content %}
 <h1 class="title gradient-text">Overview</h1>
+{% if sidedoor_version %}<p class="muted overview-version">Sidedoor {{ sidedoor_version }}</p>{% endif %}
 {% if paywall %}
 {# E8.T3: the paywall (E6.T0 section 11, Expired). [Renew] opens the checkout like [Buy a license],
    with guide 4.5 beside it; banner 1 above shows "Bought a new key? Paste it here" (always while

@@ -658,11 +658,22 @@ def cli_running(home):
 _ASK = object()
 
 
+def dashboard_checks(home, root, config, running, loop, openrouter_transport=None):
+    """Run checks on the dashboard: local, except that while the OpenRouter out-of-credit banner shows
+    (owner, 2026-10-23, pick 3b) the OpenRouter check makes its one small test call, as doctor
+    --online does; a call that works clears the banner (text_model.complete)."""
+    import provider_limits
+    return run(home=home, root=root, config=config, running=running, loop=loop, openrouter_transport=openrouter_transport,
+               openrouter_online=provider_limits.out_of_credit_shown(home))
+
+
 def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None, relay_url=None,
         codex_run=None, browser_run=None, openrouter_transport=None, openai_transport=None, license_post=None,
-        linkedin_transport=None, relay=None, disk_usage=shutil.disk_usage, now=None):
+        linkedin_transport=None, relay=None, disk_usage=shutil.disk_usage, now=None, openrouter_online=False):
     """The checks, in order, as [{"status", "name", "line", "todo"}]. `running` is whether the
-    scheduler runs (default: ask `cli_running`; None: unknown); the rest are injectable for tests."""
+    scheduler runs (default: ask `cli_running`; None: unknown); the rest are injectable for tests.
+    `openrouter_online` makes the OpenRouter check's one test call even when `online` is off (the
+    dashboard's Run checks while the out-of-credit banner shows, `dashboard_checks`)."""
     home = Path(home) if home is not None else user_profile.home()
     root = paths.data(root, home)  # the data folder (E9.T1): the database lives in the home
     if config is None:
@@ -688,7 +699,7 @@ def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None
     guarded("Profile", check_profile, home)
     guarded("Résumé", check_resume, home, root)
     guarded("Credentials", check_credentials, home)
-    guarded("OpenRouter", check_openrouter, home, config, online, openrouter_transport)
+    guarded("OpenRouter", check_openrouter, home, config, online or openrouter_online, openrouter_transport)
     guarded("Codex", check_codex, home, codex_run, config=config, online=online, transport=openai_transport)
     guarded("Google Chrome", check_chrome)
     guarded("Browser runtime", check_browser_runtime, config, browser_run, root)
@@ -761,7 +772,7 @@ def register(app, templates, layout, home, root, config, token=None):
     async def doctor_page(request: Request):
         def build():
             running = setup_steps.scheduler_running(home)
-            return run(home=home, root=root, config=config, running=running, loop=overview_page.loop_state(running))
+            return dashboard_checks(home, root, config, running, overview_page.loop_state(running))
         lines = await run_in_threadpool(build)
         context = layout("failures", "Checks")
         context.update(checks=lines, report=report_text(lines))

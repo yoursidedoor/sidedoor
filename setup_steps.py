@@ -137,12 +137,46 @@ def load_state(home=None):
     return value
 
 
+STATE_LOCK_FILE = ".setup-state.lock"
+STATE_LOCK_WAIT_SECONDS = 5.0
+
+
+@contextlib.contextmanager
+def _state_file_lock(home=None):
+    """One writer at a time across processes too (2026-10-23: jobs save a Codex they found while the
+    dashboard may be saving a step), so a read-modify-write never loses another process's change. The
+    file itself is always replaced atomically (`_write_private`). Waits at most
+    STATE_LOCK_WAIT_SECONDS; a lock that cannot be opened or taken in time lets the write go ahead as
+    it always did."""
+    import time
+    lock = None
+    try:
+        lock = portable.open_lock(_home(home) / STATE_LOCK_FILE)
+        deadline = time.monotonic() + STATE_LOCK_WAIT_SECONDS
+        while not portable.try_lock(lock):
+            if time.monotonic() >= deadline:
+                os.close(lock)
+                lock = None
+                break
+            time.sleep(0.02)
+    except OSError:
+        lock = None
+    try:
+        yield
+    finally:
+        if lock is not None:
+            try:
+                portable.unlock(lock)
+            finally:
+                os.close(lock)
+
+
 def update_state(change, home=None):
-    """Apply `change(state)` and save; one writer at a time within the dashboard process. A file that
-    exists but cannot be read is never replaced (GL2, owner 2026-10-22: saving the default over it
-    would turn a Review the file held into a readable Automatic): StateFileUnreadable is raised and
-    the dashboard shows its message."""
-    with _state_lock:
+    """Apply `change(state)` and save; one writer at a time within the dashboard process, and across
+    processes (`_state_file_lock`). A file that exists but cannot be read is never replaced (GL2, owner
+    2026-10-22: saving the default over it would turn a Review the file held into a readable Automatic):
+    StateFileUnreadable is raised and the dashboard shows its message."""
+    with _state_lock, _state_file_lock(home):
         path = _home(home) / STATE_FILE
         if not _read_state(path)[1]:
             raise StateFileUnreadable(path)
@@ -1222,10 +1256,39 @@ def with_codex(config, home=None):
     if "codex" not in config:
         return config
     path = saved if _usable(saved) else (config["codex"] if _usable(config["codex"]) else find_codex())
+    import provider_limits
     if not path:
-        return config
+        # 2026-10-23: no usable Codex anywhere. `codex` stays as it is (saved decisions compare it,
+        # pipeline_routing); the separate CODEX_MISSING flag makes every launch point stop before
+        # starting it, as a wait that spends no try (`codex_wait`), and the banner shows.
+        return dict(config, **{CODEX_MISSING: True})
+    provider_limits.clear(provider_limits.CODEX_WAIT_FILE, home)   # a usable Codex again: the banner ends
+    if path != saved and (_home(home) / STATE_FILE).is_file():   # no state file yet: Setup has not run
+        # 2026-10-23: the saved Codex is gone (or none was saved) and another one works: saved back, so
+        # later jobs don't search again. Only when it changes, and never raising: a failed save is
+        # logged and the job goes on with the path found. The start-at-login entry is left to Setup /
+        # Settings (check_codex); a job extends its own PATH (extend_path).
+        try:
+            update_state(lambda value: value.update(codex_path=path), home)
+        except Exception as error:
+            LOG.warning("found Codex not saved: %s", type(error).__name__)
     extend_path(path)
     return dict(config, codex=path)
+
+
+CODEX_MISSING = "codex_missing"
+
+
+def codex_wait(config, home=None):
+    """A recorded wait (provider_limits.ProviderUsageLimit, kind CODEX_NOT_FOUND) when `with_codex` found
+    no usable Codex, else None. Every Codex launch point asks before starting it and raises it (or a
+    failure chained to it): a capacity wait, no try spent, nothing abandoned, resumed after the
+    backoff; the user finds Codex again in Setup (step 6) or Settings."""
+    if not isinstance(config, dict) or not config.get(CODEX_MISSING):
+        return None
+    import provider_limits
+    return provider_limits.noted(provider_limits.ProviderUsageLimit(
+        "CODEX_NOT_FOUND: no usable Codex was found", kind=provider_limits.CODEX_NOT_FOUND), home)
 
 
 def use_saved_codex(home=None):
@@ -1265,6 +1328,8 @@ def check_codex(home=None, run=subprocess.run, search_path=None):
         update_state(lambda value: value.pop("codex_path", None), home)
         return record(home, "codex", "failed", "Codex is not installed.")
     update_state(lambda value: value.update(codex_path=path), home)
+    import provider_limits
+    provider_limits.clear(provider_limits.CODEX_WAIT_FILE, home)   # Codex found again: the banner ends
     extend_path(path)   # `codex login status` below may need node's folder (an npm Codex)
     refresh_login_entry(home)  # the entry's PATH follows the Codex found now (E5.T2)
     if openai_auth.api_key_mode(home):
@@ -1817,6 +1882,10 @@ class MailboxReadNotBuilt(Exception):
     E7.T1) is not installed where the configuration says."""
 
 
+class CodexMissingForCheck(MailboxReadNotBuilt):
+    """No usable Codex for the email check (`with_codex`'s CODEX_NOT_FOUND, 2026-10-23)."""
+
+
 EMAIL_CHECK_SECONDS = 300
 EMAIL_CHECK_PROMPT = """Read which mailbox is signed in to this browser, using only the tools of the MCP server
 `browser` (Sidedoor's guarded browser: browser_navigate, browser_snapshot, browser_find, browser_click and
@@ -1858,6 +1927,12 @@ def read_signed_in_account(webmail_url, codex_path, profile, config=None, execut
         config["codex"] = codex_path
         if _usable(codex_path):
             extend_path(codex_path)
+    if not _usable(codex_path):
+        # The jobs' own lookup (saved, bundled, found); none usable: say so, never launch a missing Codex.
+        config = with_codex(config)
+        if config.get(CODEX_MISSING):
+            import provider_limits
+            raise CodexMissingForCheck(provider_limits.CODEX_WORDS)
     if browser_runtime.missing(config):
         raise MailboxReadNotBuilt("The email check needs Sidedoor's browser, which is not installed on this "
                                   "computer. Reinstall Sidedoor, then click Run check again.")
@@ -1940,6 +2015,8 @@ def run_email_check(home=None, read=None):
     webmail = state.get("webmail") or {}
     try:
         signed_in = (read or read_signed_in_account)(webmail.get("url"), state.get("codex_path"), BROWSER_PROFILE)
+    except CodexMissingForCheck as missing:
+        return record(home, "email", "failed", str(missing), reason="codex_missing")
     except MailboxReadNotBuilt as missing:
         return record(home, "email", NOT_BUILT, str(missing))
     if not signed_in:

@@ -145,7 +145,14 @@ def environment(arguments, variables, home=None):
 
 
 def succeeded(arguments, home=None):
-    """A Codex call to OpenAI exited 0: its billing-wait streak and banner end (AK5). Best effort."""
+    """A Codex call to OpenAI exited 0: its billing-wait streak and banner end (AK5). Best effort.
+    Every Codex call that exited 0 also ends the ChatGPT usage-limit banner, or, pointed at OpenRouter,
+    the OpenRouter out-of-credit one (`provider_limits.succeeded`)."""
+    try:
+        import provider_limits
+        provider_limits.succeeded(arguments, home)
+    except Exception:
+        pass
     try:
         if openai_bound(arguments, home):
             clear_wait(home)

@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import log
 import math
 from pathlib import Path
 import re
@@ -4377,7 +4378,8 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
             stopped = "YIELDED_TO_DAILY_RESEARCH"
             break
         try:
-            process(database, job, adapter, policy, root, now, clock, config)
+            with log.tagged("job", job["job_key"]):   # its lines carry the job (Failures page, 2026-10-23)
+                process(database, job, adapter, policy, root, now, clock, config)
         except Exception as error:
             database.rollback()
             current = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()

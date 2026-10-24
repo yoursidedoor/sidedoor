@@ -1,14 +1,17 @@
 """E9.T3 Update check and banner.
 
-Once at dashboard start and then once a day, the dashboard process reads a small JSON from
-`VERSION_URL`, shaped {"latest": "1.2.0", "download_url": "https://...", "notes": "..."}, and
-compares it with the installed version (`version.current()`). When it is newer, every page
+Once at dashboard start and then every 30 minutes (owner, 2026-10-23: "it should happen once every
+hour. or 30mins"), the dashboard process reads a small JSON from `VERSION_URL`, shaped
+{"latest": "1.2.0", "download_url": "https://...", "notes": "...", "mac": {"arm64": {"url", "sha256"},
+"x86_64": {"url", "sha256"}}} ("mac" optional; an older Sidedoor ignores it), and compares it with the installed version (`version.current()`). When it is newer, every page
 shows a dismissible banner, after every other banner (license problems first). Dismissing hides it
 until a newer version appears; the dismissal and the last good answer live in the Sidedoor home
 (`update-check.json`). Any failure (offline, bad JSON, a non-https download_url, a host other than
 yoursidedoor.com or github.com's Sidedoor releases) is silent: no new banner, no error page, and the
 last good answer is kept. Nothing is ever downloaded or
-installed automatically; [Download] only opens the link in the user's browser."""
+installed automatically; [Download] only opens the link in the user's browser. On the built Mac app
+in Applications, when version.json names a zip for this Mac, the banner also has [Update now]
+(`mac_update`): downloaded, checked and installed only after the user clicks Replace."""
 
 import datetime as dt
 import json
@@ -23,7 +26,7 @@ from pathlib import Path
 VERSION_URL = "https://yoursidedoor.com/version.json"
 DOWNLOAD_HOSTS = ("yoursidedoor.com", "www.yoursidedoor.com", "github.com", "www.github.com")
 STATE_FILE = "update-check.json"
-INTERVAL_SECONDS = 24 * 3600
+INTERVAL_SECONDS = 30 * 60  # owner, 2026-10-23: every 30 minutes
 TIMEOUT_SECONDS = 10
 MAX_BYTES = 64 * 1024
 MAX_NOTES = 2000
@@ -130,7 +133,31 @@ def parse(raw):
         return None
     notes = value.get("notes")
     notes = notes.strip()[:MAX_NOTES] if isinstance(notes, str) else ""
-    return {"latest": value["latest"].strip(), "download_url": value["download_url"].strip(), "notes": notes}
+    result = {"latest": value["latest"].strip(), "download_url": value["download_url"].strip(), "notes": notes}
+    mac = _mac_assets(value.get("mac"))
+    if mac:
+        result["mac"] = mac
+    return result
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _mac_assets(value):
+    """version.json's optional "mac": {"arm64"|"x86_64": {"url", "sha256"}}, each kept only when its
+    url is an allowed release asset (`mac_update.allowed_asset`) and its sha256 is 64 hex digits."""
+    if not isinstance(value, dict):
+        return {}
+    import mac_update
+    assets = {}
+    for arch in mac_update.ARCHES:
+        item = value.get(arch)
+        if not isinstance(item, dict) or not isinstance(item.get("sha256"), str):
+            continue
+        digest = item["sha256"].strip().lower()
+        if mac_update.allowed_asset(item.get("url")) and _SHA256.fullmatch(digest):
+            assets[arch] = {"url": item["url"].strip(), "sha256": digest}
+    return assets
 
 
 def _read(home):
@@ -189,8 +216,39 @@ def dismiss(version, home=None):
         return False
 
 
+def dismiss_notice(home=None):
+    """Hide a failed Mac update's notice only; the offer of that version stays until its own Dismiss."""
+    try:
+        import mac_update
+        mac_update.clear_notice(_home(home))
+        return True
+    except Exception:
+        return False
+
+
 def banner(home=None):
-    """The update banner for the layout, or None. Never raises: a broken file never breaks a page."""
+    """The update banner for the layout, or None. Never raises: a broken file never breaks a page.
+    A failed Mac update (`mac_update.read_notice`) leads the banner's text until it is dismissed."""
+    try:
+        import mac_update
+        notice = mac_update.read_notice(_home(home))
+        named = re.match(r"Sidedoor (\S+) ", notice or "")
+        installed = parse_version(installed_version())
+        if named and installed is not None and parse_version(named.group(1)) is not None \
+                and parse_version(named.group(1)) <= installed:
+            mac_update.clear_notice(_home(home))  # that version is installed now (by hand, say)
+            notice = None
+    except Exception:
+        notice = None
+    found = _banner(home)
+    if notice:
+        if found is None:
+            return {"tone": "warning", "text": notice, "dismiss_notice": True}
+        return dict(found, tone="warning", text=notice + " " + found["text"], dismiss_notice=True)
+    return found
+
+
+def _banner(home):
     try:
         state = _read(home)
         available = state.get("available")
@@ -206,15 +264,37 @@ def banner(home=None):
         if dismissed is not None and dismissed >= latest:
             return None
         notes = available.get("notes") if isinstance(available.get("notes"), str) else ""
-        return {"tone": "info", "text": "Sidedoor %s is available." % available["latest"],
-                "action_label": "Download", "action_href": available["download_url"], "external": True,
-                "notes": notes[:MAX_NOTES] or None, "dismiss": available["latest"]}
+        found = {"tone": "info", "text": "Sidedoor %s is available." % available["latest"],
+                 "action_label": "Download", "action_href": available["download_url"], "external": True,
+                 "notes": notes[:MAX_NOTES] or None, "dismiss": available["latest"]}
+        return _with_update_now(found, available)
+    except Exception:
+        return None
+
+
+def _with_update_now(found, available):
+    """B (owner, 2026-10-23): [Update now] beside [Download] on the built Mac app in Applications when
+    version.json names a zip for this Mac; while it runs, or after it failed, the banner says so.
+    Anywhere else, or without the zip, the banner is unchanged."""
+    try:
+        import mac_update
+        if not mac_update.can_install() or mac_update.asset_for(available) is None:
+            return found
+        state = mac_update.status()
+        found = dict(found, download_href=found["action_href"])
+        if state.get("version") == available["latest"] and state.get("state") in ("working", "replacing"):
+            # poll: the banner re-reads itself (GET /update/banner, every 3 s) until the state ends.
+            return dict(found, text=state["message"], dismiss=None, poll=True)
+        if state.get("version") == available["latest"] and state.get("state") == "failed":
+            found = dict(found, tone="warning", text=state["message"])
+        return dict(found, forms=[{"action": "/update/install", "fields": {"version": available["latest"]},
+                                   "label": "Update now"}])
     except Exception:
         return None
 
 
 class Checker:
-    """Checks once at once, then every day, on `time.monotonic()`, in a daemon thread."""
+    """Checks once at once, then every 30 minutes, on `time.monotonic()`, in a daemon thread."""
 
     def __init__(self, home=None, get=None, interval=INTERVAL_SECONDS):
         self.home, self.get, self.interval = home, get, interval
@@ -248,7 +328,7 @@ _current = None
 
 
 def start(home=None, get=None):
-    """Start (once per process) the daily update check; returns it."""
+    """Start (once per process) the update check (now, then every 30 minutes); returns it."""
     global _current
     if _current is None or not _current.alive():
         _current = Checker(home, get).start()

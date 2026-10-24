@@ -296,6 +296,12 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
             code = browser_runtime.check_available(self.database, self.config, "APPLICATION_BROWSER_", "applications")
             if code:
                 raise CapacityWait(code, desktop_adapter.later(self.clock(), BROWSER_BUSY_RETRY_SECONDS))
+            import setup_steps
+            missing = setup_steps.codex_wait(self.config)
+            if missing:
+                # No usable Codex (2026-10-23): before any reservation or request, the job waits like a
+                # provider wait (no try spent, nothing abandoned) and resumes after the backoff.
+                raise desktop_adapter.ProviderUsageWait("codex:" + job_key, missing.next_at)
             if self.prepaid.get(job_key, 0):
                 self.prepaid[job_key] -= 1
             else:

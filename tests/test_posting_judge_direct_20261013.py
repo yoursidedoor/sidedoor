@@ -63,11 +63,13 @@ class DirectPostingJudgeTests(unittest.TestCase):
         self.assertEqual((provenance["model"], provenance["reasoning_effort"]), ("z-ai/glm-5.3", "low"))
         self.assertNotIn(SECRET, self.saved_files())
 
-    def test_a_402_is_a_counted_failure_with_its_status_and_never_the_key(self):
+    def test_a_402_is_a_wait_not_a_counted_try_and_never_the_key(self):
+        # 2026-10-23 (owner): out of credit spends none of the judgment's tries.
         error = {"error": {"message": "This request requires more credits, or fewer max_tokens. key " + SECRET, "code": 402}}
-        self.assertIsNone(self.judge(402, error))
-        self.assertEqual(self.database.execute("SELECT outcome FROM same_job_attempts").fetchone()[0],
-                         "FAILED:TextModelHTTPError:402")
+        for _ in range(4):   # more than MAX_ATTEMPTS: none is counted
+            self.assertIsNone(self.judge(402, error))
+        self.assertEqual(len(self.requests), 4)   # each pass asked again
+        self.assertIsNone(self.database.execute("SELECT outcome FROM same_job_attempts").fetchone())
         self.assertIsNone(self.database.execute("SELECT 1 FROM same_job_judgments").fetchone())
         saved = self.saved_files()
         self.assertIn("HTTP 402", saved); self.assertIn("requires more credits", saved)
