@@ -360,6 +360,28 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(Path(staged["attachments"]["cover"]["path"]).read_bytes(), b"letter")
         self.assertEqual(payload["attachments"]["cover"]["path"], str(directory / "letter.pdf"))
 
+    def staged_name(self, stored, file_name):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        raw = directory / "raw-0123456789abcdef.docx"
+        ats = directory / "application-0123456789abcdef-fedcba9876543210.pdf"
+        for path in (raw, ats):
+            path.write_bytes(path.name.encode())
+        profile = {"resume_raw": {"path": str(raw), "file_name": file_name}}
+        with mock.patch.object(application_browser.user_profile, "load", return_value=profile):
+            staged, pairs = application_browser.staged_uploads({"resume": str(raw if stored == "raw" else ats)},
+                                                               directory / "session")
+        self.addCleanup(browser_runtime.unstage, directory / "session")
+        self.assertEqual(Path(staged["resume"]).read_bytes(), Path(pairs[staged["resume"]]).read_bytes())
+        return Path(staged["resume"]).name
+
+    def test_the_staged_resume_carries_the_users_name_not_the_storage_name(self):
+        self.assertEqual(self.staged_name("raw", "Jordan_Sample_Resume.docx"), "Jordan_Sample_Resume.docx")
+        self.assertEqual(self.staged_name("ats", "Jordan_Sample_Resume.pdf"), "Jordan_Sample_Resume.pdf")
+        self.assertEqual(self.staged_name("ats", "Resume.docx"), "Resume.pdf")
+        self.assertEqual(self.staged_name("ats", None), "Resume.pdf")
+        self.assertEqual(self.staged_name("raw", None), "Resume.docx")   # no name: keep the real extension
+
 
 class PackagingTests(unittest.TestCase):
     def test_lockfile_pins_what_the_runtime_expects(self):
@@ -615,7 +637,7 @@ class RealBrowserTests(unittest.TestCase):
         self.assertEqual(summary["state"], "COMPLETE", summary)
         self.assertIn("File chooser", seen["chooser"][1])
         self.assertFalse(seen["upload"][0], seen["upload"][1])
-        self.assertIn("resume.pdf", seen["shown"][1])                      # the page shows the file name
+        self.assertIn("Resume.pdf", seen["shown"][1])                      # the page shows the human file name
         self.assertFalse(seen["arm"][0], seen["arm"][1])
         self.assertEqual(seen["second"], (True, browser_guard.ARM_DENIED_TEXT))
         order = [(entry["decision"], entry.get("tool"), (entry.get("arguments") or {}).get("element")) for entry in seen["audit"]]
@@ -626,7 +648,7 @@ class RealBrowserTests(unittest.TestCase):
         self.assertEqual(order[-1][0], "ARM_DENIED")
         self.assertEqual(len(self.pages.posts), 1)
         body = json.loads(self.pages.posts[0]["body"])
-        self.assertEqual((body["full_name"], body["resume"]), ("Alex Example", "resume.pdf"))
+        self.assertEqual((body["full_name"], body["resume"]), ("Alex Example", "Resume.pdf"))
         self.assertTrue(Path(seen["staged"]).resolve().is_relative_to((fixture.root / "reports" / "application-browser").resolve()))
         armed_at = fixture.database.execute("SELECT armed_at FROM desktop_requests WHERE request_id=?", (request_id,)).fetchone()[0]
         self.assertIsNotNone(armed_at)

@@ -207,7 +207,7 @@ def check_resume(home, root=ROOT):
     except ValueError:
         return _line(FAIL, "Résumé", "No readable résumé is saved.", "Upload your résumé in Settings > Résumé.")
     try:
-        application = _profile(home).get("resume") or {}
+        application = user_profile.application_resume(_profile(home))   # the file applications upload
         path = Path(root) / application["path"]
         readable = path.is_file() and os.access(path, os.R_OK)
     except (KeyError, TypeError, OSError, ValueError):

@@ -34,7 +34,16 @@ Where things happen:
 - Reject of a research note frees its slot (`REJECTED:<action_id>`), so a later research draft of the
   same person can become a new action (`outreach_promotion.action_id_for`; owner, 2026-10-22).
 
-Never touched here: applications, the CAPTCHA wait, and every executor after the claim.
+Applications (owner, 2026-10-24: the one Review switch holds everything that goes out, job applications
+and email applications included): `applications.process` holds a filled application before its
+SUBMITTING claim (AWAITING_APPLICATION_APPROVAL, the card in `application_approvals`).
+`approve_application` saves exactly the answers on the card (edited or not) to `application_answers`
+under the owner's source and makes the job due; the next applications pass reads the form afresh and
+submits them, holding the job again if a question appears that the approval does not cover.
+`reject_application` closes the job, never submitted. Same compare-and-swap on the payload hash the
+card was shown with.
+
+Never touched here: the CAPTCHA wait, and every executor after the claim.
 """
 
 import contextlib
@@ -891,3 +900,202 @@ def keep_for_review(database, *, home=None, now=None):
         store_mode(database, AUTOMATIC, now)
     _write_file_mode(AUTOMATIC, home)
     return {"state": "KEPT", "mode": AUTOMATIC, "waiting": waiting_count(database)}
+
+
+# --- Applications held by Review (owner, 2026-10-24) ------------------------------------------------
+
+def held_application_keys(database):
+    """THE "application to approve" rule: a job held by Review (BLOCKED on AWAITING_APPLICATION_APPROVAL)
+    with its card waiting, oldest first. Approvals' "Applications waiting", Overview's Needs you row and
+    Applications' "Waiting for your approval" badge all count by it."""
+    if database is None or not _has_table(database, "application_approvals") or not _has_table(database, "application_jobs"):
+        return []
+    return [row[0] for row in database.execute(HELD_APPLICATIONS_SQL)]
+
+
+HELD_APPLICATIONS_SQL = ("SELECT a.job_key FROM application_approvals a JOIN application_jobs j ON j.job_key=a.job_key "
+                         "WHERE a.state='WAITING' AND j.state='BLOCKED' AND j.blocker='AWAITING_APPLICATION_APPROVAL' "
+                         "ORDER BY a.held_at,a.job_key")
+MULTI_CHOICE_TYPES = frozenset({"multi_choice", "multi_select", "multiselect", "checkboxes"})
+PROSE_LENGTH = 80   # an answer this long (or with a line break) is edited in a box of several lines
+
+
+PROSE_TYPES = frozenset({"long_text", "textarea", "paragraph"})
+
+
+def application_control(item):
+    """(control, options) a card shows for one answer - a held application's answer, or an owner
+    question on Questions for you (`approvals_page.answer_control`; one mapping for both, owner
+    2026-10-24): the form's own control as the read reported it ("select", "radio", "checkbox" for
+    several choices, "text", "textarea"), else the one its answer type and options imply. A yes/no
+    question without options is "radio" with Yes and No; a date or number is "date" / "number" (a held
+    card shows those as a one-line box); prose (a long-text type, a long question, a long answer, the
+    unreadable-form note) is "textarea"."""
+    kind = str(item.get("answer_type") or "").strip().casefold().replace(" ", "_").replace("-", "_")
+    control = str(item.get("control") or "").strip().casefold()
+    choices = [choice for choice in item.get("choices") or () if isinstance(choice, str)]
+    value = item.get("value")
+    if item.get("operational"):
+        return "textarea", []
+    if kind in MULTI_CHOICE_TYPES or isinstance(value, list) or (control == "checkbox" and len(choices) > 1):
+        return "checkbox", choices or [str(choice) for choice in value or ()]
+    if choices:
+        return (control if control in ("radio", "select") else "radio" if len(choices) <= 5 else "select"), choices
+    if kind in ("boolean", "bool", "yes_no", "yesno") or isinstance(value, bool):
+        return "radio", ["Yes", "No"]
+    if kind in ("date", "number"):
+        return kind, []
+    label = item.get("label") if isinstance(item.get("label"), str) else ""
+    if (control == "textarea" or kind in PROSE_TYPES or len(label) > PROSE_LENGTH
+            or (isinstance(value, str) and (len(value) > PROSE_LENGTH or "\n" in value))):
+        return "textarea", []
+    return "text", []
+
+
+def shown_answer(item):
+    """The answer as the card shows it: a label, or the list of labels ticked."""
+    value = item.get("value")
+    if isinstance(value, list):
+        return [str(choice) for choice in value]
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return "" if value is None else str(value)
+
+
+def input_name(item, route):
+    """The card's form field for one answer: its own `answer:<field>`, or the cover letter's and the
+    email's subject and body boxes."""
+    import applications
+    if item.get("cover_letter"):
+        return "cover_letter"
+    if route == "email" and item.get("semantic") == applications.EMAIL_BODY_SEMANTIC:
+        return "body"
+    if route == "email" and item.get("semantic") == applications.EMAIL_SUBJECT_SEMANTIC:
+        return "subject"
+    return "answer:" + item["field"]
+
+
+class _NotAnOption(ValueError):
+    pass
+
+
+def _fitted(item, values):
+    """The value the card posted for one answer, fitted to its control (a choice must be one of the
+    form's options; several for a multi-select). `values` is the form's list for that field."""
+    control, options = application_control(item)
+    original = item.get("value")
+    if control == "checkbox":
+        chosen = [value for value in values if isinstance(value, str)]
+        if any(value not in options for value in chosen):
+            raise _NotAnOption(item["field"])
+        return [option for option in options if option in chosen]
+    if not values:
+        return original                      # not on the form: kept as shown
+    raw = values[0] if isinstance(values[0], str) else ""
+    if control in ("radio", "select"):
+        if raw not in options:
+            raise _NotAnOption(item["field"])
+        if raw == shown_answer(item):
+            return original                  # the option shown chosen: the stored answer, unchanged
+        return raw                           # exactly the option picked, never re-derived
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    if isinstance(original, (int, float)) and not isinstance(original, bool):
+        try:
+            number = float(text.strip())
+            return int(number) if number.is_integer() else number
+        except ValueError:
+            return text
+    return text
+
+
+def _application_row(database, job_key, shown_payload_hash):
+    import applications
+    if not _has_table(database, "application_approvals"):
+        return None, None
+    row = database.execute("SELECT * FROM application_approvals WHERE job_key=?", (job_key,)).fetchone()
+    job = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (job_key,)).fetchone()
+    if (row is None or job is None or row["state"] != "WAITING" or row["payload_hash"] != shown_payload_hash
+            or job["state"] != "BLOCKED" or job["blocker"] != applications.AWAITING_APPLICATION_APPROVAL):
+        return None, None
+    return row, job
+
+
+APPLICATION_CHANGED = "This application changed since it was shown. Reload to see where it stands."
+
+
+def approve_application(database, job_key, form, *, shown_payload_hash, now=None, decided_via="dashboard"):
+    """"Approve (my edits) and submit/send": exactly what the card shows is saved, one transaction.
+    `form` is {input name: [values]} as posted (`input_name`). Every answer on the card is written to
+    `application_answers` under OWNER_APPROVED_SOURCE (the answering step never answers it again), the
+    approval records them, and the job is due now (APPLICATION_APPROVED). A choice that is not one of
+    the form's options is refused and nothing is written."""
+    import applications
+    _shown(shown_payload_hash)
+    now = _now(now)
+    form = form if isinstance(form, dict) else {}
+    with engagement.transaction(database):
+        row, job = _application_row(database, job_key, shown_payload_hash)
+        if row is None:
+            return {"state": "CHANGED", "message": APPLICATION_CHANGED}
+        snapshot = json.loads(row["snapshot"])
+        approved, edited = {}, []
+        try:
+            for item in snapshot.get("questions") or ():
+                value = _fitted(item, list(form.get(input_name(item, snapshot.get("route")), [])))
+                approved[item["field"]] = {"semantic": item.get("semantic"), "value": value}
+                if value != item.get("value"):
+                    edited.append(item["field"])
+        except _NotAnOption:
+            return {"state": "REFUSED", "message": "One of the choices is not an option on this form. Reload and try again."}
+        subject = None
+        route = snapshot.get("route")
+        if route == "email" and not any(input_name(item, route) == "subject" for item in snapshot.get("questions") or ()):
+            # The subject box when no answer carries it (the posting names one, or none was drafted):
+            # what the box says is the subject sent; an empty box keeps the posting's.
+            posted = form.get("subject") or []
+            typed = posted[0].strip() if posted and isinstance(posted[0], str) else ""
+            subject = typed or snapshot.get("subject")
+            if subject != snapshot.get("subject"):
+                edited.append("subject")
+        source = applications.OWNER_APPROVED_SOURCE + row["approval_id"]
+        for field, answer in approved.items():
+            database.execute("""INSERT INTO application_answers VALUES (?,?,?,?,?) ON CONFLICT(job_key,field)
+                DO UPDATE SET semantic=excluded.semantic,value=excluded.value,source=excluded.source""",
+                             (job_key, field, answer["semantic"], json.dumps(answer["value"]), source))
+        # The approval covers the résumé that will be uploaded and where the application goes too
+        # (`applications.approved_application` holds the job again if either changes).
+        record = {"answers": approved, "subject": subject, "edited": edited, "decided_via": decided_via,
+                  "resume_sha256": snapshot.get("resume_sha256"), "destination": snapshot.get("destination")}
+        changed = database.execute("""UPDATE application_approvals SET state='APPROVED',decided_at=?,approved=?
+            WHERE job_key=? AND state='WAITING' AND payload_hash=?""",
+                                   (now, json.dumps(record, sort_keys=True), job_key, shown_payload_hash))
+        if changed.rowcount != 1:
+            raise RuntimeError("APPLICATION_APPROVAL_CHANGED")   # rolled back; cannot happen inside the transaction
+        applications.hold(database, dict(job), applications.APPLICATION_APPROVED,
+                          "Approved on Approvals; submitted on the next applications pass", now, "BLOCKED", None, route="ORDINARY")
+        applications.event(database, job_key, "APPLICATION_APPROVED",
+                           {"approval_id": row["approval_id"], "edited": edited, "decided_via": decided_via}, now)
+        return {"state": "APPROVED", "edited": bool(edited), "route": snapshot.get("route")}
+
+
+def reject_application(database, job_key, *, shown_payload_hash, reason=None, now=None, decided_via="dashboard"):
+    """"Reject, never submit": the job is closed (ABANDONED, APPLICATION_REJECTED_BY_YOU) and never
+    submitted or retried. `reason` is the owner's optional note, kept as written (at most 1000
+    characters); nothing reads it to decide anything."""
+    import applications
+    _shown(shown_payload_hash)
+    now = _now(now)
+    noted = reason.strip()[:1000] if isinstance(reason, str) and reason.strip() else None
+    with engagement.transaction(database):
+        row, job = _application_row(database, job_key, shown_payload_hash)
+        if row is None:
+            return {"state": "CHANGED", "message": APPLICATION_CHANGED}
+        database.execute("UPDATE application_approvals SET state='REJECTED',decided_at=?,reason=? WHERE job_key=?",
+                         (now, noted, job_key))
+        applications.hold(database, dict(job), applications.APPLICATION_REJECTED,
+                          "You rejected this application on Approvals" + (": " + noted if noted else ""),
+                          now, "ABANDONED", None, route="OWNER")
+        applications.event(database, job_key, "APPLICATION_REJECTED",
+                           {"approval_id": row["approval_id"], "reason": noted, "decided_via": decided_via}, now)
+        snapshot = json.loads(row["snapshot"])
+        return {"state": "REJECTED", "route": snapshot.get("route")}

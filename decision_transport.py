@@ -61,8 +61,11 @@ def initialize(database):
     columns = {row[1] for row in database.execute("PRAGMA table_info(user_decisions)")}
     # `label`: the question as the form asks it (owner, 2026-10-24), shown on Approvals and kept with the
     # answer for Settings; NULL for older rows and for the operational escalation.
+    # `required`, `hint` (the input format the form states) and `site_reason` (why the application
+    # site refused the owner's earlier answer to this question) are shown on the card (owner,
+    # 2026-10-24); NULL for older rows.
     for name, definition in {"kind": "TEXT NOT NULL DEFAULT 'fact'", "owner_id": "TEXT", "replaces_id": "TEXT",
-                             "label": "TEXT"}.items():
+                             "label": "TEXT", "required": "INTEGER", "hint": "TEXT", "site_reason": "TEXT"}.items():
         if name not in columns:
             database.execute(f"ALTER TABLE user_decisions ADD COLUMN {name} {definition}")
     database.execute("CREATE UNIQUE INDEX IF NOT EXISTS decision_replacement ON user_decisions(replaces_id) WHERE replaces_id IS NOT NULL")
@@ -193,6 +196,8 @@ CLASSIFIED_POLICY_KEYS = frozenset({
     "resume", "retry_delays_seconds", "salary_relaxation", "source",
     # E4.T2: the raw résumé upload and its saved text, read as context, never a form answer.
     "resume_raw",
+    # Owner, 2026-10-24: which of the two résumés applications upload; never a form answer.
+    "application_resume",
     # E1.T7: scope-targeting preferences like `levels`, never a form answer.
     "countries", "target_specializations",
     # E4.T1: Setup's raw picks, a copy of what `levels` and `location_priority` already carry,
@@ -245,7 +250,7 @@ def decision_policy(kind, field, semantic, policy):
                   "unclassified": {key: value for key, value in policy.items()
                                    if key not in CLASSIFIED_POLICY_KEYS}}
     if semantic in RESUME_SEMANTICS:
-        projection["resume_path"] = (policy.get("resume") or {}).get("path")
+        projection["resume_path"] = user_profile.application_resume(policy).get("path")
     return projection
 
 
@@ -330,6 +335,10 @@ def fact_summary(job, question, expires_at):
     required = "yes or no" if answer_type == "boolean" else "the factual answer"
     if answer_type == "choice":
         required = "exactly one of: " + encoded(question.get("choices", []))
+    elif answer_type == "date":
+        required = "a date as yyyy-mm-dd"
+    elif answer_type == "number":
+        required = "a number"
     return (f"{job['employer']} / {job['requisition']}: required answer for {question.get('label', question['id'])}. "
             f"Application attempts: {job['attempts']}. Owner: user. "
             f"Reply to this exact message with {required}. Request expires at: {deadline}. "
@@ -356,11 +365,12 @@ def reissue_fact(database, decision, now):
                + fact_summary(job, question, decision["expires_at"]))
     database.execute("""INSERT INTO user_decisions(
         id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,policy_hash,
-        expires_at,state,summary,event_key,kind,owner_id,replaces_id,label)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,'fact',?,?,?)""",
+        expires_at,state,summary,event_key,kind,owner_id,replaces_id,label,required,hint,site_reason)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,'fact',?,?,?,?,?,?)""",
         (identifier, decision["job_key"], decision["field"], decision["semantic"], decision["answer_type"],
          decision["choices"], decision["payload_hash"], decision["job_hash"], decision["policy_hash"],
-         decision["expires_at"], summary, "decision:" + identifier, decision["owner_id"], decision["id"], label))
+         decision["expires_at"], summary, "decision:" + identifier, decision["owner_id"], decision["id"], label,
+         *(decision[key] if key in decision.keys() else None for key in ("required", "hint", "site_reason"))))
     database.execute("INSERT INTO notification_outbox(event_key,message,state,updated_at) VALUES (?,?,'WAITING_TRANSPORT',?)",
                      ("decision:" + identifier, summary, now))
     return identifier
@@ -386,8 +396,11 @@ def request_fact(database, job, question, policy, now):
     summary = fact_summary(job, question, expires_at)
     event_key = "decision:" + identifier
     label = question.get("label") if isinstance(question.get("label"), str) and question["label"].strip() else None
-    database.execute("INSERT INTO user_decisions(id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,policy_hash,expires_at,state,summary,event_key,label) VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)",
-                     (identifier, job["job_key"], question["id"], question["semantic"], question.get("answer_type", "text"), encoded(question.get("choices", [])), payload_hash, job_hash, policy_hash, expires_at, summary, event_key, label))
+    text = lambda key: question[key].strip() if isinstance(question.get(key), str) and question[key].strip() else None
+    database.execute("INSERT INTO user_decisions(id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,policy_hash,expires_at,state,summary,event_key,label,required,hint,site_reason) VALUES (?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?)",
+                     (identifier, job["job_key"], question["id"], question["semantic"], question.get("answer_type", "text"), encoded(question.get("choices", [])), payload_hash, job_hash, policy_hash, expires_at, summary, event_key, label,
+                      1 if question.get("required") is True else 0 if question.get("required") is False else None,
+                      text("format"), text("site_reason")))
     database.execute("INSERT OR IGNORE INTO notification_outbox(event_key,message,state,updated_at) VALUES (?,?,'WAITING_TRANSPORT',?)", (event_key, summary, now))
     return identifier
 
@@ -518,15 +531,9 @@ def _apply_answer(database, decision, job, response, now):
     answer of the wrong type is INVALID_ANSWER and the question is asked again (`reissue_fact`)."""
     response = response if isinstance(response, dict) else {}
     raw = response.get("raw")
-    valid_answer = response.get("status") == "answered" and isinstance(raw, str) and 0 < len(raw.strip()) <= 4000
-    value = raw.strip() if valid_answer else None
-    if valid_answer and decision["answer_type"] == "boolean":
-        valid_answer = value.casefold() in {"yes", "no", "true", "false"}
-        value = value.casefold() in {"yes", "true"}
-    elif valid_answer and decision["answer_type"] == "choice":
-        valid_answer = value in json.loads(decision["choices"])
-    elif decision["answer_type"] != "text":
-        valid_answer = False
+    valid_answer = response.get("status") == "answered" and isinstance(raw, str)
+    if valid_answer:
+        valid_answer, value = fits_control(decision["answer_type"], json.loads(decision["choices"]), raw)
     if valid_answer:
         database.execute("INSERT INTO application_answers VALUES (?,?,?,?,?) ON CONFLICT(job_key,field) DO UPDATE SET semantic=excluded.semantic,value=excluded.value,source=excluded.source", (decision["job_key"], decision["field"], decision["semantic"], encoded(value), "authenticated-owner-decision:" + decision["id"]))
         database.execute("UPDATE user_decisions SET state='ANSWERED',raw_response=? WHERE id=?", (encoded(response), decision["id"]))
@@ -535,6 +542,52 @@ def _apply_answer(database, decision, job, response, now):
     database.execute("UPDATE user_decisions SET state='INVALID_ANSWER',raw_response=?,last_error='Exact factual answer required, approval is not an answer' WHERE id=?", (encoded(response), decision["id"]))
     reissue_fact(database, decision, now)
     return "INVALID_ANSWER"
+
+
+ANSWER_TYPES = frozenset({"text", "boolean", "choice", "multi_choice", "date", "number"})
+
+
+def fits_control(answer_type, choices, raw):
+    """(fits, value): whether `raw` fits the form's control, by its structured type only (owner,
+    2026-10-24): a date is an ISO date (the card's date picker sends one; the application browser
+    enters it in the site's format), a number parses as a finite number, a choice is one of the
+    form's options, a multi-choice is a JSON list of one or more of them (the card's checkboxes), a yes/no
+    is yes or no; text is any non-empty text. `value` is what is stored."""
+    value = raw.strip() if isinstance(raw, str) else ""
+    if answer_type == "multi_choice":
+        try:
+            picked = json.loads(value)
+        except ValueError:
+            return False, None
+        fits = (isinstance(picked, list) and bool(picked) and len(picked) == len(set(map(str, picked)))
+                and all(isinstance(item, str) and item in (choices or []) for item in picked))
+        return fits, picked if fits else None
+    if not 0 < len(value) <= 4000:
+        return False, None
+    if answer_type == "boolean":
+        return value.casefold() in {"yes", "no", "true", "false"}, value.casefold() in {"yes", "true"}
+    if answer_type == "choice":
+        return value in (choices or []), value
+    if answer_type == "date":
+        try:
+            dt.date.fromisoformat(value)
+        except ValueError:
+            return False, None
+        return len(value) == 10, value
+    if answer_type == "number":
+        try:
+            number = float(value.replace(",", ""))
+        except ValueError:
+            return False, None
+        return number == number and abs(number) != float("inf"), value
+    return answer_type == "text", value
+
+
+NOT_FITTING = {"date": "This question needs a date. Pick one with the date picker.",
+               "number": "This question needs a number.",
+               "choice": "Choose one of the form's options.",
+               "multi_choice": "Tick one or more of the form's options.",
+               "boolean": "Choose Yes or No."}
 
 
 DASHBOARD_REFUSALS = {
@@ -582,6 +635,10 @@ def answer_locally(database, decision_id, raw, *, shown_payload_hash, policy=Non
             reason = "QUESTION_EXPIRED"
         elif not _valid_against_job(decision, job, policy, milliseconds):
             reason = "QUESTION_STALE"
+        elif not fits_control(decision["answer_type"], json.loads(decision["choices"]), raw)[0]:
+            # An answer that does not fit the control is refused here and the same card stays, with
+            # the reason; nothing is recorded against the question (owner, 2026-10-24).
+            reason = "ANSWER_DOES_NOT_FIT"
         else:
             reason = None
         state = "REJECTED_STALE_OR_MISMATCH" if reason else _apply_answer(database, decision, job, response, now)
@@ -590,6 +647,9 @@ def answer_locally(database, decision_id, raw, *, shown_payload_hash, policy=Non
         # The next negative seq is taken by the INSERT itself (one statement), never read beforehand.
         database.execute("INSERT INTO transport_inbox SELECT MIN(0, COALESCE(MIN(seq),0))-1,?,?,?,?,1 FROM transport_inbox",
                          (decision["id"], encoded(payload), state, now))
+    if reason == "ANSWER_DOES_NOT_FIT":
+        return {"state": "REFUSED", "reason": reason,
+                "message": NOT_FITTING.get(decision["answer_type"], "Write an answer first.")}
     if reason:
         return {"state": "REFUSED", "reason": reason, "message": DASHBOARD_REFUSALS[reason]}
     if state == "INVALID_ANSWER":

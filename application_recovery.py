@@ -41,6 +41,8 @@ RECOVERABLE = {
 # never takes one of them as the blocker it recovers (`recover`).
 USER_HOLDS = {
     "REQUIRED_ELIGIBILITY_ANSWER", "DESIGNATED_RESUME_MISMATCH", "APPLICATION_AUTHORIZATION_REQUIRED",
+    # Review mode holds the application for the owner's approval (owner, 2026-10-24).
+    "AWAITING_APPLICATION_APPROVAL",
 }
 # Browser permission handling is deleted (owner, 2026-09-27 item 2 and 2026-09-30): a read the
 # browser platform refused is an ordinary failed read, retried on the ordinary path and bounded

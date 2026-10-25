@@ -247,6 +247,15 @@ class ResearchFirstTests(ResearchFixture):
         self.assertFalse([action for action in actions if action.startswith("service-cycle")],
                          "the research job reserves nothing on behalf of the services")
 
+    def test_e2_e3_an_exhausted_day_or_a_shutdown_is_not_a_new_error(self):
+        """A tick that finds the day already EXHAUSTED, or a SIGTERM shutdown, exits 0; a failed run exits 1."""
+        codes = {}
+        for state in ("EXHAUSTED", "INTERRUPTED", "FAILED"):
+            with patch.object(orchestrator, "research", lambda *args, state=state: {"state": state, "day": "d"}), \
+                    patch.object(orchestrator, "log_retention", SimpleNamespace(print_result=lambda *args: None)):
+                codes[state] = orchestrator.research_service_tick(self.root, self.config, self.database, self.pipeline)
+        self.assertEqual(codes, {"EXHAUSTED": 0, "INTERRUPTED": 0, "FAILED": 1})
+
     def test_an_ordinary_tick_costs_nothing_and_the_ordering_is_a_no_op(self):
         """Once the day is recorded, research reserves nothing: the reorder is free."""
         first = self.research()

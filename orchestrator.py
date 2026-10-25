@@ -1404,8 +1404,9 @@ def _research_service_tick(root, config, database, pipeline):
     observation = json.loads(latest_path.read_text()).get("observation", {}) if latest_path.exists() else {}
     result = research(root, config, database, pipeline, observation)
     if result["state"] == "INTERRUPTED":
+        # A shutdown (Sidedoor quit or restarted) is not a failure (owner 2026-10-24): exit 0.
         write_json(paths.reports(root) / "research-status.json", result)
-        return 143
+        return 0
     # Research ONLY (owner, 2026-09-23: "separate it so that research only runs research alone
     # and the other runs the full cycle (excluding researh)"). This used to run research and
     # then TWO service_cycle passes in the same process, so loading the research agent by itself
@@ -1419,7 +1420,9 @@ def _research_service_tick(root, config, database, pipeline):
     result["invocation_source"] = "launchd" if os.environ.get("XPC_SERVICE_NAME", "").startswith(run_locks.LAUNCHD_LABEL_PREFIX) else "manual_or_unattributed"
     write_json(paths.reports(root) / "research-status.json", result)
     log_retention.print_result(result, paths.reports(root) / "research-status.json")
-    return 1 if result["state"] in {"FAILED", "EXHAUSTED"} else 0
+    # Only a run that failed on this tick is an error. A tick that finds the day already EXHAUSTED
+    # (`daily_schedule.claim`) started nothing (owner 2026-10-24: not a new error).
+    return 1 if result["state"] == "FAILED" else 0
 
 
 def research_turn_pending(config, database, now=None, read_only=False):

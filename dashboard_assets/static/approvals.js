@@ -23,3 +23,34 @@ document.addEventListener("input", function (event) {
     button.textContent = value === original ? "Approve and send" : "Approve my edit";
   }
 });
+
+// Applications waiting (owner, 2026-10-24): "Cancel" puts the shown answers back (a form reset) and
+// leaves edit mode (the CSS toggle is a checkbox on the card). The approve button says "Approve my
+// edits and ..." once anything on the card differs from what was shown, else "Approve and ...".
+document.addEventListener("click", function (event) {
+  var cancel = event.target.closest && event.target.closest(".approval-a-cancel");
+  if (!cancel) return;
+  var card = cancel.closest("article");
+  var toggle = card.querySelector(".approval-a-editing");
+  if (toggle) setTimeout(function () { toggle.checked = false; card.classList.remove("approval-a-changed"); }, 0);
+});
+
+function applicationChanged(card) {
+  var controls = card.querySelectorAll(".approval-a-control, .approval-a-choices input");
+  for (var i = 0; i < controls.length; i++) {
+    var c = controls[i];
+    if (c.type === "checkbox" || c.type === "radio") { if (c.checked !== c.defaultChecked) return true; }
+    else if (c.tagName === "SELECT") {
+      for (var j = 0; j < c.options.length; j++) if (c.options[j].selected !== c.options[j].defaultSelected) return true;
+    } else if (c.value !== c.defaultValue) return true;
+  }
+  return false;
+}
+
+["input", "change"].forEach(function (kind) {
+  document.addEventListener(kind, function (event) {
+    var card = event.target.closest && event.target.closest(".approval-app");
+    if (!card || !event.target.matches(".approval-a-control, .approval-a-choices input")) return;
+    card.classList.toggle("approval-a-changed", applicationChanged(card));
+  });
+});

@@ -24,6 +24,7 @@ import research_workflow
 import resume_intake
 import setup_steps
 import user_profile
+import version
 
 DEPENDENCIES = all(importlib.util.find_spec(name) for name in ("fastapi", "httpx"))
 if DEPENDENCIES:
@@ -245,6 +246,26 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual(404, self.client.get("/settings/resume/file/application").status_code)
         self.assertEqual(404, self.client.get("/settings/resume/file/other").status_code)
 
+    def test_application_resume_choice_is_saved_and_shown(self):
+        folder = self.home / "resume"
+        folder.mkdir()
+        (folder / "raw-1.docx").write_bytes(b"raw")
+        (folder / "application-1.pdf").write_bytes(b"%PDF ats")
+        (self.home / "profile.json").write_text(json.dumps({
+            "resume_raw": {"path": str(folder / "raw-1.docx"), "file_name": "cv.docx", "sha256": RAW_SHA},
+            "resume": {"path": str(folder / "application-1.pdf"), "sha256": "x"}}))
+        self.assertIn('value="ats" checked', self.client.get("/settings").text)   # the default
+        page = self.client.post("/settings/resume/choice", data={"application_resume": "original"}, headers=HTMX).text
+        self.assertEqual(self.profile()["application_resume"], "original")
+        self.assertIn('value="original" checked', page)
+        self.assertIn('value="original" checked', self.client.get("/settings").text)
+        self.client.post("/settings/resume/choice", data={"application_resume": "other"}, headers=HTMX)
+        self.assertEqual(self.profile()["application_resume"], "original")   # an unknown value writes nothing
+        (folder / "raw-1.docx").unlink()   # the chosen original is gone: the ATS version is used, and said
+        page = self.client.get("/settings").text
+        self.assertIn('value="ats" checked', page)
+        self.assertIn("applications upload the ATS version", page)
+
     # --- Mode -------------------------------------------------------------------------------------
 
     def test_mode_toggle_is_setup_step_4s(self):
@@ -262,7 +283,7 @@ class SettingsPageTest(unittest.TestCase):
         self.assertIn("...9z8y", page)
         self.assertNotIn(OPENROUTER_KEY, outside_box(page, OPENROUTER_KEY, "s-openrouter-key"))
         self.assertIn('data-reveal="s-openrouter-key" aria-controls="s-openrouter-key" aria-label="Show key"', page)
-        self.assertIn('<script src="/static/settings.js" defer></script>', page)
+        self.assertIn('<script src="/static/settings.js?v=%s" defer></script>' % version.current(), page)
         self.assertIn('aria-label", show ? "Hide key" : "Show key"', self.client.get("/static/settings.js").text)
         with mock.patch.object(setup_steps.text_model, "_post", return_value=(200, OK_ANSWER)) as post:
             tested = self.client.post("/settings/openrouter/test", headers=HTMX).text
@@ -494,7 +515,7 @@ class SettingsPageTest(unittest.TestCase):
         page = self.client.get("/settings").text
         self.assertIn('<div class="setup-layout guide-on-demand">', page)
         self.assertIn('<aside class="guide-panel card" id="guide-panel" aria-live="polite"></aside>', page)
-        self.assertIn("Every message is shown on the Networking &amp; Referrals page.", page)
+        self.assertIn("Messages are shown on Networking &amp; Referrals, applications on Applications.", page)
         self.assertIn("<h3>", self.client.get("/setup/guide/license", headers=HTMX).text)
 
     def test_manage_subscription_opens_the_billing_portal_or_falls_back_to_support(self):

@@ -1,11 +1,15 @@
 {# Report a problem (owner pick F3 a): on the Failures page and in Settings. report_problem.js asks
-   POST /report-problem for the privacy-safe summary, copies it and opens GitHub's bug-report form. #}
+   POST /report-problem for the privacy-safe summary, copies it and opens GitHub's bug-report form.
+   Email support (owner, 2026-10-24): support_email.js asks POST /report-problem/email to start a draft
+   to support in the user's webmail, copies the same summary and shows the draft's status. #}
 <section class="card report-problem" id="report-problem" aria-labelledby="report-problem-title">
   <h2 id="report-problem-title">Report a problem</h2>
   <p>
     <button class="button" type="button" id="report-problem-button">Report a problem</button>
+    <button class="button button-quiet" type="button" id="support-email-button">Email support</button>
     <span class="muted" id="report-problem-status" role="status"></span>
   </p>
+  <p class="muted" id="support-email-status" role="status" hidden></p>
   <p class="muted">Your summary is copied, not sent. Paste it into the issue. Account or billing questions: support@yoursidedoor.com</p>
   <div id="report-problem-fallback" hidden>
     <label for="report-problem-text">Your summary (select it and copy it if it wasn't copied):</label>
@@ -13,4 +17,5 @@
     <p><a class="button button-quiet" id="report-problem-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open the GitHub issue form</a></p>
   </div>
 </section>
-<script src="/static/report_problem.js" defer></script>
+<script src="{{ asset_url('/static/report_problem.js') }}" defer></script>
+<script src="{{ asset_url('/static/support_email.js') }}" defer></script>

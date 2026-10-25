@@ -58,6 +58,11 @@ class SetupStepsTest(unittest.TestCase):
     def mode(self, name):
         return stat.S_IMODE((self.home / name).stat().st_mode)
 
+    def test_a_long_resume_name_is_shortened_by_its_stem_and_keeps_its_extension(self):
+        with mock.patch.object(setup_steps, "start_resume_read", side_effect=lambda config, home, raw: raw):
+            raw = setup_steps.save_resume("A" * 200 + ".docx", b"resume", CONFIG, self.home)
+        self.assertEqual(raw["file_name"], "A" * 115 + ".docx")
+
     # --- step 1 ---
     def openrouter(self, status, body):
         calls = []

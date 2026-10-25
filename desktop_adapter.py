@@ -477,7 +477,7 @@ class DesktopAdapter:
             body.update({key: payload[key] for key in ("questions", "conditional_questions_deferred",
                                                        "candidate_email_binding", "recorded_facts", "eligible_location")
                          if key in payload})
-            body["resume_sha256"] = policy["resume"]["sha256"]
+            body["resume_sha256"] = user_profile.application_resume(policy)["sha256"]
         return body
 
     def cached(self, operation, payload):
@@ -692,8 +692,9 @@ def submission_gate(database, root, request, now):
     # as VERIFIED_ANSWERS_CHANGED (pawnee health, 2026-09-21).
     if missing or answers != submitted:
         raise ValueError("VERIFIED_ANSWERS_CHANGED")
-    resume = root / policy["resume"]["path"]
-    if Path(payload["resume"]).resolve() != resume.resolve() or hashlib.sha256(resume.read_bytes()).hexdigest() != policy["resume"]["sha256"]:
+    designated = user_profile.application_resume(policy)   # the file the user chose in Settings > Résumé
+    resume = root / designated["path"]
+    if Path(payload["resume"]).resolve() != resume.resolve() or hashlib.sha256(resume.read_bytes()).hexdigest() != designated["sha256"]:
         raise ValueError("DESIGNATED_RESUME_MISMATCH")
     if payload.get("attachments"):
         # Every other attached file is one this product generated for this job (a cover letter),

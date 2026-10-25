@@ -342,6 +342,12 @@ def initialize(database):
         CREATE TABLE IF NOT EXISTS application_company_facts (
             employer TEXT PRIMARY KEY, facts TEXT NOT NULL, facts_sha256 TEXT NOT NULL,
             updated_at TEXT NOT NULL);
+        -- Review mode holds applications too (owner, 2026-10-24): one row per held job, the
+        -- application as it would be submitted (`snapshot`), and the owner's decision on it.
+        CREATE TABLE IF NOT EXISTS application_approvals (
+            job_key TEXT PRIMARY KEY, approval_id TEXT NOT NULL, state TEXT NOT NULL,
+            held_at TEXT NOT NULL, snapshot TEXT NOT NULL, payload_hash TEXT NOT NULL,
+            decided_at TEXT, approved TEXT, reason TEXT);
     """)
     if "result" not in {row[1] for row in database.execute("PRAGMA table_info(application_attempts)")}:
         database.execute("ALTER TABLE application_attempts ADD COLUMN result TEXT")
@@ -2124,13 +2130,15 @@ def resolve_answers(questions, policy):
                 # something else.
                 if not recorded_answer_for_ai(matches[0], question):
                     saved = matches[0]
-        if saved and semantic in RESUME_SEMANTICS and saved.get("value") != (policy.get("resume") or {}).get("path"):
-            # The main resume control takes the designated resume, carried out of band and
-            # hash-checked (other file controls may take a generated cover letter). An answer for
-            # the resume question is therefore allowed to be exactly one thing: a pointer to
-            # that same designated file. Anything else - an owner-supplied path, a stale
-            # path from an earlier policy - is refused rather than attached.
-            saved = None
+        if saved and semantic in RESUME_SEMANTICS:
+            # The main resume control takes the designated resume (the file the user chose in
+            # Settings > Résumé, `user_profile.application_resume`), carried out of band and
+            # hash-checked (other file controls may take a generated cover letter). The answer is
+            # therefore always that file's path, whatever path the saved pointer names (owner,
+            # 2026-10-24: the choice can change, and the ATS version is used when the chosen
+            # original is gone); with no designated file there is nothing to attach.
+            designated = user_profile.application_resume(policy).get("path")
+            saved = dict(saved, value=designated) if designated else None
         if not saved or not saved.get("source") or semantic != saved.get("semantic"):
             if optional:
                 continue
@@ -2738,9 +2746,13 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
                            or (submit["state"] == "CLAIMED" and not submit["result"])
                            or str(blocked.get("code") or "") in CAPABILITY_BLOCKERS)
             with database:
-                if environment:
+                # The site refused a supplied answer: the question goes to the owner and the try is
+                # not spent (owner, 2026-10-24).
+                reasked = reask_refused_answer(database, job, blocked, policy, now)
+                if environment or reasked:
                     database.execute("UPDATE application_jobs SET attempts=MAX(attempts-1,0) WHERE job_key=?", (job["job_key"],))
-                    event(database, job["job_key"], "ATTEMPT_NOT_COUNTED_CAPABILITY_BLOCKED",
+                    event(database, job["job_key"], "ATTEMPT_NOT_COUNTED_ANSWER_REFUSED" if reasked
+                          else "ATTEMPT_NOT_COUNTED_CAPABILITY_BLOCKED",
                           {"request_id": submit["request_id"], "request_state": submit["state"],
                            "code": blocked.get("code")}, now)
                 database.execute("UPDATE application_attempts SET state='CONFIRMED_NOT_SUBMITTED',result=? "
@@ -2751,7 +2763,7 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
                 event(database, job["job_key"], "RECONCILED_GUARD_NEVER_ARMED",
                       {"request_id": submit["request_id"], "request_state": submit["state"]}, now)
                 # Upload failures are free one at a time but bounded in total (owner, 2026-10-01).
-                if not give_up_on_uploads(database, job, now):
+                if not reasked and not give_up_on_uploads(database, job, now):
                     if str(blocked.get("code") or "") in ACCESS_BLOCK_CODES:
                         # A login/2FA/CAPTCHA stop before arming: an hour, then the third abandons
                         # (owner, 2026-10-11).
@@ -3409,7 +3421,7 @@ def record_conditional_questions(database, job, questions, now):
     for question in questions:
         if not (isinstance(question, dict) and question_label(question) and question.get("required") is True):
             continue
-        entry = {key: question.get(key) for key in ("id", "label", "semantic", "required", "answer_type", "choices", "max_characters") if key in question}
+        entry = {key: question.get(key) for key in ("id", "label", "semantic", "required", "answer_type", "control", "choices", "max_characters") if key in question}
         field = question_field(question)
         if field not in stored:
             added.append(entry)
@@ -3742,23 +3754,25 @@ OWNER_QUESTION_ACTION = ("Answer the application's questions on Approvals (Quest
                          "goes on at its next turn after the last answer")
 
 
-def owner_questions(outcome, questions, missing):
-    """{field: question} of the still-missing REQUIRED questions whose last answering verdict is that
-    no truthful answer exists in the owner's records: the judge returned CANNOT_ANSWER (InsForge's
+def owner_questions(outcome, questions, unanswered):
+    """{field: question} of the still-unanswered questions, required or optional (owner, 2026-10-24:
+    "ask on the Questions for you card for ANY question"), whose last answering verdict is that no
+    truthful answer exists in the owner's records: the judge returned CANNOT_ANSWER (InsForge's
     "GitHub profile", 2026-10-23), or the answering AI said UNKNOWN and the judge accepted that
     (ASI's export-control status). A verdict from a failed judge or repair call, a round limit or a
     value that does not fit its control carries no judge verdict of that kind and stays the AI's
-    retry. Python reads only the verdict codes, never the question text."""
+    retry (an optional one is left blank, as before). Python reads only the verdict codes, never
+    the question text."""
     verdicts = {}
     for verdict in ((outcome if isinstance(outcome, dict) else {}).get("audit") or {}).get("verdicts") or ():
         if isinstance(verdict, dict) and verdict.get("question_key"):
             verdicts[verdict["question_key"]] = verdict   # the last verdict per question wins
     by_field = {}
     for question in questions:
-        if isinstance(question, dict) and question.get("required"):
+        if isinstance(question, dict):
             by_field.setdefault(question_field(question), question)
     asked = {}
-    for field in missing:
+    for field in unanswered:
         verdict, question = verdicts.get(field) or {}, by_field.get(field)
         judge = verdict.get("judge") if isinstance(verdict.get("judge"), dict) else {}
         if question is None or verdict.get("outcome") != "UNKNOWN" or verdict.get("judge_failed"):
@@ -3773,15 +3787,24 @@ BOOLEAN_ANSWER_TYPES = frozenset({"boolean", "bool", "yes_no", "yesno"})
 
 
 def owner_question(field, question):
-    """The question as `decision_transport.request_fact` files it: the form's label and its own
-    options. A question with options is a choice (the card shows them as radio buttons); a yes/no
-    control without options is yes/no; anything else is free text."""
+    """The question as `decision_transport.request_fact` files it: the form's label, its own
+    options, whether it is required and the input format it states. A multi-select question with
+    options stays multi_choice (checkboxes; its answer is a list); another question with options is a
+    choice (the card shows them as radio buttons); a yes/no control without options is yes/no; a
+    date or number control keeps its type (owner, 2026-10-24: the card shows the form's own
+    control); anything else is free text."""
     choices = [choice.strip() for choice in question.get("choices") or () if isinstance(choice, str) and choice.strip()]
     kind = str(question.get("answer_type") or "").strip().casefold()
-    answer_type = "choice" if choices else "boolean" if kind in BOOLEAN_ANSWER_TYPES else "text"
+    answer_type = ("multi_choice" if choices and kind == "multi_choice" else "choice" if choices
+                   else "boolean" if kind in BOOLEAN_ANSWER_TYPES
+                   else kind if kind in ("date", "number") else "text")
     label = question.get("label") if isinstance(question.get("label"), str) and question["label"].strip() else None
-    return {"id": field, "semantic": question.get("semantic") or field, "label": label,
-            "answer_type": answer_type, "choices": list(dict.fromkeys(choices))}
+    asked = {"id": field, "semantic": question.get("semantic") or field, "label": label,
+             "answer_type": answer_type, "choices": list(dict.fromkeys(choices))}
+    for key in ("required", "format", "site_reason"):
+        if question.get(key) is not None:
+            asked[key] = question[key]
+    return asked
 
 
 def ask_owner(database, job, asked, policy, now):
@@ -3802,6 +3825,91 @@ def ask_owner(database, job, asked, policy, now):
         # same question is superseded, never left beside it.
         _close_cards(database, job["job_key"], "QUESTION_REASKED", now,
                      "field=? AND id<>?", (field, identifier))
+
+
+OWNER_ANSWER_REFUSED_EVENT = "OWNER_ANSWER_REFUSED_BY_SITE"
+REFUSED_TWICE_CODE = "ANSWER_REFUSED_TWICE"
+REFUSED_TWICE_EVENT = "ANSWER_REFUSED_TWICE"
+DATE_ORDER_CODE = "DATE_ORDER_UNCLEAR"
+DATE_ORDER_EVENT = "DATE_ORDER_UNCLEAR"
+
+
+def reask_refused_answer(database, job, blocked, policy, now):
+    """A submit that stopped before arming because the application site refused a supplied answer
+    (INVALID_SUPPLIED_ANSWER, naming the question's field as a structured value). The answer is
+    dropped and the question goes to the owner's card with the site's reason, the job held for the
+    owner like any other owner question, whether the refused answer was the owner's
+    (authenticated-owner-decision:<id>; the new card replaces that one, `replaces_id`) or the AI's
+    (owner, 2026-10-24). When the site refuses the SAME value (the owner's or the AI's) for the same
+    field a second time (counted from the recorded events by field and value hash), the job is closed
+    instead (REFUSED_TWICE_CODE). A date field that does not show its day/month order
+    (DATE_ORDER_CODE) closes the job at once: nobody is asked, nothing is guessed. Returns "REASKED",
+    "CLOSED" or None (not this case); either way the caller does not spend the try. Caller holds the
+    transaction."""
+    code = blocked.get("code") if isinstance(blocked, dict) else None
+    field = blocked.get("field") if code in ("INVALID_SUPPLIED_ANSWER", DATE_ORDER_CODE) else None
+    if not isinstance(field, str) or not field:
+        return None
+    if code == DATE_ORDER_CODE:
+        record = requisition_record(database, job["job_key"]) or {}
+        read = [item for item in json.loads(record.get("questions") or "[]") + json.loads(record.get("conditional_questions") or "[]")
+                if isinstance(item, dict) and question_field(item) == field]
+        label = question_label(read[0]) if read else None
+        hold(database, job, DATE_ORDER_CODE, "The site's date field does not show its day/month order; apply by hand",
+             now, "EXHAUSTED")
+        event(database, job["job_key"], DATE_ORDER_EVENT, {"field": field, "label": label or None}, now)
+        return "CLOSED"
+    row = database.execute("SELECT source,value FROM application_answers WHERE job_key=? AND field=?",
+                           (job["job_key"], field)).fetchone()
+    if not row:
+        return None
+    source = row[0] if isinstance(row[0], str) else ""
+    # The owner's own value: answered on a Questions card, or approved on a held application's card
+    # (Review mode). A reasked answer differs from the approved one, so `approved_application` no
+    # longer covers it and Review mode holds the application for approval again before any submit.
+    owner = source.startswith(("authenticated-owner-decision:", OWNER_APPROVED_SOURCE))
+    answered = source.split(":", 1)[1] if source.startswith("authenticated-owner-decision:") else None
+    previous = database.execute("SELECT * FROM user_decisions WHERE id=? AND job_key=? AND kind='fact'",
+                                (answered, job["job_key"])).fetchone() if answered else None
+    record = requisition_record(database, job["job_key"]) or {}
+    read = [item for item in json.loads(record.get("questions") or "[]") + json.loads(record.get("conditional_questions") or "[]")
+            if isinstance(item, dict) and question_field(item) == field]
+    if read:
+        question = read[0]
+    elif previous is not None:
+        question = {"semantic": previous["semantic"], "label": previous["label"],
+                    "answer_type": previous["answer_type"], "choices": json.loads(previous["choices"]),
+                    "required": None if previous["required"] is None else bool(previous["required"]),
+                    "format": previous["hint"]}
+    else:
+        return None
+    value_sha256 = hashlib.sha256(str(row[1]).encode()).hexdigest()
+    reason = next((blocked[key].strip() for key in ("reason", "next_action")
+                   if isinstance(blocked.get(key), str) and blocked[key].strip()), None)
+    label = question.get("label") if isinstance(question.get("label"), str) and question["label"].strip() else None
+    if database.execute(
+            "SELECT 1 FROM application_events WHERE job_key=? AND event=? AND json_extract(detail,'$.field')=? "
+            "AND json_extract(detail,'$.value_sha256')=? LIMIT 1",
+            (job["job_key"], OWNER_ANSWER_REFUSED_EVENT, field, value_sha256)).fetchone():
+        # The same value refused twice, whoever gave it: asking again would loop (owner, 2026-10-24).
+        hold(database, job, REFUSED_TWICE_CODE, "The application site refused the same answer twice; apply by hand",
+             now, "EXHAUSTED")
+        event(database, job["job_key"], REFUSED_TWICE_EVENT,
+              {"field": field, "label": label, "value_sha256": value_sha256, "reason": reason}, now)
+        return "CLOSED"
+    database.execute("DELETE FROM application_answers WHERE job_key=? AND field=?", (job["job_key"], field))
+    identifier = decision_transport.request_fact(database, job, owner_question(field, dict(question, site_reason=reason)),
+                                                 policy, now)
+    if answered and not database.execute("SELECT 1 FROM user_decisions WHERE replaces_id=?", (answered,)).fetchone():
+        database.execute("UPDATE user_decisions SET replaces_id=? WHERE id=?", (answered, identifier))
+    _close_cards(database, job["job_key"], "QUESTION_REASKED", now, "field=? AND id<>?", (field, identifier))
+    expires_at = database.execute("SELECT expires_at FROM user_decisions WHERE id=?", (identifier,)).fetchone()[0]
+    expires = dt.datetime.fromtimestamp(expires_at / 1000, dt.timezone.utc).isoformat()
+    hold(database, job, "UNKNOWN_REQUIRED_ANSWERS:" + field, OWNER_QUESTION_ACTION, now, "BLOCKED", expires, route="OWNER")
+    event(database, job["job_key"], OWNER_ANSWER_REFUSED_EVENT,
+          {"field": field, "decision_id": identifier, "replaces_id": answered, "reason": reason,
+           "owner": owner, "value_sha256": value_sha256}, now)
+    return "REASKED"
 
 
 def _close_cards(database, job_key, reason, now, where, parameters):
@@ -3961,6 +4069,123 @@ SAME_POSTING_CHECK_PENDING = "SAME_POSTING_CHECK_PENDING"
 SAME_POSTING_AWAITING_SETTLEMENT = "SAME_POSTING_AWAITING_SETTLEMENT"
 
 
+# Review mode holds applications (owner, 2026-10-24). A held job is BLOCKED on
+# AWAITING_APPLICATION_APPROVAL (an owner hold, `application_recovery.USER_HOLDS`), never picked up
+# by `cycle`, and listed on Approvals' "Applications waiting" from `application_approvals`. Approve
+# (`approvals.approve_application`) writes every answer on the card to `application_answers` under
+# OWNER_APPROVED_SOURCE, so the answering step never answers those fields again, and makes the job
+# due (APPLICATION_APPROVED); the next pass reads the form afresh and submits those answers. Reject
+# closes the job (ABANDONED, APPLICATION_REJECTED_BY_YOU); it is never submitted or retried.
+AWAITING_APPLICATION_APPROVAL = "AWAITING_APPLICATION_APPROVAL"
+APPLICATION_APPROVED = "APPLICATION_APPROVED"
+APPLICATION_REJECTED = "APPLICATION_REJECTED_BY_YOU"
+OWNER_APPROVED_SOURCE = "owner-approved-application:"
+APPROVAL_HOLD_ACTION = "Approve or reject this application on Approvals; nothing is submitted until you approve it"
+
+
+def _resume_words(designated, policy):
+    """Which résumé the application uploads, in words for the card."""
+    raw = policy.get("resume_raw") if isinstance(policy.get("resume_raw"), dict) else {}
+    raw_name = (raw.get("file_name") if isinstance(raw.get("file_name"), str) and raw["file_name"].strip()
+                else Path(raw["path"]).name if isinstance(raw.get("path"), str) else None)
+    if raw and designated is raw:
+        return "Your résumé as uploaded" + (" (" + raw_name + ")" if raw_name else "")
+    return "ATS version (PDF" + (", written from " + raw_name if raw_name else "") + ")"
+
+
+def approval_snapshot(job, review, questions, answers, resume, designated, policy):
+    """The application exactly as it would be submitted: where it goes, the résumé, and every answer
+    with its question, the form's own control and options (the card shows and edits these)."""
+    target = email_application(review)
+    covers = attachment_uploads(questions, answers, resume)   # the cover letter (a file control's text)
+    items, seen = [], set()
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        field = question_field(question)
+        if field in seen or field not in answers or question.get("semantic") in RESUME_SEMANTICS:
+            continue
+        seen.add(field)
+        items.append({"field": field, "label": question_label(question) or None, "semantic": question.get("semantic"),
+                      "answer_type": question.get("answer_type"), "control": question.get("control"),
+                      "choices": [choice for choice in question.get("choices") or () if isinstance(choice, str)],
+                      "required": question.get("required") is True, "cover_letter": field in covers,
+                      "value": answers[field]})
+    return {"route": "email" if target else "ats", "destination": application_destination(job, review),
+            "subject": target["subject"] if target else None,
+            "resume": _resume_words(designated, policy), "resume_sha256": designated.get("sha256"),
+            "questions": items}
+
+
+def application_destination(job, review):
+    """Where the application goes: the email address, else the official application URL."""
+    target = email_application(review)
+    if target:
+        return target["address"]
+    if isinstance(review.get("official_url"), str):
+        return review["official_url"]
+    try:
+        payload = json.loads(job.get("payload") or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    return payload.get("url") if isinstance(payload, dict) else None
+
+
+def hold_for_approval(database, job, review, questions, answers, resume, designated, policy, now):
+    """Hold the job for the owner's approval with the application as it stands (inside the caller's
+    transaction). A job held again (a new question) gets a new card with every answer on it."""
+    snapshot = approval_snapshot(job, review, questions, answers, resume, designated, policy)
+    encoded = json.dumps(snapshot, sort_keys=True)
+    approval_id = uuid.uuid4().hex
+    payload_hash = hashlib.sha256(encoded.encode()).hexdigest()
+    if not hold(database, job, AWAITING_APPLICATION_APPROVAL, APPROVAL_HOLD_ACTION, now, "BLOCKED", None, route="OWNER"):
+        return False
+    database.execute("""INSERT INTO application_approvals(job_key,approval_id,state,held_at,snapshot,payload_hash)
+        VALUES (?,?,'WAITING',?,?,?) ON CONFLICT(job_key) DO UPDATE SET approval_id=excluded.approval_id,
+        state='WAITING',held_at=excluded.held_at,snapshot=excluded.snapshot,payload_hash=excluded.payload_hash,
+        decided_at=NULL,approved=NULL,reason=NULL""", (job["job_key"], approval_id, now, encoded, payload_hash))
+    event(database, job["job_key"], "APPLICATION_HELD_FOR_APPROVAL",
+          {"approval_id": approval_id, "payload_hash": payload_hash, "route": snapshot["route"],
+           "fields": [item["field"] for item in snapshot["questions"]]}, now)
+    return True
+
+
+def options_missing(review):
+    """A read with a choice or multi-select question that lists no options."""
+    import answering_agent
+    return any(isinstance(question, dict) and answering_agent.answer_type_of(question) in ("choice", "multi_choice")
+               and not question.get("choices") for question in review.get("questions") or ())
+
+
+def approved_application(database, job, questions, answers, review=None, designated=None):
+    """The owner's approval of this job's application ({"answers": {field: {semantic, value}},
+    "subject", "resume_sha256", "destination"}) when it covers every answer about to be submitted,
+    each with the approved value, the résumé file about to be uploaded and where it goes; otherwise
+    None (nothing approved, a question the approval never saw, or another résumé or destination)."""
+    row = database.execute("SELECT approved FROM application_approvals WHERE job_key=? AND state='APPROVED'",
+                           (job["job_key"],)).fetchone()
+    try:
+        approved = json.loads(row[0]) if row and row[0] else None
+    except (TypeError, ValueError):
+        approved = None
+    if not isinstance(approved, dict) or not isinstance(approved.get("answers"), dict):
+        return None
+    if (approved.get("resume_sha256") != (designated or {}).get("sha256")
+            or approved.get("destination") != application_destination(job, review or {})):
+        return None
+    for question in questions:
+        if not isinstance(question, dict) or question.get("semantic") in RESUME_SEMANTICS:
+            continue
+        field = question_field(question)
+        if field not in answers:
+            continue
+        kept = approved["answers"].get(field)
+        if (not isinstance(kept, dict) or kept.get("semantic") != question.get("semantic")
+                or kept.get("value") != answers[field]):
+            return None
+    return approved
+
+
 def process(database, job, adapter, policy, root, now, clock=None, config=None):
     import application_recovery
     config = config or {}
@@ -4073,6 +4298,15 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
             hold_suppressed(database, job, suppressed, now)
         return
     reused = reusable_read(database, job, now)
+    if reused is not None and options_missing(reused):
+        import approvals
+        if approvals.mode(database) == approvals.REVIEW:
+            # Review shows each question with the form's own options (owner, 2026-10-24); a stored read
+            # from before the read reported them is read afresh once, so the card shows real options.
+            with database:
+                event(database, job["job_key"], "APPLICATION_READ_REFRESHED_FOR_OPTIONS",
+                      {"record_observed_at": reused[REUSED_READ_MARKER]}, now)
+            reused = None
     if reused is not None:
         # The recorded read of this exact posting still stands and nothing it depends on has
         # changed, so no browser session is spent (owner, 2026-09-22).
@@ -4265,19 +4499,25 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
             event(database, job["job_key"], provider_limits.EVENT, dict(provider_wait, step="answering",
                   still_missing=missing), now)
         return
-    if missing:
-        # A required question the AI and its judge agree has no truthful answer in the owner's
-        # records (owner, 2026-10-24: "If the required question has 'options' ... Those should be
-        # displayed too, so a user can pass in their answer") is asked on Approvals' "Questions for
-        # you", with the form's own choices. Everything else the answering step left open - a
-        # failed or malformed call, a round limit, an answer that does not fit its control - is
-        # the AI's to retry on a later cycle (ANSWERING_RETRY below), and the owner is not asked.
-        asked = owner_questions(outcome, questions, missing)
+    # Every question still without an answer: `missing` (the required ones) and the optional ones
+    # `resolve_answers` leaves blank.
+    unanswered = list(dict.fromkeys(question_field(question) for question in questions
+                                    if isinstance(question, dict) and question_field(question) not in answers))
+    if unanswered:
+        # A question, required or optional (owner, 2026-10-24: "ANY question, not only required
+        # ones"), the AI and its judge agree has no truthful answer in the owner's records (owner,
+        # 2026-10-24: "If the required question has 'options' ... Those should be displayed too, so
+        # a user can pass in their answer") is asked on Approvals' "Questions for you", with the
+        # form's own choices. Everything else the answering step left open - a failed or malformed
+        # call, a round limit, an answer that does not fit its control - is the AI's to retry on a
+        # later cycle when required (ANSWERING_RETRY below) and left blank when optional, and the
+        # owner is not asked.
+        asked = owner_questions(outcome, questions, unanswered)
         with database:
-            close_settled_cards(database, job, missing, now)
+            close_settled_cards(database, job, unanswered, now)
             if asked:
                 ask_owner(database, job, asked, policy, now)
-            cards = open_cards(database, job, missing, now)
+            cards = open_cards(database, job, unanswered, now)
         if cards:
             # While any of this job's questions waits for the owner, the whole job is the owner's
             # hold (review round 1, Q1), even when the AI could retry other questions: no try is
@@ -4285,7 +4525,7 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
             # toward the inspect cap, and the job is not picked up again until the owner answers
             # (`decision_transport._apply_answer` makes it due; the next pass answers the rest as
             # usual) or the questions expire, when the next pass reads, answers and asks again.
-            blocker = "UNKNOWN_REQUIRED_ANSWERS:" + ",".join(field for field in missing if field in cards)
+            blocker = "UNKNOWN_REQUIRED_ANSWERS:" + ",".join(field for field in unanswered if field in cards)
             expires = dt.datetime.fromtimestamp(min(cards.values()) / 1000, dt.timezone.utc).isoformat()
             with database:
                 hold(database, job, blocker, OWNER_QUESTION_ACTION, now, "BLOCKED", expires, route="OWNER")
@@ -4301,6 +4541,7 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
             if kept_answers_of(latest) != kept_answers_of(policy):
                 decision_transport.refresh_stale(database, latest, now)
             return
+    if missing:
         blocker = "ANSWERING_RETRY:" + ",".join(missing)
         retry_at = (dt.datetime.fromisoformat(now) + dt.timedelta(hours=1)).isoformat()
         with database:
@@ -4310,8 +4551,9 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         return
     with database:
         close_settled_cards(database, job, [], now)   # every question answered: no card stays open (Q2)
-    resume = root / policy["resume"]["path"]
-    if not resume.is_file() or hashlib.sha256(resume.read_bytes()).hexdigest() != policy["resume"]["sha256"]:
+    designated = user_profile.application_resume(policy)   # the file the user chose in Settings > Résumé
+    resume = root / designated["path"]
+    if not resume.is_file() or hashlib.sha256(resume.read_bytes()).hexdigest() != designated["sha256"]:
         with database:
             hold(database, job, "DESIGNATED_RESUME_MISMATCH", "Restore the designated resume or obtain explicit designation of its replacement", now)
         return
@@ -4325,20 +4567,13 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     # submitted) is judged here before it can be submitted; a verdict for unchanged inputs is reused.
     if root is not None and same_posting_duplicate(database, job, adapter, root, config, now, before_submit=True):
         return
-    if hasattr(adapter, "prepare_submission"):
-        try:
-            adapter.prepare_submission(job)
-        except AdapterPending as pending:
-            wait_for_adapter(database, job, pending, now, "WAITING_BROWSER")
-            return
-    attempt_id = str(uuid.uuid4())
-    database.execute("BEGIN IMMEDIATE")
     if isinstance(review, dict) and review.get("application_method") == EMAIL_METHOD:
         # Recognised and kept, never handed to the form filler (there is no form). The guarded
         # send route replaces this hold; until it exists the job waits here, non-terminal and
         # orchestrator-owned, instead of being abandoned for having nothing to fill. A review
         # that says EMAIL but whose address did not survive validation is held too, never
-        # allowed to fall through to the form path as if it had a form.
+        # allowed to fall through to the form path as if it had a form. (Checked before the
+        # submission's browser time is booked, so a job held here books none.)
         target = email_application(review)
         if target is None:
             with database:
@@ -4355,6 +4590,25 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         # Switched on: from here an email application takes exactly the path a form does - the
         # same SUBMITTING claim, attempt row, arm and reconciliation. Only the browser's work
         # differs, and the verified target rides along so the arm can check the live To field.
+    # Review mode holds applications too (owner, 2026-10-24: the one Review switch holds everything
+    # that goes out, applications and email applications included). Here, with every answer
+    # resolved and before any browser time is booked or SUBMITTING claimed, the application waits
+    # on Approvals unless the owner approved exactly these answers (`approved_application`): a
+    # question the approval does not cover (new on this pass) holds it again with its answer.
+    import approvals
+    approved = approved_application(database, job, questions, answers, review, designated)
+    if approved is None and approvals.mode(database) == approvals.REVIEW:
+        with database:
+            hold_for_approval(database, job, review, questions, answers, resume, designated, policy, now)
+        return
+    if hasattr(adapter, "prepare_submission"):
+        try:
+            adapter.prepare_submission(job)
+        except AdapterPending as pending:
+            wait_for_adapter(database, job, pending, now, "WAITING_BROWSER")
+            return
+    attempt_id = str(uuid.uuid4())
+    database.execute("BEGIN IMMEDIATE")
     gate = local_gate(database, job, now, policy)
     claimed = None if gate else database.execute("UPDATE application_jobs SET state='SUBMITTING',attempts=attempts+1,blocker=NULL,updated_at=? WHERE job_key=? AND state=? AND attempts=? AND updated_at=? AND state NOT IN ('SUBMITTING','RECONCILE','SUBMITTED','DUPLICATE','EXHAUSTED','INELIGIBLE','ABANDONED') AND NOT EXISTS (SELECT 1 FROM application_attempts WHERE job_key=? AND state='SUBMITTING')",
                                                  (now, job["job_key"], job["state"], job["attempts"], job["updated_at"], job["job_key"]))
@@ -4366,14 +4620,14 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     # 'source' at the moment the job had already claimed SUBMITTING - Vandelay Security died here
     # on every run, reported only as "error type KeyError". The field beside it on the same
     # line was already using `.get`.
-    event(database, job["job_key"], "HISTORY_ANSWERS_RESUME_CLEARED", {"history_source": history.get("source"), "resume_sha256": policy["resume"]["sha256"],
+    event(database, job["job_key"], "HISTORY_ANSWERS_RESUME_CLEARED", {"history_source": history.get("source"), "resume_sha256": designated["sha256"],
           "history_basis": history.get("basis")}, now)
     remember_read(database, job, review, None, now, complete=True)
     answer_sources = {question_field(question): [saved["source"] for saved in scoped_policy["answers"].values()
                                                  if saved.get("source") and saved.get("semantic") == question.get("semantic")
                                                  and saved.get("value") == answers[question_field(question)]]
                       for question in questions if question_field(question) in answers}
-    database.execute("INSERT INTO application_attempts(attempt_id,job_key,idempotency_key,state,started_at,evidence) VALUES (?,?,?,'SUBMITTING',?,?)", (attempt_id, job["job_key"], job["job_key"], now, json.dumps({"review": review, "answers": answers, "answer_sources": answer_sources, "resume_sha256": policy["resume"]["sha256"], "requirement_revision": 2})))
+    database.execute("INSERT INTO application_attempts(attempt_id,job_key,idempotency_key,state,started_at,evidence) VALUES (?,?,?,'SUBMITTING',?,?)", (attempt_id, job["job_key"], job["job_key"], now, json.dumps({"review": review, "answers": answers, "answer_sources": answer_sources, "resume_sha256": designated["sha256"], "requirement_revision": 2})))
     event(database, job["job_key"], "WORKER_SUBMISSION_STARTED", {"attempt_id": attempt_id, "preapproved": True}, now)
     database.commit()
     stage = "prepare"
@@ -4393,6 +4647,9 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
             submission["eligible_location"] = review["eligible_location"]
         if email_application(review) is not None:
             submission["email_application"] = email_application(review)
+            if approved and isinstance(approved.get("subject"), str) and approved["subject"].strip():
+                # The subject the owner approved in the card's subject box (no answer carries it).
+                submission["email_application"]["subject"] = approved["subject"]
         if attachments:
             submission["attachments"] = attachments
         if review.get("form_revision_basis") == CODE_FORM_REVISION_BASIS:
@@ -4549,7 +4806,7 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
     # act on it, and it runs first in the same cycle, so a resumed job still progresses here
     # immediately - it simply no longer carries this blocker once resumed.
     rows = list(database.execute("""SELECT * FROM application_jobs WHERE state NOT IN ('SUBMITTED','DUPLICATE','INELIGIBLE','EXHAUSTED','ABANDONED')
-        AND blocker IS NOT 'APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED'
+        AND blocker IS NOT 'APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED' AND blocker IS NOT 'AWAITING_APPLICATION_APPROVAL'
         AND (next_at IS NULL OR next_at<=? OR blocker='APPLICATION_BROWSER_SHARED_BUDGET_EXHAUSTED'
              OR blocker='APPLICATION_HISTORY_UNKNOWN' OR blocker='PRIOR_APPLICATION_WITHIN_90_DAYS')
         ORDER BY updated_at,job_key""", (now,)))
@@ -4569,7 +4826,8 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
         if len(ready) >= 60:
             break
     stopped = None
-    for job in ready:
+    listed = {job["job_key"] for job in ready}
+    for job in ready:   # `ready` grows below: an application approved during this run joins it
         if should_stop is not None and should_stop():
             stopped = "YIELDED_TO_DAILY_RESEARCH"
             break
@@ -4611,6 +4869,13 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
             if credited:
                 event(database, job["job_key"], "BROWSER_CAPACITY_CREDITED",
                       {"seconds": credited, "basis": "measured elapsed, unused tail of a committed reservation"}, now)
+        # An application the owner approved on Approvals while this run is going (owner, 2026-10-24):
+        # it is taken in this run, after the jobs already listed, instead of waiting for the next one.
+        for approved in database.execute("SELECT * FROM application_jobs WHERE state='BLOCKED' AND blocker=? "
+                                         "AND next_at IS NULL ORDER BY updated_at,job_key", (APPLICATION_APPROVED,)).fetchall():
+            if approved["job_key"] not in listed and (only is None or approved["job_key"] in only):
+                listed.add(approved["job_key"])
+                ready.append(approved)
     result = report(database, now)
     if stopped:
         result["stopped"] = stopped

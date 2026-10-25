@@ -136,8 +136,11 @@ class TheInspectContractAsksForTheQuestionsOwnText(unittest.TestCase):
         # answer_type joined them in CZ: applications.py selects which answers become uploaded
         # FILES by it, and nothing produced it, so the generated cover letter was never attached.
         # The point of this test is that the machine keys sit beside the label, not the count.
-        # max_characters joined them on 2026-10-01 (free-text character limits).
-        self.assertEqual(list(self.question), ["id", "label", "semantic", "required", "answer_type", "max_characters"])
+        # max_characters joined them on 2026-10-01 (free-text character limits); control and choices
+        # on 2026-10-24 (the Approvals card shows the form's own control and options in Review mode);
+        # format on 2026-10-24 (the input format the form states, shown on the owner's card).
+        self.assertEqual(list(self.question), ["id", "label", "semantic", "required", "answer_type", "control", "choices",
+                                               "max_characters", "format"])
 
     def test_the_placeholder_is_the_only_wording_that_reaches_the_worker(self):
         """A Python comment in `result_contract` is invisible to the model; this string is not."""

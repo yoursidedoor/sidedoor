@@ -74,6 +74,21 @@ UNAVAILABLE = "unavailable"
 # Plain words for stored state codes; an unknown code never shows as itself.
 RESEARCH_DAY_WORDS = {"COMPLETE": "finished", "RUNNING": "running now", "RETRY_WAIT": "will retry",
                       "EXHAUSTED": "gave up for today"}
+# Industry states that wait (on the shared compute allowance, a provider, or another industry's shared
+# research) rather than fail. A day whose every unfinished industry waits is waiting, not retrying.
+RESEARCH_WAITING = ("COMPUTE_WAIT", "WAITING_SHARED_RESEARCH")
+RESEARCH_WAIT_WORDS = "waiting to continue"
+
+
+def research_waiting(result):
+    """True when a research attempt's result (`parallel_research.run`) only waits: no error of its own
+    and every industry that did not complete is in RESEARCH_WAITING."""
+    if not isinstance(result, dict) or result.get("error"):
+        return False
+    industries = [industry for industry in result.get("industries") or [] if isinstance(industry, dict)
+                  and str(industry.get("state") or "").upper() != "COMPLETE"]
+    return bool(industries) and all(str(industry.get("state") or "").upper() in RESEARCH_WAITING
+                                    for industry in industries)
 RESEARCH_RUN_WORDS = {"COMPLETE": "finished", "RUNNING": "running now", "FAILED": "did not finish",
                       "INTERRUPTED": "was interrupted"}
 CYCLE_WORDS = {"COMPLETE": "finished", "DEGRADED": "finished with problems", "FAILED": "failed",
@@ -236,7 +251,7 @@ def _prefilter(start):
 def research(reader, config, now, running):
     zone = config.get("timezone") or "America/Los_Angeles"
     hour = config.get("research_hour", workflow_tasks.day_start_hour(config))
-    last = reader.rows("SELECT id,started_at,state FROM research ORDER BY started_at DESC LIMIT 1", (), "research")
+    last = reader.rows("SELECT id,started_at,state,result FROM research ORDER BY started_at DESC LIMIT 1", (), "research")
     day = workflow_tasks.service_date(now, zone, hour)
     today = reader.rows("SELECT state,next_retry_at FROM research_days WHERE day=?", (day,), "research_days")
     state = today[0]["state"] if today else None
@@ -257,10 +272,13 @@ def research(reader, config, now, running):
     found_today = _research_found(reader, day) if (today or companies) else None
     found = None
     if last:
-        # The day's own state says what happens next (will retry, gave up); else the attempt's.
+        # The day's own state says what happens next (will retry, gave up, waiting); else the attempt's.
         own = reader.rows("SELECT state FROM research_days WHERE attempt_id=?", (last[0]["id"],), "research_days")
-        found = {"at": _utc(last[0]["started_at"]),
-                 "words": words(RESEARCH_DAY_WORDS, own[0]["state"]) if own else words(RESEARCH_RUN_WORDS, last[0]["state"])}
+        if own and own[0]["state"] == "RETRY_WAIT" and research_waiting(_json(last[0]["result"])):
+            said = RESEARCH_WAIT_WORDS
+        else:
+            said = words(RESEARCH_DAY_WORDS, own[0]["state"]) if own else words(RESEARCH_RUN_WORDS, last[0]["state"])
+        found = {"at": _utc(last[0]["started_at"]), "words": said}
     return {"last": found, "next": upcoming, "companies": companies if found_today else None,
             "roles": found_today and found_today["roles"], "contacts": found_today and found_today["contacts"]}
 
@@ -377,6 +395,8 @@ def _blocked(reader):
     for key, code, reads in reader.rows("SELECT job_key,blocker,reconcile_attempts FROM application_jobs WHERE state='BLOCKED'",
                                         (), "application_jobs"):
         code = str(code or "")
+        if code == jobs.APPLICATION_APPROVED:
+            continue   # approved on Approvals and due: neither a hold nor a retry wait (owner, 2026-10-24)
         spent = code == "SUBMISSION_OUTCOME_UNKNOWN" and (reads or 0) >= jobs.RECONCILE_MAX_ATTEMPTS
         (owner if spent or jobs.job_route(code, "BLOCKED") == "OWNER" else waiting).append(key)
     return owner, waiting
@@ -416,13 +436,26 @@ def answers_hold(blocker):
             and code != "UNKNOWN_REQUIRED_ANSWERS:" + decision_transport.FORM_NOT_READABLE_FIELD)
 
 
+def approval_hold(blocker):
+    """An application Review mode holds for the owner's approval (owner, 2026-10-24): counted only as an
+    "application to approve" (`held_application_keys`), never as blocked on the owner."""
+    import applications
+    return str(blocker or "") == applications.AWAITING_APPLICATION_APPROVAL
+
+
+def held_application_keys(reader):
+    """`approvals.held_application_keys` through the read-only reader: Approvals' "Applications waiting"."""
+    import approvals
+    return [row[0] for row in reader.rows(approvals.HELD_APPLICATIONS_SQL, (), "application_approvals", "application_jobs")]
+
+
 def blocked_on_owner(owner_hold, asked, blocker):
     """THE needs-you rule (owner, 2026-10-24), the one test behind Overview's Needs you rows,
     Applications' "Blocked, needs you" filter and "Needs you" heading, and the Needs you list on
     Failures: a job with an open question card counts only under "questions to answer", never here;
     a job whose answers are in (`answers_hold` with no open card) needs nothing from the owner; every
     other owner hold (`_blocked`, e.g. the résumé changed) is an application blocked on the owner."""
-    return bool(owner_hold) and not asked and not answers_hold(blocker)
+    return bool(owner_hold) and not asked and not answers_hold(blocker) and not approval_hold(blocker)
 
 
 def blocked_on_owner_keys(reader, now):
@@ -436,13 +469,15 @@ def blocked_on_owner_keys(reader, now):
 def needs_you(reader, now):
     """The one "Needs you" card (owner, 2026-10-24): questions to answer, messages waiting for approval
     (`approvals.waiting_count`) and the reply AI's notes not marked done (`reply_tools.open_flags`),
-    each the total of its section of Approvals (E6.T4), and the applications blocked on the owner
+    each the total of its section of Approvals (E6.T4), the applications Review holds for approval
+    (`held_application_keys`, Approvals' "Applications waiting"), and the applications blocked on the owner
     (`blocked_on_owner_keys`), the total of Applications' "Blocked, needs you" filter
     (`applications_page.counts`). A held job with a question on Approvals counts only as a question."""
     import approvals
     import reply_tools
     present = reader.database is not None
     return {"questions": len(_pending_questions(reader, now)), "applications": len(blocked_on_owner_keys(reader, now)),
+            "applications_held": len(held_application_keys(reader)),
             "messages": approvals.waiting_count(reader.database) if present else 0,
             "couldnt_send": approvals.refused_count(reader.database) if present else 0,
             "notes": reply_tools.open_flag_count(reader.database) if present else 0}

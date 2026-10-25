@@ -95,7 +95,7 @@
   <section class="card overview-today" aria-labelledby="today-title">
     <h2 id="today-title">Today <span class="muted overview-since">since {{ v.day_start }}</span></h2>
     <div class="overview-columns">
-      <div>
+      <div class="overview-area overview-area-research">
         <h3>Research</h3>
         {% if v.research == na %}<p class="muted">Not available</p>{% else %}
         {{ run_line(v.when, v.research.last, v.research.next) }}
@@ -107,7 +107,7 @@
         </dl>
         {% endif %}
       </div>
-      <div>
+      <div class="overview-area overview-area-outreach">
         <h3>Outreach</h3>
         {{ run_rows(v, "outreach") }}
         {% if v.outreach == na %}<p class="muted">Not available</p>{% else %}
@@ -123,7 +123,7 @@
         </dl>
         {% endif %}
       </div>
-      <div>
+      <div class="overview-area overview-area-applications">
         <h3>Applications</h3>
         {{ run_rows(v, "applications") }}
         <dl class="overview-stats">
@@ -135,8 +135,8 @@
   </section>
 
   {# One "Needs you" card (owner, 2026-10-24): each kind of thing waiting on the user, with its own way
-     there. The counts are the ones those pages total: Approvals' messages, questions and notes, and
-     Applications' "Blocked, needs you" filter. #}
+     there. The counts are the ones those pages total: Approvals' messages, applications waiting, questions and notes, and
+     Applications' "Blocked, needs you" filter. A zero row is not shown; all zero says "Nothing needs you right now.". #}
   <section class="card overview-needs" aria-labelledby="needs-title">
     <h2 id="needs-title">Needs you</h2>
     {% if v.needs == na %}
@@ -144,19 +144,20 @@
     {% else %}
     {% set rows = (("questions", "question to answer", "questions to answer", "/approvals#questions", "Answer"),
                    ("messages", "message to approve", "messages to approve", "/approvals#messages", "Review"),
+                   ("applications_held", "application to approve", "applications to approve", "/approvals#applications", "Review"),
                    ("couldnt_send", "message couldn't send", "messages couldn't send", "/approvals#refused", "Review"),
                    ("notes", "note for you", "notes for you", "/approvals#notes", "Read"),
                    ("applications", "application blocked on you", "applications blocked on you", "/applications?show=needs_you", "Open")) %}
     <ul class="overview-needs-list">
-      {% for key, one, many, href, label in rows %}{% set count = v.needs[key] %}
-      <li class="overview-needs-row{% if not count %} overview-needs-none{% endif %}">
+      {% for key, one, many, href, label in rows %}{% set count = v.needs[key] %}{% if count %}
+      <li class="overview-needs-row">
         <span class="overview-number">{{ count }}</span>
         <span class="overview-needs-what">{{ one if count == 1 else many }}</span>
-        {% if count %}<a class="button overview-needs-go" href="{{ href }}">{{ label }}</a>{% endif %}
+        <a class="button overview-needs-go" href="{{ href }}">{{ label }}</a>
       </li>
-      {% endfor %}
+      {% endif %}{% endfor %}
     </ul>
-    {% if not (v.needs.questions or v.needs.messages or v.needs.couldnt_send or v.needs.notes or v.needs.applications) %}<p class="muted">Nothing needs you right now.</p>{% endif %}
+    {% if not (v.needs.questions or v.needs.messages or v.needs.couldnt_send or v.needs.notes or v.needs.applications or v.needs.applications_held) %}<p class="muted">Nothing needs you right now.</p>{% endif %}
     {% endif %}
   </section>
 

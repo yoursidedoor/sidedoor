@@ -8,6 +8,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import socket
 import sqlite3
 import stat
@@ -25,6 +26,7 @@ if DEPENDENCIES:
     from fastapi.testclient import TestClient
 
     import dashboard
+    import version
 
 
 PORT = 54321
@@ -99,9 +101,10 @@ class DashboardTest(unittest.TestCase):
     def test_layout_renders_logo_favicon_and_tabs(self):
         client = self.signed_in()
         page = client.get("/applications").text
-        self.assertIn('src="/brand/yoursidedoor-logo.png"', page)
+        v = "?v=" + version.current()
+        self.assertIn('src="/brand/yoursidedoor-logo.png%s"' % v, page)
         for icon in ("yoursidedoor-icon-win-32.png", "yoursidedoor-icon-win-16.png", "yoursidedoor-apple-touch-180.png"):
-            self.assertIn('href="/brand/%s"' % icon, page)
+            self.assertIn('href="/brand/%s%s"' % (icon, v), page)
             self.assertEqual(client.get("/brand/" + icon).status_code, 200)
         self.assertNotIn("<script>", page)
         for key, label, path in dashboard.TABS + (dashboard.SETUP_TAB,):
@@ -109,6 +112,18 @@ class DashboardTest(unittest.TestCase):
             self.assertEqual(client.get(path).status_code, 200)
         self.assertIn('class="tab active" href="/applications"', page)
         self.assertEqual(client.get("/brand/yoursidedoor-logo.png").status_code, 200)
+
+    def test_every_asset_reference_carries_the_installed_version(self):
+        # An update that changes the logo or a script must reach browsers that cached the old file.
+        client = self.signed_in()
+        v = "?v=" + version.current()
+        for key, label, path in dashboard.TABS + (dashboard.SETUP_TAB,) + (("doctor", "", "/failures/doctor"),):
+            page = client.get(path).text
+            urls = re.findall(r'(?:src|href)="(/(?:static|brand)/[^"]*)"', page)
+            self.assertTrue(urls, path)
+            for url in urls:
+                self.assertTrue(url.endswith(v), (path, url))
+                self.assertEqual(client.get(url).status_code, 200, url)
 
     def test_vendored_htmx_is_served(self):
         response = self.signed_in().get("/static/htmx.min.js")

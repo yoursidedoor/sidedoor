@@ -316,6 +316,50 @@ class Item4StagedUploadsAreReadOnlyAndCheckedAtArm(unittest.TestCase):
         # Item 10: the copies are gone once the session ends.
         self.assertFalse(seen["folder"].exists())
 
+    def test_the_renamed_staged_resume_still_arms_and_a_different_file_is_refused(self):
+        made = fixture(self)
+        request_id = made.prepare_submit()
+        seen = {}
+
+        def scripted(config, prompt, directory, timeout):
+            staged = Path(request_at(directory)["payload"]["resume"])
+            seen["name"] = staged.name
+            binding = application_browser.ArmBinding(config["_application_guard_claim"])
+            original = Path(binding.staged[str(staged)])
+            binding.staged = {str(staged): str(original), str(original): str(directory / "request.json")}
+            with self.assertRaisesRegex(ValueError, "APPLICATION_STAGED_UPLOAD_CHANGED"):
+                binding.arm({"observed_form_revision": "fixture-form-v1"})
+            application_browser.ArmBinding(config["_application_guard_claim"]).arm({"observed_form_revision": "fixture-form-v1"})
+            write_output(directory, request_at(directory), {"acknowledged": False})
+        with mock.patch.object(application_browser, "resume_upload_name", return_value="Jordan_Sample_Resume.pdf"):
+            self.assertEqual(application_browser.consume(made.root, made.database, made.config, request_id, scripted)["state"],
+                             "COMPLETE")
+        self.assertEqual(seen["name"], "Jordan_Sample_Resume.pdf")
+
+    def test_the_resume_answer_names_the_staged_copy_the_prompt_uploads(self):
+        made = fixture(self)
+        made.policy["answers"]["resume"] = {"semantic": "resume", "value": "resume.pdf", "source": "synthetic candidate"}
+        application_browser.user_profile.use_policy(made.policy, made.root / "profile-home")
+        review = made.review
+        made.review = lambda: dict(review(), questions=review()["questions"] + [
+            {"id": "resume", "semantic": "resume", "required": True, "answer_type": "file"}])
+        request_id = made.prepare_submit()
+        seen = {}
+
+        def scripted(config, prompt, directory, timeout):
+            request = request_at(directory)
+            field = next(question["field"] for question in request["payload"]["questions"] if question["semantic"] == "resume")
+            seen["stored"] = application_browser.ArmBinding(config["_application_guard_claim"]).envelope["payload"]["answers"][field]
+            seen["answer"], seen["resume"] = request["payload"]["answers"][field], request["payload"]["resume"]
+            application_browser.ArmBinding(config["_application_guard_claim"]).arm({"observed_form_revision": "fixture-form-v1"})
+            write_output(directory, request, {"acknowledged": False})
+        with mock.patch.object(application_browser, "resume_upload_name", return_value="Jordan_Sample_Resume.pdf"):
+            summary = application_browser.consume(made.root, made.database, made.config, request_id, scripted)
+        self.assertEqual(summary["state"], "COMPLETE", summary)
+        self.assertEqual(Path(seen["resume"]).name, "Jordan_Sample_Resume.pdf")
+        self.assertEqual(seen["answer"], seen["resume"])
+        self.assertEqual(Path(seen["stored"]).name, "resume.pdf")   # the arm envelope keeps the stored path
+
     def test_the_guard_announces_the_upload_folder_as_the_browsers_root(self):
         folder = scratch(self) / "uploads"
         folder.mkdir()

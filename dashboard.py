@@ -69,6 +69,7 @@ import settings_page
 import setup_steps
 import tray as tray_icon
 import user_profile
+import version
 import paths
 
 LOG = log.get(__name__)
@@ -95,6 +96,12 @@ START_PATH = "/_sidedoor/start"
 COOKIE_MAX_AGE = 10 * 365 * 24 * 3600
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATIC_PREFIXES = ("/static/", "/brand/")
+
+
+def asset_url(path):
+    """A /static/ or /brand/ URL with ?v=<installed version>, so an update that changes a logo, icon,
+    stylesheet or script reaches browsers that cached the old file under the same path."""
+    return "%s?v=%s" % (path, version.current())
 CONTENT_SECURITY_POLICY = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
                            "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; "
                            "form-action 'self'; frame-ancestors 'none'")
@@ -212,6 +219,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     config = load_config(root) if config is None else config
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=ASSETS / "templates")
+    templates.env.globals["asset_url"] = asset_url
     app.mount("/static", StaticFiles(directory=ASSETS / "static"), name="static")
     app.mount("/brand", StaticFiles(directory=BRAND), name="brand")
     if browser is None:
@@ -412,6 +420,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                            database=paths.database(root), connect_read_only=lambda: read_connection(root))
     import report_problem  # Report a problem (owner pick F3 a): POST /report-problem, behind `guard`
     report_problem.register(app, home=home, root=root, config=config, token=secret)
+    import support_email  # Email support (owner, 2026-10-24): POST/GET /report-problem/email, behind `guard`
+    support_email.register(app, home=home, root=root, config=config, token=secret)
     import doctor  # Failures and logs > Run checks (E4.T4): the `sidedoor doctor` report
     doctor.register(app, templates, layout, home=home, root=root, config=config)
 

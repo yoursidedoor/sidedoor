@@ -91,6 +91,37 @@ class ApplicationsCounts(unittest.TestCase):
         self.assertEqual((self.overview()["submitted"], view["counts"]["submitted_today"]), (1, 1))
 
 
+    def test_held_applications_count_by_their_label_everywhere(self):
+        """Review holds applications (owner, 2026-10-24): Overview's "applications to approve", Approvals'
+        "Applications waiting" and the Applications badge "Waiting for your approval" count the same jobs,
+        and none of them is "Blocked, needs you" or "Waiting to retry"; nor is an approved one."""
+        import applications
+        db = self.database
+        self.fixture()
+        snapshot = json.dumps({"route": "ats", "destination": "https://jobs.example.com/x", "subject": None,
+                               "resume": "ATS version (PDF)", "questions": []})
+        for key in ("held-1", "held-2"):
+            apps_base.job(db, key, "BLOCKED", applications.AWAITING_APPLICATION_APPROVAL)
+            db.execute("INSERT INTO application_approvals(job_key,approval_id,state,held_at,snapshot,payload_hash) "
+                       "VALUES (?,?,'WAITING','2026-10-21T17:00:00+00:00',?,'h')", (key, "a-" + key, snapshot))
+        apps_base.job(db, "approved", "BLOCKED", applications.APPLICATION_APPROVED)
+        db.commit()
+        _, jobs = self.every_job("all")
+        held = [job for job in jobs if job["state"] == applications_page.HELD_WORDS]
+        needs = self.overview()["needs"]
+        assert_counted_by_label(self, needs["applications_held"], held)
+        self.assertEqual((2, 2), (needs["applications_held"], approvals_page.application_count(db)))
+        for show in ("needs_you", "retrying"):
+            _, listed = self.every_job(show)
+            self.assertFalse({"held-1", "held-2", "approved"} & {job["key"] for job in listed}, show)
+        # Failures says they wait for approval, never "your answers are in" (pre-release pass, 2026-10-25).
+        now = dt.datetime.now(dt.timezone.utc)
+        items = failures_page.application_failures(overview_page.Reader(db), now, str)
+        codes = {item["refs"]["job_key"]: item["code"] for item in items if item.get("refs")}
+        self.assertEqual(("AWAITING_APPLICATION_APPROVAL", "AWAITING_APPLICATION_APPROVAL"), (codes.get("held-1"), codes.get("held-2")))
+        self.assertNotIn("ANSWERS_IN", codes.values())
+
+
 class FailuresCounts(fail_base.GatherBase):
     def test_4_earlier_counts_the_whole_section(self):
         def retry(key, hours):

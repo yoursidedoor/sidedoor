@@ -55,7 +55,7 @@ class Composition(unittest.TestCase):
 
     def test_every_operation_runs_headless_by_default_with_the_installed_chromes_user_agent(self):
         self.assertEqual(browser_runtime.headed_user_agent(self.binary), UA_141)
-        for operation in browser_guard.OPERATIONS:
+        for operation in set(browser_guard.OPERATIONS) - set(browser_runtime.SHOWN_OPERATIONS):
             guard, mcp, args = self.compose(operation)
             self.assertEqual(guard[guard.index("--headless-user-agent") + 1], UA_141, operation)
             self.assertNotIn("--offscreen", guard)                # no minimizing, no focus keeper
@@ -63,9 +63,27 @@ class Composition(unittest.TestCase):
             self.assertNotIn("--user-data-dir", mcp)
             self.assertNotIn("--headless", mcp)                   # Playwright's own headless adds pointer tells
             self.assertEqual(args, list(browser_runtime.WINDOW_SWITCHES))   # H2: the fallback launch is headed
-        self.assertEqual(set(browser_runtime.HEADLESS_OPERATIONS), set(browser_guard.OPERATIONS))
+        background = set(browser_guard.OPERATIONS) - set(browser_runtime.SHOWN_OPERATIONS)
+        self.assertEqual(set(browser_runtime.HEADLESS_OPERATIONS), background)
         shipped = json.loads((Path(browser_runtime.ROOT) / "config.json").read_text())
-        self.assertEqual(sorted(browser_runtime.headless_operations(shipped)), sorted(browser_guard.OPERATIONS))
+        self.assertEqual(sorted(browser_runtime.headless_operations(shipped)), sorted(background))
+
+    def test_the_support_email_window_is_headed_on_screen_and_left_open(self):
+        # Owner, 2026-10-24: the draft is the user's to send, so its window is shown, never hidden.
+        guard, mcp, args = self.compose("support_email")
+        self.assertNotIn("--headless-user-agent", guard)
+        self.assertNotIn("--offscreen", guard)
+        self.assertIn("--background-chrome", guard)
+        self.assertIsNone(args)
+        shown = browser_runtime.background_command("/Applications/Google Chrome.app", "/p", onscreen=True)
+        self.assertIn("--window-position=%d,%d" % browser_runtime.ONSCREEN_POSITION, shown)
+        self.assertNotIn(browser_runtime.WINDOW_SWITCHES[0], shown)
+        with mock.patch.object(browser_runtime, "end_session") as end:
+            browser_guard.Proxy.stop_background_chrome(
+                mock.Mock(operation="support_email", background_chrome="/p"))
+            end.assert_not_called()
+            browser_guard.Proxy.stop_background_chrome(mock.Mock(operation="inspect", background_chrome="/p"))
+            end.assert_called_once()
 
     def test_one_operation_can_go_back_to_the_headed_minimized_mode_by_config(self):
         guard, _, args = self.compose("linkedin", headless_operations=["inspect", "submit"])

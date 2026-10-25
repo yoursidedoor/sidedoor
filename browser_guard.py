@@ -47,6 +47,11 @@ JSON-RPC message both ways. What it adds, all at the live harness's positions (o
   window on-screen and in front for the owner's tick (the one place the guard brings Chrome forward)
   and minimizes it when the wait ends. A read-back that is not minimized is recorded
   (WINDOW_NOT_MINIMIZED); a failed placement never stops the call.
+* support_email (owner, 2026-10-24: the "Email support" button on Failures and logs), the one exception to
+  the above: the window is the user's. Its Chrome starts headed and on-screen (browser_runtime
+  SHOWN_OPERATIONS: no --offscreen, no headless, no focus keeper), and the guard leaves it running when
+  the session ends, so the draft the AI started stays open for the user to send (support_email brings it
+  to the front and closes it once the user has closed the window). bringToFront in code is still refused.
 Every other @playwright/mcp tool is listed and forwarded unjudged in every operation; the trace checks
 that live ran on cua_repl code run in `application_browser.tool_item`, on the Codex trace, as before.
 
@@ -78,7 +83,7 @@ import time
 import portable
 
 
-OPERATIONS = ("linkedin", "webmail", "inspect", "investigate", "submit", "verify", "reconcile")
+OPERATIONS = ("linkedin", "webmail", "inspect", "investigate", "submit", "verify", "reconcile", "support_email")
 # Every tool @playwright/mcp 0.0.83 lists; every one is approved in every operation (live: any cua_repl call).
 TOOLS = ("browser_click", "browser_close", "browser_console_messages", "browser_drag", "browser_drop",
          "browser_emulate_media", "browser_evaluate", "browser_file_upload", "browser_fill_form", "browser_find",
@@ -721,7 +726,8 @@ class Proxy:
                 app = browser_runtime.chrome_app(setup_steps.chrome_path() or "")
                 if app is None:
                     raise OSError("Google Chrome.app not found")
-                endpoint = browser_runtime.launch_background(app, path)
+                endpoint = browser_runtime.launch_background(
+                    app, path, onscreen=self.operation in browser_runtime.SHOWN_OPERATIONS)
             else:
                 endpoint = launch(path)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -1209,8 +1215,10 @@ class Proxy:
     def stop_background_chrome(self):
         """The Chrome the guard started is not @playwright/mcp's to close (it only attached): stop it on
         this profile only (browser_runtime.end_session, which checks the command line's profile)."""
+        import browser_runtime
+        if self.operation in browser_runtime.SHOWN_OPERATIONS:
+            return   # the user's draft window (owner, 2026-10-24): support_email closes it after the user does
         if self.background_chrome:
-            import browser_runtime
             browser_runtime.end_session({"browser_driver": {"profile": self.background_chrome}})
 
     def loop(self):

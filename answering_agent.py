@@ -180,6 +180,10 @@ ANSWER_TYPES = {
     "boolean": "boolean", "bool": "boolean", "checkbox": "boolean", "yes_no": "boolean",
     "yesno": "boolean", "choice": "choice", "select": "choice", "radio": "choice",
     "dropdown": "choice", "multiple_choice": "choice", "single_select": "choice",
+    # Several options can be chosen (a checkbox group, a multi-select list; owner, 2026-10-24): the
+    # answer is a list of the form's own option labels.
+    "multi_choice": "multi_choice", "multi_select": "multi_choice", "multiselect": "multi_choice",
+    "checkboxes": "multi_choice", "checkbox_group": "multi_choice",
     "number": "number", "integer": "number", "numeric": "number", "int": "number",
     "float": "number", "currency": "number",
     "text": "text", "string": "text", "textarea": "text", "long_text": "text",
@@ -704,6 +708,13 @@ def conform_value(value, question):
         if isinstance(value, str) and value.strip().casefold() in (BOOLEAN_AFFIRMATIVE | BOOLEAN_NEGATIVE):
             return value
         raise ValueError("VALUE_NOT_BOOLEAN")
+    if kind == "multi_choice":
+        choices = question.get("choices") if isinstance(question.get("choices"), list) else []
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value):
+            raise ValueError("VALUE_NOT_A_LIST_OF_CHOICES")
+        if choices and any(item not in choices for item in value):
+            raise ValueError("VALUE_NOT_IN_CHOICES")
+        return list(dict.fromkeys(value))
     if kind == "choice":
         choices = question.get("choices") if isinstance(question.get("choices"), list) else []
         if choices and value not in choices:

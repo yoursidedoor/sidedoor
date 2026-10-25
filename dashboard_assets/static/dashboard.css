@@ -206,8 +206,6 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 .overview-needs-row:first-child { border-top: 0; padding-top: 0; }
 .overview-needs-row .overview-number { min-width: 2ch; text-align: right; }
 .overview-needs-what { flex: 1; }
-.overview-needs-none { color: var(--muted); }
-.overview-needs-none .overview-number { color: var(--muted); font-weight: 600; }
 .overview-needs-go { padding: 4px 14px; font-size: 0.875rem; }
 .overview-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .health-item { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
@@ -399,10 +397,11 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 #questions .approval-card, #notes .approval-card { padding: 12px 0; }
 #questions .approval-card p, #notes .approval-card p { margin: 0; }
 #questions .approval-q-text { margin-top: 2px; }
-.approval-q-due, .approval-n-from { font-size: 0.85rem; }
+.approval-q-due, .approval-q-hint, .approval-n-from { font-size: 0.85rem; }
+.approval-q-required { font-size: 0.85rem; font-weight: 600; }
 #questions .approval-card .note, #notes .approval-card .note { margin: 6px 0 0; }
 .approval-q-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; min-width: 0; }
-.approval-q-form input[type="text"], .approval-q-form select { flex: 0 1 28rem; min-width: 0; max-width: 100%; padding: 6px 8px; }
+.approval-q-form input[type="text"], .approval-q-form input[type="date"], .approval-q-form input[type="number"], .approval-q-form select { flex: 0 1 28rem; min-width: 0; max-width: 100%; padding: 6px 8px; }
 .approval-q-form textarea { flex: 1 1 28rem; width: auto; min-width: 0; max-width: 48rem; }
 .approval-q-prose { align-items: flex-end; }
 .approval-q-choices { display: flex; flex-wrap: wrap; gap: 4px 16px; }
@@ -499,3 +498,98 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 /* Report a problem (report_problem.html) */
 .report-problem { margin-top: 24px; }
 .report-problem-text { width: 100%; box-sizing: border-box; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+/* Which résumé applications upload (owner, 2026-10-24): one radio across the two cards; the chosen card
+   is outlined and says so in words. */
+.resume-choice .resume-file { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.resume-choice .resume-file > p, .resume-choice .resume-file > h3 { margin: 0; }
+.resume-choice .resume-file > .button { align-self: flex-start; margin-top: 6px; }
+.resume-use { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 0.9rem; cursor: pointer; margin-bottom: 2px; }
+.resume-use input { accent-color: var(--primary); margin: 0; }
+.resume-use .muted { font-weight: 400; }
+.resume-uploads .resume-on { display: none; color: var(--success); font-weight: 600; }
+.resume-choice .resume-file:has(input[name="application_resume"]:checked) { border: 2px solid var(--primary); padding: 11px 15px; background: #FFF7ED; }
+.resume-choice .resume-file:has(input[name="application_resume"]:checked) .resume-on { display: inline; }
+.resume-choice .resume-file:has(input[name="application_resume"]:checked) .resume-off { display: none; }
+
+/* Overview color (owner, 2026-10-24: "the overview page is devoid of color"). Every color names an area
+   or a state. Today (brand orange edge and dot): one color per area (Research indigo, Outreach pink, Applications orange) as tinted
+   tiles with an icon and area-colored numbers. The other cards: a colored left edge and title dot for
+   their state (amber = waiting on you, blue = in progress, green = healthy, red = broken). */
+:root {
+  --research: #4338CA; --research-tint: #EEF2FF;
+  --outreach: #BE185D; --outreach-tint: #FDF2F8;
+  --applications: #C2410C; --applications-tint: #FFF7ED;
+}
+.overview-area-research { --area: var(--research); --area-tint: var(--research-tint); --icon: url("overview-research.svg"); }
+.overview-area-outreach { --area: var(--outreach); --area-tint: var(--outreach-tint); --icon: url("overview-outreach.svg"); }
+.overview-area-applications { --area: var(--applications); --area-tint: var(--applications-tint); --icon: url("overview-applications.svg"); }
+.overview-today .overview-columns { gap: 16px; }
+.overview-area { background: var(--area-tint); border-top: 4px solid var(--area); border-radius: 10px; padding: 16px; }
+.overview-area .overview-number, .overview-area .overview-sub a { color: var(--area); }
+.overview-area .overview-stats dt { color: #4B5563; }
+.overview-area .overview-stats dt, .overview-area .overview-stats dd { border-top-color: color-mix(in srgb, var(--area) 18%, transparent); }
+/* Area icons: static SVG masks (the CSP allows images from 'self' only), so the headings stay plain text. */
+.overview-area h3 { position: relative; display: flex; align-items: center; min-height: 28px; padding-left: 36px; color: var(--area); }
+.overview-area h3::before, .overview-area h3::after { content: ""; position: absolute; top: 50%; }
+.overview-area h3::before { left: 0; width: 28px; height: 28px; margin-top: -14px; border-radius: 999px; background: var(--area); }
+.overview-area h3::after { left: 6px; width: 16px; height: 16px; margin-top: -8px; background: var(--white);
+  -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat; }
+
+.overview-today, .overview-needs, .overview-now, .overview-compute, .overview-health { border-left: 5px solid var(--accent); }
+.overview-today h2::before, .overview-needs h2::before, .overview-now h2::before, .overview-compute h2::before, .overview-health h2::before {
+  content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 10px; border-radius: 999px;
+  vertical-align: middle; position: relative; top: -2px; background: var(--accent); }
+.overview-today { --accent: var(--primary); }
+.overview-needs { --accent: var(--success); }
+.overview-needs:has(.overview-needs-row) { --accent: #F59E0B; background: linear-gradient(180deg, var(--warning-tint), var(--white) 72px); }
+.overview-needs-row .overview-number { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 32px;
+  padding: 0 8px; border-radius: 999px; background: var(--warning-tint); color: var(--warning); font-size: 1rem; }
+.overview-now { --accent: var(--info); }
+.overview-now .overview-number { color: var(--info); }
+.overview-compute { --accent: var(--primary); }
+.overview-health { --accent: var(--success); }
+.overview-health:has(.health-warning) { --accent: #F59E0B; }
+.overview-health:has(.health-error) { --accent: var(--error); }
+.overview-health .health-dot { box-shadow: 0 0 0 4px var(--white), 0 0 0 5px currentColor; }
+.overview-health .health-success .health-dot { color: var(--success-tint); }
+.overview-health .health-warning .health-dot { color: var(--warning-tint); }
+.overview-health .health-error .health-dot { color: var(--error-tint); }
+
+/* Applications waiting (Review holds applications too; owner, 2026-10-24): the message card's density. */
+#applications .approval-card { padding: 12px 0; }
+#applications .approval-who { margin: 0; }
+#applications .approval-card > p, #applications .approval-card > blockquote { margin: 0 0 4px; }
+.approval-a-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 4px 0; font-size: 0.9rem; }
+.approval-a-facts dt { color: var(--muted); }
+.approval-a-facts dd { margin: 0; min-width: 0; }
+/* Answers: read-only rows by default; "Edit answers" turns each row into the form's own control
+   (owner, 2026-10-24). CSS-only toggles: two visually hidden checkboxes at the top of the card. */
+.approval-a-toggle { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.approval-app { position: relative; }
+.approval-a-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; font-size: 0.9rem; }
+.approval-a-link { color: var(--primary); font-weight: 600; cursor: pointer; background: none; border: 0; padding: 0; font: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.approval-a-toggle:focus-visible + * , .approval-a-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.approval-a-body { display: none; margin: 4px 0; font-size: 0.9rem; border-top: 1px solid var(--border); }
+.approval-a-row { display: grid; grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); gap: 2px 12px; padding: 5px 0; border-bottom: 1px solid var(--border); align-items: start; }
+.approval-a-q { color: var(--muted); }
+.approval-a-view { white-space: pre-wrap; min-width: 0; }
+.approval-a-full { grid-template-columns: minmax(0, 1fr); }
+.approval-a-full .approval-text { display: block; margin: 0; }
+.approval-app .approval-a-control { display: none; font: inherit; min-width: 0; max-width: 100%; }
+.approval-a-row select.approval-a-control { padding: 4px 6px; justify-self: start; }
+.approval-a-row textarea.approval-a-control, .approval-a-row input.approval-a-control { width: 100%; padding: 4px 8px; box-sizing: border-box; resize: vertical; }
+.approval-a-choices { flex-wrap: wrap; gap: 2px 14px; }
+.approval-a-choices label { display: inline-flex; align-items: center; gap: 5px; font-weight: 400; }
+.approval-a-choices input { accent-color: var(--primary); margin: 0; }
+.approval-a-editing-note, .approval-a-cancel, .when-open, .when-edit { display: none; }
+.approval-app:has(.approval-a-show:checked) .approval-a-body, .approval-app:has(.approval-a-editing:checked) .approval-a-body { display: block; }
+.approval-app:has(.approval-a-show:checked) .when-closed { display: none; }
+.approval-app:has(.approval-a-show:checked) .when-open { display: inline; }
+.approval-app:has(.approval-a-editing:checked) .approval-a-view, .approval-app:has(.approval-a-editing:checked) .approval-a-showlabel, .approval-app:has(.approval-a-editing:checked) .approval-a-editlabel { display: none; }
+.approval-app:has(.approval-a-editing:checked) .approval-a-control { display: block; }
+.approval-app:has(.approval-a-editing:checked) .approval-a-choices { display: flex; }
+.approval-app:has(.approval-a-editing:checked) .approval-a-editing-note, .approval-app:has(.approval-a-editing:checked) .approval-a-cancel { display: inline; }
+/* The button names an edit only once something on the card differs from what was shown (approvals.js). */
+.approval-app.approval-a-changed .when-view { display: none; }
+.approval-app.approval-a-changed .when-edit { display: inline; }
+.approval-app:has(.approval-a-editing:checked) .approval-a-body { border-left: 3px solid var(--primary); padding-left: 10px; }

@@ -216,9 +216,9 @@ def execute(config, prompt, directory, timeout):
             if worker is not None:
                 portable.kill_tree(worker.pid)
                 worker.wait(timeout=5)
-                if config.get("_browser_operation"):
-                    import browser_runtime
-                    browser_runtime.end_session(config)
+                import browser_runtime
+                if config.get("_browser_operation") and config["_browser_operation"] not in browser_runtime.SHOWN_OPERATIONS:
+                    browser_runtime.end_session(config)   # a support email's draft stays open for the user
 
 
 def read(path, maximum):

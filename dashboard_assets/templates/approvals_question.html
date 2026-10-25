@@ -3,15 +3,23 @@
 {% set q = item %}{% set f = f or {} %}
 <article class="approval-card" id="{{ q.dom }}">
   <p class="approval-q-job"><strong>{{ q.employer }}</strong>{% if q.role %} · {% if q.url %}<a href="{{ q.url }}" rel="noopener noreferrer" target="_blank">{{ q.role }}</a>{% else %}{{ q.role }}{% endif %}{% endif %}</p>
-  <p class="approval-q-text" id="label-{{ q.dom }}"><strong>{{ q.question }}</strong></p>
+  <p class="approval-q-text" id="label-{{ q.dom }}"><strong>{{ q.question }}</strong>{% if q.required %} · <span class="approval-q-required">Required</span>{% endif %}</p>
+  {% if q.hint %}<p class="muted approval-q-hint" id="hint-{{ q.dom }}">Format: {{ q.hint }}</p>{% endif %}
+  {% if q.site_reason %}<p class="note note-warning">The application site didn't accept this answer: {{ q.site_reason }}</p>{% endif %}
   {% if q.expires %}<p class="muted approval-q-due">Answer by {{ v.when(q.expires) }}. Nothing is submitted without your answer.</p>{% endif %}
   {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
   <form class="approval-q-form{{ ' approval-q-prose' if q.control == 'textarea' }}" method="post" action="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
     <input type="hidden" name="decision_id" value="{{ q.id }}"><input type="hidden" name="payload_hash" value="{{ q.payload_hash }}">
     {% if q.control == "radio" %}
     <span class="approval-q-choices" role="radiogroup" aria-labelledby="label-{{ q.dom }}">{% for choice in q.options %}<label class="approval-q-choice"><input type="radio" name="answer" value="{{ choice }}"{% if loop.first %} required{% endif %}{% if f.kept == choice %} checked{% endif %}> {{ choice }}</label>{% endfor %}</span>
+    {% elif q.control == "checkbox" %}
+    <span class="approval-q-choices" role="group" aria-labelledby="label-{{ q.dom }}">{% for choice in q.options %}<label class="approval-q-choice"><input type="checkbox" name="answer_multi" value="{{ choice }}"{% if choice in (f.kept_list or []) %} checked{% endif %}> {{ choice }}</label>{% endfor %}</span>
     {% elif q.control == "select" %}
     <select name="answer" aria-labelledby="label-{{ q.dom }}" required><option value="">Choose one</option>{% for choice in q.options %}<option value="{{ choice }}"{% if f.kept == choice %} selected{% endif %}>{{ choice }}</option>{% endfor %}</select>
+    {% elif q.control == "date" %}
+    <input type="date" name="answer" aria-labelledby="label-{{ q.dom }}"{% if q.hint %} aria-describedby="hint-{{ q.dom }}"{% endif %} value="{{ f.kept or '' }}" required>
+    {% elif q.control == "number" %}
+    <input type="number" name="answer" step="any" aria-labelledby="label-{{ q.dom }}"{% if q.hint %} aria-describedby="hint-{{ q.dom }}"{% endif %} value="{{ f.kept or '' }}" required>
     {% elif q.control == "textarea" %}
     <textarea name="answer" rows="3" maxlength="4000" aria-labelledby="label-{{ q.dom }}" required>{{ f.kept or "" }}</textarea>
     {% else %}

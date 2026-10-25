@@ -538,6 +538,13 @@ class Loop:
     def running(self):
         return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
 
+    def run_soon(self, name):
+        """Make `name` due at the next tick (at most TICK_SECONDS away), as a first tick does: its
+        last fired instant is forgotten. Everything a tick checks still applies (a pause starts
+        nothing; a child of that job still running spends the instant and that run goes on)."""
+        with self._lock:
+            self.last_fired.pop(name, None)
+
 
 # --- the process's one scheduler (installed by dashboard.serve) -----------------------------------
 
@@ -572,6 +579,15 @@ def stop():
 
 def running():
     return _current is not None and _current.running()
+
+
+def run_soon(name):
+    """Ask this process's scheduler to start `name` at its next tick instead of its next scheduled
+    instant (an application approved on Approvals: owner, 2026-10-24). False when there is none."""
+    if _current is None:
+        return False
+    _current.run_soon(name)
+    return True
 
 
 def status(root=None):

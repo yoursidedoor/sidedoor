@@ -81,7 +81,7 @@ You answer every question on this form. Python only fits your `value` to the con
 | `question_class` | what you return |
 |---|---|
 | `WORK_AUTHORIZATION_HELD`, `SPONSORSHIP_REQUIREMENT` | the true answer from the owner's recorded authorization facts (a boolean for Yes/No). |
-| `WORK_MODE_PREFERENCE`, `LOCATION_PREFERENCE` | a real boolean `true`/`false`, never a string. Read the question against `/policy/location_priority/**` and the role's `/review/facts/**`. **The owner will not work onsite or hybrid in the places `/policy/onsite_location_exclusions` names** (its note says which places and work modes; absent means none) - that exclusion is yours to apply now; nothing downstream re-checks it. |
+| `WORK_MODE_PREFERENCE`, `LOCATION_PREFERENCE` | a real boolean `true`/`false`, never a string. Read the question against `/policy/location_priority/**` and the role's `/review/facts/**`. **The owner will not work onsite or hybrid in the places `/policy/onsite_location_exclusions` names** (its note says which places and work modes; absent means none) - that exclusion is yours to apply now; nothing downstream re-checks it. **When `location_priority` lists a place and its work modes include hybrid or onsite, the owner is open to relocating there**; where they currently live never excludes a place. |
 | `COMPUTED_EXPERIENCE` | the number of years, computed from the dated resume sections you cite. |
 | `COMPENSATION_EXPECTATION` | the figure or band, from `/policy/desired_base_salary_usd`. |
 | `AVAILABILITY` | the start date or notice period the question asks for. Never a date earlier than the owner's recorded start floor. |
@@ -94,7 +94,8 @@ You answer every question on this form. Python only fits your `value` to the con
 
 For a Yes/No control, return the **boolean** and Python renders it onto the employer's own
 wording, so you never write "Yes" as a string. For a text or number control, return the value
-itself.
+itself. For a `multi_choice` control (several boxes can be ticked), return a **list** of every
+option that applies, each copied exactly from `choices`.
 
 **What no longer checks your work.** Until 2026-09-22 Python re-derived most of these answers
 itself and discarded yours. It was wrong often enough that the owner removed it: a regex read
@@ -204,7 +205,11 @@ itself.
 
 Classify the question `COMPENSATION_EXPECTATION` and return the recorded desired band from
 `/policy/desired_base_salary_usd` as `value`, in the shape the control takes - a single
-number where the form takes one number, the band where it takes text. Never a figure the
+number where the form takes one number, the band where it takes text. When the form asks in
+another currency or period (GBP, EUR, hourly, monthly), convert the band at your best current
+approximate exchange rate (and a 2,080-hour year for hourly) and say so in the derivation: the
+converted figure is the recorded band, not a new one. A USD number entered as another currency
+is wrong. Never a figure the
 policy does not carry, and never the owner's current or previous salary: that is a fabricated
 salary history disclosed to an employer, and it is unlawful to ask for one in several
 jurisdictions.

@@ -11,6 +11,12 @@ Five lists, each read from the record the rest of the product already writes:
   written); a launch card has Approve only. Reject takes an optional reason. Every action carries the
   payload hash the card was rendered with. In Automatic mode the list is replaced by one line;
   messages still waiting (kept for review) stay listed.
+- Applications waiting: applications Review mode held before submitting (owner, 2026-10-24;
+  `approvals.held_application_keys`, `application_approvals`), 25 a page. A card shows where it goes,
+  the résumé and every answer, read-only until "Edit answers" turns each into the form's own control
+  (`approvals.application_control`); Approve saves exactly what the card shows
+  (`approvals.approve_application`) and the job is submitted on the next applications pass, which the
+  scheduler is asked to start now (`scheduler_loop.run_soon`); Reject closes it (`reject_application`).
 - Couldn't send: approved messages a sending rule then refused (`approvals.refused_after_approval`;
   owner, 2026-10-22, D3), with the reason in plain words and [Dismiss] (`approvals.dismiss_refused`).
 - Questions for you: `user_decisions` PENDING and unexpired (not the transport test), answered through
@@ -57,10 +63,11 @@ NOTE_LIMIT = 25
 REFUSED_LIMIT = 25
 NOTICE_LIMIT = 20
 # Each list's own page parameter (and #anchor), so paging one list never resets another.
-PAGE_PARAMS = {"messages": "page", "refused": "refused_page", "questions": "questions_page", "notes": "notes_page",
-               "notices": "notices_page"}
-LIST_SIZES = {"messages": PAGE_SIZE, "refused": REFUSED_LIMIT, "questions": QUESTION_LIMIT, "notes": NOTE_LIMIT,
-              "notices": NOTICE_LIMIT}
+PAGE_PARAMS = {"messages": "page", "applications": "applications_page", "refused": "refused_page",
+               "questions": "questions_page", "notes": "notes_page", "notices": "notices_page"}
+APPLICATION_LIMIT = 25
+LIST_SIZES = {"messages": PAGE_SIZE, "applications": APPLICATION_LIMIT, "refused": REFUSED_LIMIT, "questions": QUESTION_LIMIT,
+              "notes": NOTE_LIMIT, "notices": NOTICE_LIMIT}
 AUDIT_SCAN = 50             # DECISION rows read per card (newest first) to find the hold's verdict
 PURPOSE_WORDS = {"INVITE": "Invitation note", "PREPARE_CAMPAIGN": "Invitation note",
                  "INITIAL": "First message", "FIRST_MESSAGE": "First message after they accepted",
@@ -280,18 +287,13 @@ def question_words(label, semantic, field):
     return " ".join(label.split()) if isinstance(label, str) and label.strip() else _words(semantic or field)
 
 
-PROSE_TYPES = {"long_text", "textarea", "paragraph"}
-PROSE_LABEL = 80   # a question this long asks for a few sentences, not a value
-
-
 def answer_control(answer_type, options, question, operational=False):
-    """radio (yes/no, or up to five choices), select (more choices), textarea (prose: the unreadable-form
-    note, a long-text type or a long question) or text (a single line: a URL, a handle, a number)."""
-    if options:
-        return "radio" if len(options) <= 5 else "select"
-    if operational or answer_type in PROSE_TYPES or len(question or "") > PROSE_LABEL:
-        return "textarea"
-    return "text"
+    """The Questions card's control: the one mapping the held-application card uses too
+    (`approvals.application_control`), from the stored answer type, the form's options and the
+    question as asked. The unreadable-form note is always a box of several lines."""
+    import approvals
+    return approvals.application_control({"answer_type": answer_type, "choices": options, "label": question,
+                                          "operational": operational})[0]
 
 
 def question_count(database, now):
@@ -311,6 +313,7 @@ def questions(database, now, only=None, page=1):
     offset = 0 if only is not None else (page - 1) * QUESTION_LIMIT
     jobs = _has(database, "application_jobs")
     label = ",d.label" if "label" in columns else ",NULL"
+    label += "".join(",d." + name if name in columns else ",NULL" for name in ("required", "hint", "site_reason"))
     rows = database.execute(
         "SELECT d.id,d.job_key,d.field,d.semantic,d.answer_type,d.choices,d.payload_hash,d.expires_at"
         + (",j.employer,j.payload" if jobs else ",NULL,NULL") + label
@@ -320,7 +323,8 @@ def questions(database, now, only=None, page=1):
         (int(now.timestamp() * 1000),) + ((only,) if only is not None else ()) + (QUESTION_LIMIT, offset)).fetchall()
     import decision_transport
     found = []
-    for identifier, job_key, field, semantic, answer_type, choices, payload_hash, expires_at, employer, payload, label in rows:
+    for (identifier, job_key, field, semantic, answer_type, choices, payload_hash, expires_at, employer, payload, label,
+         required, hint, site_reason) in rows:
         role = _object(payload) or {}
         operational = field == decision_transport.FORM_NOT_READABLE_FIELD
         choices = _json(choices)
@@ -332,13 +336,15 @@ def questions(database, now, only=None, page=1):
         question = FORM_NOT_READABLE_WORDS if operational else question_words(label, semantic, field)
         kind = "text" if operational else answer_type
         options = ["Yes", "No"] if kind == "boolean" else [choice for choice in choices if isinstance(choice, str)] \
-            if kind == "choice" and isinstance(choices, list) else []
+            if kind in ("choice", "multi_choice") and isinstance(choices, list) else []
         found.append({"dom": dom("question", identifier), "id": identifier, "payload_hash": payload_hash, "job_key": job_key,
                       "employer": company, "role": role_name or role.get("role") or role.get("title"),
                       "control": answer_control(kind, options, question, operational), "options": options,
                       "url": role.get("url") if str(role.get("url") or "").startswith("https://") else None,
                       "question": question, "answer_type": kind,
                       "choices": [choice for choice in choices if isinstance(choice, str)] if isinstance(choices, list) else [],
+                      "required": bool(required) and not operational, "hint": None if operational else hint,
+                      "site_reason": None if operational else site_reason,
                       "expires": expires})
     return found
 
@@ -527,6 +533,62 @@ def notice_view(database, event_key, message, at):
     return dict(found, text=_named(job) + ": " + text, href=_job_href(job[0]), link="See the application")
 
 
+def application_count(database):
+    return len(approvals.held_application_keys(database)) if database is not None else 0
+
+
+def _held_at(text):
+    try:
+        moment = dt.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=dt.timezone.utc)
+
+
+def applications_waiting(database, only=None, page=1):
+    """The held applications' cards (`approvals_application.html`), oldest first, a page at a time."""
+    keys = approvals.held_application_keys(database) if database is not None else []
+    if only is not None:
+        keys = [key for key in keys if key == only]
+    else:
+        keys = keys[(page - 1) * APPLICATION_LIMIT:page * APPLICATION_LIMIT]
+    found = []
+    for key in keys:
+        row = database.execute("SELECT a.snapshot,a.payload_hash,a.held_at,j.employer,j.payload FROM application_approvals a "
+                               "JOIN application_jobs j ON j.job_key=a.job_key WHERE a.job_key=?", (key,)).fetchone()
+        snapshot = _object(row[0]) if row else None
+        if not snapshot or not isinstance(snapshot.get("questions"), list):
+            continue   # a malformed card is never listed
+        role = _object(row[4]) or {}
+        company, role_name = job_names(row[3], role)
+        route = "email" if snapshot.get("route") == "email" else "ats"
+        answers, cover, subject, body = [], None, snapshot.get("subject"), None
+        for item in snapshot["questions"]:
+            if not isinstance(item, dict) or not isinstance(item.get("field"), str):
+                continue
+            name = approvals.input_name(item, route)
+            if name == "cover_letter" and cover is None:
+                cover = approvals.shown_answer(item)
+            elif name == "body" and body is None:
+                body = approvals.shown_answer(item)
+            elif name == "subject" and route == "email":
+                subject = approvals.shown_answer(item)
+            else:
+                control, options = approvals.application_control(item)
+                answers.append({"field": item["field"], "question": question_words(item.get("label"), item.get("semantic"), item["field"]),
+                                "control": control, "options": options, "answer": approvals.shown_answer(item)})
+        destination = snapshot.get("destination") if isinstance(snapshot.get("destination"), str) else ""
+        parts = urllib.parse.urlsplit(destination) if route == "ats" else None
+        found.append({"dom": dom("application", key), "id": key, "payload_hash": row[1], "company": company,
+                      "role": role_name or "Role not recorded",
+                      "url": role.get("url") if str(role.get("url") or "").startswith("https://") else None,
+                      "route": route, "site": parts.hostname if parts and parts.hostname else destination,
+                      "destination": ((parts.hostname or "") + parts.path.rstrip("/")) if parts else destination,
+                      "resume": snapshot.get("resume") or "Your résumé", "answers": answers, "cover_letter": cover,
+                      "subject": subject, "body": body, "held_at": _held_at(row[2])})
+    return found
+
+
 def _named(job):
     return job[1] + (" (" + job[2] + ")" if job[2] else "")
 
@@ -545,7 +607,8 @@ def gather(database, config, page=1, pages=None):
     pages = dict(pages or {}, messages=(pages or {}).get("messages", page))
     paging = {}
     if database is None:
-        found = {"messages": [], "total": 0, "page": 1, "unreadable": 0, "refused": [], "questions": [], "notes": [], "notices": []}
+        found = {"messages": [], "total": 0, "page": 1, "unreadable": 0, "applications": [], "refused": [], "questions": [],
+                 "notes": [], "notices": []}
         paging = {name: {"page": 1, "pages": 1, "total": 0} for name in PAGE_PARAMS}
     else:
         import reply_tools
@@ -553,6 +616,7 @@ def gather(database, config, page=1, pages=None):
         found = {"messages": cards, "total": total, "page": number, "unreadable": unreadable}
         paging["messages"] = {"page": number, "pages": max(1, -(-total // PAGE_SIZE)), "total": total}
         for name, count, load in (
+                ("applications", application_count, lambda number: applications_waiting(database, page=number)),
                 ("refused", approvals.refused_count, lambda number: refused(database, page=number)),
                 ("questions", lambda database: question_count(database, now), lambda number: questions(database, now, page=number)),
                 ("notes", reply_tools.open_flag_count, lambda number: notes(database, page=number)),
@@ -706,6 +770,49 @@ def register(app, templates, layout, *, home, root, config):
         return answer_card(request, "refused", action_id, finder, "approvals_refused.html", {},
                            {"tone": "success", "text": "Dismissed. The message stays unsent."})
 
+    # --- Applications -------------------------------------------------------------------------------
+
+    async def decide_application(request, act):
+        form = await request.form()
+        job_key, shown = form.get("application_id") or "", form.get("payload_hash") or ""
+        posted = {name: [value for value in form.getlist(name) if isinstance(value, str)] for name in form.keys()}
+        result = await run_in_threadpool(write, lambda database: act(database, job_key, shown, posted)) if shown else \
+            {"state": "REFUSED", "message": "This page is out of date. Reload it and try again."}
+        finder = lambda database: applications_waiting(database, only=job_key)
+
+        def reply(flash, gone):
+            return answer_card(request, "application", job_key, finder, "approvals_application.html", flash, gone)
+        if result is None:
+            return reply({"tone": "error", "text": BUSY}, {"tone": "error", "text": BUSY})
+        state, email = result.get("state"), result.get("route") == "email"
+        if state == "APPROVED":
+            # The next applications pass submits it; the scheduler starts one now rather than at its
+            # next hourly turn (a run already going takes it after its current list).
+            import scheduler_loop
+            scheduler_loop.run_soon("applications")
+            return reply({}, {"tone": "success", "text": ("Approved. Sidedoor sends this email application on its next "
+                                                          "applications run, which starts now." if email else
+                                                          "Approved. Sidedoor submits this application with these answers "
+                                                          "on its next applications run, which starts now.")})
+        if state == "REJECTED":
+            return reply({}, {"tone": "success", "text": "Rejected. This application will never be "
+                                                         + ("sent." if email else "submitted.")})
+        message = result.get("message") or "This could not be done. Reload the page and try again."
+        return reply({"tone": "warning" if state == "CHANGED" else "error", "text": message},
+                     {"tone": "warning", "text": message})
+
+    @app.post("/approvals/applications/approve")
+    async def approve_application(request: Request):
+        """Approve (my edits) and submit/send: exactly the answers on the card are saved and submitted."""
+        return await decide_application(request, lambda database, job_key, shown, posted:
+                                        approvals.approve_application(database, job_key, posted, shown_payload_hash=shown))
+
+    @app.post("/approvals/applications/reject")
+    async def reject_application(request: Request):
+        return await decide_application(request, lambda database, job_key, shown, posted:
+                                        approvals.reject_application(database, job_key, shown_payload_hash=shown,
+                                                                     reason=(posted.get("reason") or [None])[0]))
+
     # --- Questions ----------------------------------------------------------------------------------
 
     @app.post("/approvals/questions/answer")
@@ -714,6 +821,9 @@ def register(app, templates, layout, *, home, root, config):
         decision_id, shown = form.get("decision_id") or "", form.get("payload_hash") or ""
         raw = form.get("answer")
         raw = raw.replace("\r\n", "\n").strip() if isinstance(raw, str) else ""
+        ticked = [value for value in form.getlist("answer_multi") if isinstance(value, str) and value]
+        if ticked:
+            raw = json.dumps(ticked)   # a multi-select's ticked options, as the list it is stored as
         finder = lambda database: questions(database, dt.datetime.now(dt.timezone.utc), only=decision_id)
 
         def reply(flash, gone):
@@ -743,15 +853,16 @@ def register(app, templates, layout, *, home, root, config):
         if result["state"] != "APPLIED":
             # A refusal (expired, answered, changed, stale) or an answer that does not fit: the reason in
             # plain words, the typed answer kept (E6.T4 review 15).
-            return reply({"tone": "warning", "text": result["message"], "kept": raw},
-                         {"tone": "warning", "text": result["message"], "kept": raw})
+            return reply({"tone": "warning", "text": result["message"], "kept": raw, "kept_list": ticked},
+                         {"tone": "warning", "text": result["message"], "kept": raw, "kept_list": ticked})
         import decision_transport
         import setup_steps
         field, semantic, answer_type, employer, payload, row_choices, label = row
         text = "Answer saved. The application goes on at its next turn."
         if field != decision_transport.FORM_NOT_READABLE_FIELD:
             role = _object(payload) or {}
-            value = raw.casefold() in {"yes", "true"} if answer_type == "boolean" else raw
+            value = (raw.casefold() in {"yes", "true"} if answer_type == "boolean"
+                     else json.loads(raw) if answer_type == "multi_choice" else raw)
             title = role.get("role") or role.get("title")
             asked = question_words(label, semantic, field)
             # The company as the posting writes it, as Applications shows it (owner, 2026-10-24), then

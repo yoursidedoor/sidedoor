@@ -32,6 +32,19 @@
   {{ pager(v, "messages", "messages", "waiting") }}
 </section>
 
+{% set held = v.applications or [] %}
+<section class="card approvals-section{{ ' approvals-empty' if not held }}" id="applications" aria-labelledby="applications-title">
+  <h2 id="applications-title">Applications waiting</h2>
+  {% if not review %}
+  <p class="{{ 'muted' if not held }}">Automatic mode is on: applications are submitted without waiting. See them on <a href="/applications">Applications</a>.</p>
+  {% if held %}<p class="muted">These were kept for review. Approve or reject each one.</p>{% endif %}
+  {% elif not held %}
+  <p class="muted">No applications waiting.</p>
+  {% endif %}
+  {% for a in held %}{% with item = a, f = cards.get(a.dom) %}{% include "approvals_application.html" %}{% endwith %}{% endfor %}
+  {{ pager(v, "applications", "applications", "waiting") }}
+</section>
+
 {% if v.refused or v.paging.refused.total %}
 <section class="card approvals-section" id="refused" aria-labelledby="refused-title">
   <h2 id="refused-title">Couldn't send</h2>
@@ -63,5 +76,5 @@
   {{ pager(v, "notices", "notices") }}
 </section>
 </div>
-<script src="/static/approvals.js" defer></script>
+<script src="{{ asset_url('/static/approvals.js') }}" defer></script>
 {% endblock %}

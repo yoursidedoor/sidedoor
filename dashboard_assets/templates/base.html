@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
   <title>{{ title }} · Your Sidedoor</title>
-  <link rel="icon" type="image/png" sizes="32x32" href="/brand/yoursidedoor-icon-win-32.png">
-  <link rel="icon" type="image/png" sizes="16x16" href="/brand/yoursidedoor-icon-win-16.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/brand/yoursidedoor-apple-touch-180.png">
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <script src="/static/htmx.min.js" defer></script>
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ asset_url('/brand/yoursidedoor-icon-win-32.png') }}">
+  <link rel="icon" type="image/png" sizes="16x16" href="{{ asset_url('/brand/yoursidedoor-icon-win-16.png') }}">
+  <link rel="apple-touch-icon" sizes="180x180" href="{{ asset_url('/brand/yoursidedoor-apple-touch-180.png') }}">
+  <link rel="stylesheet" href="{{ asset_url('/static/dashboard.css') }}">
+  <script src="{{ asset_url('/static/htmx.min.js') }}" defer></script>
 </head>
 <body>
   <header class="header">
-    <a class="logo" href="/"><img src="/brand/yoursidedoor-logo.png" alt="Your Sidedoor" width="167" height="40"></a>
+    <a class="logo" href="/"><img src="{{ asset_url('/brand/yoursidedoor-logo.png') }}" alt="Your Sidedoor" width="167" height="40"></a>
     <nav class="tabs" aria-label="Pages">
       {% for key, label, path in tabs %}
       <a class="tab{% if key == active %} active{% endif %}" href="{{ path }}"{% if key == active %} aria-current="page"{% endif %}>{{ label }}</a>

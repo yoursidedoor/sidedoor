@@ -287,8 +287,9 @@ class Adapter:
             # next. The eligibility re-run stays, exactly as it does there.
             if applications.assess(evidence["review"], job, self.policy, now):
                 raise Blocked("ELIGIBILITY_EVIDENCE_EXPIRED", "Refresh eligibility and duplicate/referral checks before submitting")
-            resume = self.root / self.policy["resume"]["path"]
-            if Path(payload["resume"]).resolve() != resume.resolve() or hashlib.sha256(resume.read_bytes()).hexdigest() != self.policy["resume"]["sha256"]:
+            designated = user_profile.application_resume(self.policy)   # the file chosen in Settings > Résumé
+            resume = self.root / designated["path"]
+            if Path(payload["resume"]).resolve() != resume.resolve() or hashlib.sha256(resume.read_bytes()).hexdigest() != designated["sha256"]:
                 raise Blocked("DESIGNATED_RESUME_MISMATCH", "Use only the designated unchanged resume")
             database.execute("CREATE TABLE IF NOT EXISTS browser_submission_claims (job_key TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, state TEXT NOT NULL, observed_at TEXT NOT NULL)")
             with database:

@@ -1,0 +1,71 @@
+{# One application held by Review mode (owner, 2026-10-24: the Review switch holds everything that goes
+   out), from `approvals_page.applications_waiting`. `item`: {dom, id, payload_hash, company, role, url, route ("ats"|"email"),
+   site, destination, resume, answers, cover_letter, subject, body, held_at}; each answer is {field, question,
+   control ("select"|"radio"|"checkbox"|"text"|"textarea"), options [labels, as the form had them], answer
+   (a label, or a list of labels for "checkbox")}. A yes/no question is "radio" with its two choices.
+   Every answer is editable (owner, 2026-10-24): read-only by default; "Edit" turns each row into the
+   form's own control with the current answer chosen. There is no separate Save: every control belongs
+   to the Approve form (form="approve-..."), so "Approve and submit" saves exactly what is on screen and
+   submits it, one step (`approvals.approve_application`). "Cancel" (a reset) puts the shown answers back.
+   The toggles are CSS-only (:has on a checkbox); approvals.js only switches the button's words once
+   something differs from what was shown ("Approve my edits and ..."). #}
+{% set a = item %}{% set f = f or {} %}{% set email = a.route == "email" %}{% set fid = "approve-" ~ a.dom %}
+{% macro chosen(q, option) %}{{ option in q.answer if q.answer is not string else option == q.answer }}{% endmacro %}
+<article class="approval-card approval-app" id="{{ a.dom }}">
+  <input class="approval-a-toggle approval-a-show" type="checkbox" id="show-{{ a.dom }}"{% if email %} checked{% endif %}>
+  <input class="approval-a-toggle approval-a-editing" type="checkbox" id="edit-{{ a.dom }}">
+  <p class="approval-m-head"><strong class="approval-who">{{ a.company }}</strong> <span class="muted">· {% if a.url %}<a href="{{ a.url }}" rel="noopener noreferrer" target="_blank">{{ a.role }}</a>{% else %}{{ a.role }}{% endif %}</span>
+    <span class="chip chip-info">{{ "Email application" if email else "Application" }}</span></p>
+  <dl class="approval-a-facts">
+    <dt>{{ "Sent to" if email else "Submitted on" }}</dt><dd>{% if email %}{{ a.destination }}{% else %}{{ a.site }} <span class="muted">({{ a.destination }})</span>{% endif %}</dd>
+    <dt>Résumé</dt><dd>{{ a.resume }} <a href="/settings#resume">Change</a></dd>
+  </dl>
+  <p class="approval-a-bar">
+    {% if not email %}<label class="approval-a-link approval-a-showlabel" for="show-{{ a.dom }}"><span class="when-closed">Show</span><span class="when-open">Hide</span> {{ a.answers|length }} answer{{ "s" if a.answers|length != 1 }}{% if a.cover_letter %} and cover letter{% endif %}</label>{% endif %}
+    <label class="approval-a-link approval-a-editlabel" for="edit-{{ a.dom }}">{{ "Edit email" if email else "Edit answers" }}</label>
+    <span class="approval-a-editing-note muted">Editing. Approve submits what you see here.</span>
+    <button class="approval-a-link approval-a-cancel" type="reset" form="{{ fid }}">Cancel</button>
+  </p>
+  <div class="approval-a-body">
+  {% if email %}
+  <div class="approval-a-row"><span class="approval-a-q">Subject</span>
+    <span class="approval-a-view">{{ a.subject or "" }}</span>
+    <input class="approval-a-control" form="{{ fid }}" name="subject" value="{{ a.subject or '' }}" maxlength="300" aria-label="Subject"></div>
+  <div class="approval-a-row approval-a-full"><span class="approval-a-view approval-text">{{ a.body }}</span>
+    <textarea class="approval-a-control" form="{{ fid }}" name="body" rows="7" aria-label="Email body">{{ a.body }}</textarea></div>
+  {% endif %}
+  {% for q in a.answers %}{% set name = "answer:" ~ q.field %}{% set qid = a.dom ~ "-q" ~ loop.index %}
+  <div class="approval-a-row" role="group" aria-labelledby="{{ qid }}"><span class="approval-a-q" id="{{ qid }}">{{ q.question }}</span>
+    <span class="approval-a-view">{{ q.answer|join(", ") if q.answer is not string else q.answer }}</span>
+    {% if q.control == "select" %}
+    <select class="approval-a-control" form="{{ fid }}" name="{{ name }}" aria-labelledby="{{ qid }}">{% for o in q.options %}<option value="{{ o }}"{% if chosen(q, o) == "True" %} selected{% endif %}>{{ o }}</option>{% endfor %}</select>
+    {% elif q.control in ("radio", "checkbox") %}
+    <span class="approval-a-control approval-a-choices">{% for o in q.options %}<label><input type="{{ q.control }}" form="{{ fid }}" name="{{ name }}" value="{{ o }}"{% if chosen(q, o) == "True" %} checked{% endif %}> {{ o }}</label>{% endfor %}</span>
+    {% else %}
+    <textarea class="approval-a-control" form="{{ fid }}" name="{{ name }}" rows="{{ 4 if q.control == 'textarea' else 1 }}" aria-labelledby="{{ qid }}">{{ q.answer }}</textarea>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% if a.cover_letter %}
+  <div class="approval-a-row approval-a-full"><span class="approval-a-q">Cover letter</span>
+    <span class="approval-a-view approval-text">{{ a.cover_letter }}</span>
+    <textarea class="approval-a-control" form="{{ fid }}" name="cover_letter" rows="6" aria-label="Cover letter">{{ a.cover_letter }}</textarea></div>
+  {% endif %}
+  </div>
+  {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
+  <div class="approval-actions">
+  <form method="post" action="/approvals/applications/approve" hx-post="/approvals/applications/approve" hx-target="closest article" hx-swap="outerHTML" class="approval-inline" id="{{ fid }}">
+    <input type="hidden" name="application_id" value="{{ a.id }}"><input type="hidden" name="payload_hash" value="{{ a.payload_hash }}">
+    <button class="button button-highlight" type="submit"><span class="when-view">{{ "Approve and send" if email else "Approve and submit" }}</span><span class="when-edit">{{ "Approve my edits and send" if email else "Approve my edits and submit" }}</span></button>
+  </form>
+  {% if a.held_at %}<span class="muted approval-m-small">Waiting since {{ v.when(a.held_at) }}. Nothing is {{ "sent" if email else "submitted" }} until you approve it.</span>{% endif %}
+  <details class="approval-reject"><summary>Reject</summary>
+    <form method="post" action="/approvals/applications/reject" hx-post="/approvals/applications/reject" hx-target="closest article" hx-swap="outerHTML">
+      <input type="hidden" name="application_id" value="{{ a.id }}"><input type="hidden" name="payload_hash" value="{{ a.payload_hash }}">
+      <label for="reason-{{ a.dom }}">Why (optional, only for you)</label>
+      <input id="reason-{{ a.dom }}" name="reason" maxlength="1000">
+      <button class="button button-quiet" type="submit">Reject, never {{ "send" if email else "submit" }}</button>
+    </form>
+  </details>
+  </div>
+</article>

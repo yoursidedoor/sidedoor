@@ -241,7 +241,7 @@ class GatherTest(unittest.TestCase):
         view = self.gather()
         self.assertEqual(view["right_now"], {"confirming": 1, "blocked": 2, "retrying": 2})
         # The one needs-you rule: the asked job is a question only, the answered one needs nothing.
-        self.assertEqual(view["needs"], {"questions": 1, "applications": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
+        self.assertEqual(view["needs"], {"questions": 1, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
 
     def test_o19_spent_reconcile_reads_need_the_owner(self):
         db = self.database
@@ -252,7 +252,7 @@ class GatherTest(unittest.TestCase):
         db.commit()
         view = self.gather()
         self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 1, "retrying": 1})
-        self.assertEqual(view["needs"], {"questions": 0, "applications": 1, "messages": 0, "couldnt_send": 0, "notes": 0})
+        self.assertEqual(view["needs"], {"questions": 0, "applications": 1, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
 
     def scheduler(self, scheduler, pause=None):
         if pause:
@@ -319,6 +319,13 @@ class GatherTest(unittest.TestCase):
         db.commit()
         view = self.gather()
         self.assertEqual(view["research"]["last"]["words"], "will retry")
+        # F: a compute or provider wait says it is waiting, not "will retry".
+        db.execute("UPDATE research SET result=?", (json.dumps({"state": "PARTIAL", "industries": [
+            {"industry": "fintech", "state": "COMPLETE"}, {"industry": "health", "state": "COMPUTE_WAIT"}]}),))
+        db.commit()
+        self.assertEqual(self.gather()["research"]["last"]["words"], "waiting to continue")
+        db.execute("UPDATE research SET result=NULL")
+        db.commit()
         scheduler = view["health"][-1]
         self.assertEqual(scheduler["text"], "Not running. Last cycle finished with problems")
         db.execute("UPDATE research_days SET state='EXHAUSTED'")
@@ -402,7 +409,7 @@ class GatherTest(unittest.TestCase):
             view = overview_page.gather(database, CONFIG, self.home, setup_steps.progress(self.home), False, now=self.now)
             self.assertEqual(view["outreach"], {"invitations": 0, "cap": 20, "waiting": 0, "messages": 0, "replies": 0})
             self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 0, "retrying": 0})
-            self.assertEqual(view["needs"], {"questions": 0, "applications": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
+            self.assertEqual(view["needs"], {"questions": 0, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
             self.assertEqual(view["compute"]["used"], 0)
             self.assertIsNone(view["research"]["last"])
             self.assertEqual(view["research"]["next"], {"label": "As soon as Sidedoor runs"})
@@ -618,6 +625,18 @@ class OverviewPageTest(unittest.TestCase):
                          (approvals_page.question_count(database, now), counts["needs_you"]))
         self.assertEqual((needs["questions"], needs["applications"]), (1, 0))
         database.close()
+
+    def test_needs_you_shows_only_rows_with_something_waiting(self):
+        database = database_with_schema(self.root)
+        job(database, "eligibility", "BLOCKED", "REQUIRED_ELIGIBILITY_ANSWER")
+        question(database, "q1", "eligibility", dt.datetime.now(dt.timezone.utc))
+        database.commit()
+        database.close()
+        page = self.page().text
+        needs = page[page.index('id="needs-title"'):page.index("</section>", page.index('id="needs-title"'))]
+        self.assertIn("question to answer", needs)
+        self.assertNotIn("messages to approve", needs)
+        self.assertNotIn("Nothing needs you right now.", needs)
 
     def test_get_writes_nothing_not_even_side_files(self):
         database = database_with_schema(self.root)

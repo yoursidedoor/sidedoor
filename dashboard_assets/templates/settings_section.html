@@ -89,22 +89,30 @@
 {% elif x.name == "resume" %}
   {% set s = x.saved %}
   <h2>Résumé</h2>
-  <p class="why">Sidedoor writes outreach from your résumé and uploads its ATS version in applications.</p>
+  <p class="why">Sidedoor writes outreach from your résumé. Choose which file it uploads in job applications.</p>
   {% if x.raw %}
-  <div class="resume-pair">
+  {# Which file applications upload (owner, 2026-10-24): one choice across the two cards, the ATS version
+     by default; saved on change (user_profile.application_resume reads it). #}
+  {% set use = x.application_choice or "ats" %}
+  <form class="resume-pair resume-choice" method="post" action="/settings/resume/choice" hx-post="/settings/resume/choice" hx-trigger="change" hx-target="#resume" hx-swap="outerHTML" aria-label="Which file applications upload">
     <div class="resume-file">
+      <label class="resume-use"><input type="radio" name="application_resume" value="original"{% if use == "original" %} checked{% endif %}{% if not x.raw_file %} disabled{% endif %}> Use for application</label>
       <h3>Your résumé (as uploaded)</h3>
       <p><strong>{{ x.raw.file_name }}</strong>{% if x.raw.page_count %}, {{ x.raw.page_count }} page{{ "" if x.raw.page_count == 1 else "s" }}{% endif %}</p>
       <p class="muted">Used for outreach, replies and the sentences below.</p>
+      <p class="resume-uploads"><span class="resume-on">Applications upload this file.</span><span class="resume-off muted">Not uploaded in applications.</span></p>
       {% if x.raw_file %}<a class="button button-quiet" href="/settings/resume/file/raw" target="_blank" rel="noopener">Open</a>{% else %}<p class="muted">This file is no longer on this computer. Upload your résumé again below.</p>{% endif %}
     </div>
     <div class="resume-file">
-      <h3>ATS version (for applications)</h3>
-      <p><strong>PDF</strong> written from your résumé</p>
-      <p class="muted">The only file Sidedoor uploads in job applications.</p>
+      <label class="resume-use"><input type="radio" name="application_resume" value="ats"{% if use == "ats" %} checked{% endif %}> Use for application <span class="muted">(recommended)</span></label>
+      <h3>ATS version</h3>
+      <p><strong>PDF</strong> written from your résumé, easy for application systems to read</p>
+      <p class="resume-uploads"><span class="resume-on">Applications upload this file.</span><span class="resume-off muted">Not uploaded in applications.</span></p>
       {% if x.application_file %}<a class="button button-quiet" href="/settings/resume/file/application" target="_blank" rel="noopener">Open</a>{% else %}<p class="muted">Not written yet. Upload your résumé again below.</p>{% endif %}
     </div>
-  </div>
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
+  {% if x.original_missing %}<p class="note note-warning" role="status">You chose your résumé as uploaded, but that file is no longer on this computer, so applications upload the ATS version. Upload your résumé again below to use it.</p>{% endif %}
   {% else %}
   <p class="muted">No résumé in use yet. Upload it below.</p>
   {% endif %}
@@ -148,9 +156,9 @@
   <h2>Mode</h2>
   <form class="mode" method="post" action="/settings/mode" hx-post="/settings/mode" hx-trigger="change" hx-target="#mode" hx-swap="outerHTML">
     <label class="choice"><input type="radio" name="mode" value="automatic"{% if x.state.mode != "review" %} checked{% endif %}>
-      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, replies and follow-ups on its own, within its safety rules. Every message is shown on the Networking &amp; Referrals page.</span></label>
+      <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, follow-ups and replies, and submits job applications, on its own, within its safety rules. Messages are shown on Networking &amp; Referrals, applications on Applications.</span></label>
     <label class="choice"><input type="radio" name="mode" value="review"{% if x.state.mode == "review" %} checked{% endif %}>
-      <span><strong>Review.</strong> Sidedoor drafts them and waits for you to approve each one on the Approvals page. Research and applications still run on their own.</span></label>
+      <span><strong>Review.</strong> Nothing goes out until you approve it on the Approvals page: invitations, messages, follow-ups, replies and job applications, including applications sent by email. Sidedoor still researches roles and fills in applications on its own.</span></label>
     <noscript><button class="button" type="submit">Save</button></noscript>
   </form>
   {% if x.mode_error %}<p class="field-error" role="alert">{{ x.mode_error }}</p>{% endif %}

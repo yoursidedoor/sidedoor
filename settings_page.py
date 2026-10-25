@@ -40,6 +40,7 @@ import resume_intake
 import credentials
 import setup_steps
 import paths
+import user_profile
 
 SECTIONS = ("profile", "answers", "resume", "mode", "connections", "license", "login")
 BUSY = "Sidedoor is busy with another task. Try again in a moment."
@@ -264,6 +265,11 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           raw=raw, application=application,
                           raw_file=bool(raw and _in_home(home, raw.get("path"))),
                           application_file=bool(application and _in_home(home, application.get("path"))),
+                          # Which file applications upload (owner, 2026-10-24): what is in force, so a
+                          # chosen original that is gone shows the ATS version chosen, and says why.
+                          application_choice=(user_profile.ORIGINAL if raw is not None
+                                              and user_profile.application_resume(profile) is raw else user_profile.ATS),
+                          original_missing=user_profile.original_missing(profile),
                           claims=current_claims(root),
                           removed=removed_count(root, raw.get("sha256") if raw else None))
         elif name in ("connections",) + BLOCKS:
@@ -408,6 +414,13 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         if request.headers.get("hx-request") == "true" and setup_steps.resume_reading(home):
             return HTMLResponse(render("resume"))  # only the section while it reads
         return respond(request, "resume")
+
+    @app.post("/settings/resume/choice")
+    async def resume_choice(request: Request):
+        form = await request.form()
+        if not setup_steps.set_application_resume(form.get("application_resume"), home):
+            return respond(request, "resume", {"notice": "Choose which file applications upload."})
+        return respond(request, "resume", {"choice_saved": True})
 
     @app.get("/settings/resume/file/{which}")
     def resume_file(which: str):

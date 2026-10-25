@@ -128,6 +128,8 @@ CODE_WORDS = {
     "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED": "Sidedoor ran out of tries reading this posting.",
     "BROWSER_CAPABILITY_UNAVAILABLE": "A browser tool Sidedoor needs was not available.",
     "CONDITIONAL_QUESTION_UNANSWERED": "The form asked a question the prepared answers did not cover.",
+    "INVALID_SUPPLIED_ANSWER": "The application site didn't accept one of the answers.",
+    "BROWSER_INTERACTION_FAILED": "The browser could not work the application form.",
     "FIELD_LIMIT_TOO_SHORT_FOR_FACT": "A form field was too short for one of your details.",
     "PREFLIGHT_TRANSIENT": "A temporary problem came up before submitting.",
     "SUBMISSION_OUTCOME_UNKNOWN": "Sidedoor could not confirm whether the application went through.",
@@ -138,6 +140,9 @@ CODE_WORDS = {
     "DESIGNATED_RESUME_MISMATCH": "Your résumé file changed since you set it.",
     "APPLICATION_AUTHORIZATION_REQUIRED": "Sidedoor is not set to submit applications for you.",
     "UNKNOWN_REQUIRED_ANSWERS": "The form asks something Sidedoor cannot answer for you.",
+    "AWAITING_APPLICATION_APPROVAL": "Review mode: this application waits for your approval on Approvals.",
+    "APPLICATION_APPROVED": "You approved this application.",
+    "APPLICATION_REJECTED_BY_YOU": "You rejected this application on Approvals.",
     # Decisions that close a job
     "OUTSIDE_CONFIRMED_SCOPE": "Outside your search (level, field, funding stage or location).",
     "CLEARANCE_OR_CITIZENSHIP_REQUIRED": "The role needs US citizenship or a security clearance.",
@@ -146,6 +151,8 @@ CODE_WORDS = {
     "EXISTING_APPLICATION": "You already applied to this posting.",
     "EXISTING_INTERVIEW": "You are already interviewing for this posting.",
     "RETRIES_EXHAUSTED": "Sidedoor used all of its tries.",
+    "ANSWER_REFUSED_TWICE": "The application site refused the same answer twice.",
+    "DATE_ORDER_UNCLEAR": "The site's date field doesn't show whether it's day/month or month/day.",
     "FILE_UPLOAD_FAILED_3_TIMES": "The site refused the résumé upload three times.",
     "ACCESS_BLOCKED_3_TIMES": "The site asked for a sign-in or a human check three times.",
     "APPLICATION_RECOVERY_ABANDONED": "Sidedoor looked into a problem and decided it cannot apply.",
@@ -171,6 +178,9 @@ ELIGIBLE_WORDS = "Eligible: fits your search."
 WAITING_ANSWER_WORDS = "Waiting for your answer"
 ANSWERED_WORDS = "Continues on the next run"
 ANSWER_LABEL, ANSWER_HREF = "Answer on Approvals", "/approvals#questions"
+# Review mode holds applications for approval (owner, 2026-10-24): `overview.approval_hold`.
+HELD_WORDS, APPROVE_LABEL, APPROVE_HREF = "Waiting for your approval", "Approve on Approvals", "/approvals#applications"
+APPROVED_WORDS = "Approved"
 
 # The list's headings (owner, 2026-10-24), in this order; the newest-activity sort holds inside each.
 GROUPS = (("needs_you", "Needs you"), ("progress", "In progress"), ("submitted", "Submitted"), ("closed", "Closed"))
@@ -401,6 +411,14 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
         return (APPLY_YOURSELF, None, None)
     next_at = overview._utc(row["next_at"]) if row["next_at"] else None
     retry = "Will try again automatically" + (" " + fmt(next_at) if next_at else "") + "."
+    if owner_hold and overview.approval_hold(row["blocker"]):
+        email = (_route_of(row) == "email")
+        return (("Sidedoor wrote this email application%s. It is sent once you approve it on Approvals."
+                 % (" to " + _route_of(row, "destination") if _route_of(row, "destination") else "")) if email else
+                "Sidedoor filled this application. It is submitted once you approve it on Approvals.",
+                APPROVE_HREF, APPROVE_LABEL)
+    if state == "BLOCKED" and code == "APPLICATION_APPROVED":
+        return ("You approved this application. Sidedoor submits it on its next applications run.", None, None)
     if owner_hold:
         if code == "SUBMISSION_OUTCOME_UNKNOWN":
             return ("Check your applicant account or confirmation email at %s to see whether it went through. "
@@ -440,6 +458,13 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
     return (None, None, None)
 
 
+def _route_of(row, key="route"):
+    """The held application's route ("ats" or "email") or destination, from its card (`row["approval"]`)."""
+    snapshot = overview._json(row["approval"]) if "approval" in row.keys() and row["approval"] else None
+    value = (snapshot or {}).get(key)
+    return value if isinstance(value, str) else None
+
+
 def job_view(row, owner_keys, asked, live_reading, fmt):
     payload = overview._json(row["payload"]) or {}
     company = _text(payload.get("company")) or _text(row["employer"]) or "Unknown company"
@@ -452,7 +477,11 @@ def job_view(row, owner_keys, asked, live_reading, fmt):
     answers = _awaits_answers(row, owner_hold)
     answered = answers and not asked_here
     needs = overview.blocked_on_owner(owner_hold, asked_here, code)
-    if answers:
+    if owner_hold and overview.approval_hold(code):
+        words, tone = HELD_WORDS, "info"   # counted as an application to approve only (owner 2026-10-24)
+    elif state == "BLOCKED" and code == "APPLICATION_APPROVED":
+        words, tone = APPROVED_WORDS, "info"
+    elif answers:
         words, tone = (ANSWERED_WORDS, "info") if answered else (WAITING_ANSWER_WORDS, "info")
     elif owner_hold and asked_here:
         words, tone = WAITING_ANSWER_WORDS, "info"   # counted as a question only (owner 2026-10-24)
@@ -466,7 +495,9 @@ def job_view(row, owner_keys, asked, live_reading, fmt):
         words, tone = STATE_WORDS.get(state, "In progress"), STATE_TONES.get(state, "muted")
     todo, href, label = _what_to_do(row, company, route, owner_hold, asked_here, fmt)
     problem = None
-    if state in ("BLOCKED", "RETRY_WAIT", "WAITING_BROWSER") or (state in ("SUBMITTING", "RECONCILE") and code):
+    if overview.approval_hold(code) or code == "APPLICATION_APPROVED":
+        pass   # nothing went wrong: the to-do line says what happens
+    elif state in ("BLOCKED", "RETRY_WAIT", "WAITING_BROWSER") or (state in ("SUBMITTING", "RECONCILE") and code):
         problem = code_words(code, "OWNER" if owner_hold else route)
     closed = None
     if state in CLOSED_WORDS:
@@ -650,6 +681,11 @@ def closed_reason(reader, key, state, code, closing=None):
     if closing and _text(closing.get("reason")):
         return _sentence(closing["reason"])        # the AI's own words (same-posting match, recovery)
     root = code_root(code)
+    if root == applications.APPLICATION_REJECTED:
+        # Rejected on Approvals (owner, 2026-10-24): the user's own optional reason, as written.
+        detail = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND "
+                                        "event='APPLICATION_REJECTED' ORDER BY id DESC LIMIT 1", key)) or {}
+        return ("Your reason: " + _sentence(detail["reason"])) if _text(detail.get("reason")) else None
     if root == "OUTSIDE_CONFIRMED_SCOPE":
         evidence = _latest(reader, "SELECT evidence FROM application_reviews WHERE job_key=? ORDER BY observed_at DESC LIMIT 1",
                            key, "application_reviews")
@@ -670,15 +706,78 @@ def closed_reason(reader, key, state, code, closing=None):
         count = len(detail.get("failures") or []) or applications.UPLOAD_FAILURE_LIMIT
         return ("The site did not take the résumé or a required file in %d tries, each stopped before anything "
                 "was submitted." % count)
+    if root == applications.REFUSED_TWICE_CODE:
+        detail = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND event='%s' "
+                                        "ORDER BY id DESC LIMIT 1" % applications.REFUSED_TWICE_EVENT, key)) or {}
+        label = _text(detail.get("label"))
+        return ("The application site wouldn't accept the answer to %s twice, so nothing was submitted. "
+                "Apply by hand if you want this one." % ("\u201c%s\u201d" % " ".join(label.split()) if label else "one question"))
+    if root == applications.DATE_ORDER_CODE:
+        detail = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND event='%s' "
+                                        "ORDER BY id DESC LIMIT 1" % applications.DATE_ORDER_EVENT, key)) or {}
+        label = _text(detail.get("label"))
+        return ("The site's date field for %s doesn't show whether it's day/month or month/day, so Sidedoor didn't "
+                "guess and nothing was submitted. Apply by hand if you want this one."
+                % ("\u201c%s\u201d" % " ".join(label.split()) if label else "one question"))
     note = _host_note(_latest(reader, "SELECT next_action FROM application_jobs WHERE job_key=?", key, "application_jobs"))
     if note:
         return note
     if state in ("EXHAUSTED", "ABANDONED"):
-        last = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND event IN "
-                                      "('BLOCKED','RETRY_WAIT') ORDER BY id DESC LIMIT 1", key)) or {}
-        if _text(last.get("code")):
-            return "Its last try stopped on this: " + code_words(last["code"])
+        # The real stop of the last try (owner, 2026-10-24): a submit's own stop is held as RECONCILE,
+        # and the RETRY_WAIT after it only says the try is over (RECONCILED_ABSENT), so that wrapper
+        # is skipped; a closed job is never described with "will retry" words.
+        for (detail,) in reader.rows("SELECT detail FROM application_events WHERE job_key=? AND event IN "
+                                     "('BLOCKED','RETRY_WAIT','RECONCILE') ORDER BY id DESC LIMIT 20", (key,),
+                                     "application_events"):
+            last = overview._json(detail) or {}
+            code = _text(last.get("code"))
+            if not code or code_root(code) in RETRY_ONLY_CODES:
+                continue
+            if code_root(code) == "INVALID_SUPPLIED_ANSWER":
+                refused = refused_question(reader, key)
+                if refused:
+                    return refused
+            words = CODE_WORDS.get(code_root(code)) if code != FORM_NOT_READABLE else FORM_NOT_READABLE_WORDS
+            return "Its last try stopped on this: " + (words or CLOSED_PROBLEM_WORDS)
     return None
+
+
+# Codes that only say a try ended and another may follow, never why it stopped.
+RETRY_ONLY_CODES = frozenset({"RECONCILED_ABSENT"})
+CLOSED_PROBLEM_WORDS = "Sidedoor ran into a problem it could not get past."
+NEEDS_WORDS = {"date": "a date", "number": "a number", "choice": "one of its options", "boolean": "yes or no"}
+
+
+def refused_question(reader, key):
+    """'...didn't accept your answer to "<label>" (it needs a date).' from the structured field the
+    submit session named (its blocked.field) and that question's label and type as the form was read;
+    None when the session named no field or the question is not on record."""
+    import applications
+    field = None
+    for (result,) in reader.rows("SELECT result FROM desktop_requests WHERE job_key=? AND operation='submit' "
+                                 "ORDER BY created_at DESC LIMIT 5", (key,), "desktop_requests"):
+        blocked = (overview._json(result) or {}).get("blocked")
+        if isinstance(blocked, dict) and blocked.get("code") == "INVALID_SUPPLIED_ANSWER":
+            field = _text(blocked.get("field"))
+            break
+    if not field:
+        return None
+    record = reader.rows("SELECT questions,conditional_questions FROM application_requisition_records WHERE job_key=?",
+                         (key,), "application_requisition_records")
+    questions = []
+    for text in (record[0] if record else ()):
+        try:
+            listed = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        questions += [item for item in listed if isinstance(item, dict)] if isinstance(listed, list) else []
+    question = next((item for item in questions if applications.question_field(item) == field), None)
+    label = _text(question.get("label")) if question else None
+    if not label:
+        return None
+    needs = NEEDS_WORDS.get(str(question.get("answer_type") or ""))
+    return ("Its last try stopped because the application site didn't accept your answer to \u201c%s\u201d%s."
+            % (" ".join(label.split()), " (it needs %s)" % needs if needs else ""))
 
 # --- The page ---------------------------------------------------------------------------------------
 
@@ -688,7 +787,7 @@ def current_resume_sha(home):
     try:
         folder = Path(home) if home is not None else user_profile.home()
         profile = json.loads((folder / "profile.json").read_text())
-        sha = (profile.get("resume") or {}).get("sha256")
+        sha = user_profile.application_resume(profile).get("sha256")   # the file applications upload
         return sha if isinstance(sha, str) else None
     except (OSError, ValueError, AttributeError, TypeError):
         return None
@@ -699,8 +798,10 @@ def _rows_for(reader, keys):
     for index in range(0, len(keys), 500):
         chunk = keys[index:index + 500]
         # Named columns: an older table without one fails here as a DatabaseError (the section degrades).
-        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,receipt,updated_at "
-                               "FROM application_jobs WHERE job_key IN (%s)" % ",".join("?" * len(chunk)),
+        approval = ("(SELECT snapshot FROM application_approvals a WHERE a.job_key=application_jobs.job_key AND a.state='WAITING')"
+                    if reader.has("application_approvals") else "NULL")
+        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,receipt,updated_at,%s AS approval "
+                               "FROM application_jobs WHERE job_key IN (%s)" % (approval, ",".join("?" * len(chunk))),
                                tuple(chunk), "application_jobs"):
             rows[row["job_key"]] = row
     return [rows[key] for key in keys if key in rows]

@@ -74,19 +74,30 @@
             "enum": [
               "boolean",
               "choice",
+              "multi_choice",
               "number",
               "text"
             ],
             "description": "Copy the packet question's answer_type."
           },
           "value": {
-            "type": [
-              "boolean",
-              "string",
-              "number",
-              "null"
+            "anyOf": [
+              {
+                "type": [
+                  "boolean",
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             ],
-            "description": "Your answer, for every class. For a Yes/No or single-choice control give a real boolean true or false - your own answer to what the question asks - and Python renders that truth onto the employer's own option wording, so never write Yes or No as a string. For a text or number control give the value itself. There is no verbatim-quotation requirement on this field and a boolean is a valid answer to a biographical question: a resume that records an employment history supports a Yes/No about that history even when no sentence in it contains the question's words."
+            "description": "Your answer, for every class. For a Yes/No or single-choice control give a real boolean true or false - your own answer to what the question asks - and Python renders that truth onto the employer's own option wording, so never write Yes or No as a string. For a text or number control give the value itself. For a multi_choice control give the list of every option that applies, each exactly as in choices. There is no verbatim-quotation requirement on this field and a boolean is a valid answer to a biographical question: a resume that records an employment history supports a Yes/No about that history even when no sentence in it contains the question's words."
           },
           "jurisdiction": {
             "type": [

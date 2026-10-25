@@ -146,17 +146,18 @@ def upload_folder(directory):
     return Path(directory) / UPLOAD_FOLDER
 
 
-def stage(source, directory):
+def stage(source, directory, name=None):
     """Copy a file the session must upload into the session's upload folder and return the copy's
     absolute path. @playwright/mcp reads files only under its output folder and its client's
     workspace root (FINDINGS §4f fix 8e0a20f); the guard announces this folder as that root
     (`--uploads`), and `seal` makes it read-only, so a screenshot, snapshot or find `filename` can
     never overwrite a staged file (review fix 4). The arm guard checks each copy's sha256 against
-    its original (application_browser.ArmBinding) and the original résumé against the policy."""
+    its original (application_browser.ArmBinding) and the original résumé against the policy.
+    `name` gives the copy a different file name (the résumé's human name; the original keeps its own)."""
     folder = upload_folder(directory)
     folder.mkdir(parents=True, exist_ok=True)
     source = Path(source)
-    target = folder / source.name
+    target = folder / (Path(name).name if name else source.name)
     if target.resolve() != source.resolve():
         shutil.copyfile(source, target)
     return str(target.resolve())
@@ -574,6 +575,13 @@ MIXED_WORDS = ("Sidedoor's browser runs without a window (some jobs run it minim
 # would otherwise say "HeadlessChrome"), and navigator.webdriver stays false as in the headed launch
 # (Chrome sets it under --headless; Blink's documented AutomationControlled switch turns it off).
 HEADLESS_OPERATIONS = ("linkedin", "webmail", "inspect", "investigate", "submit", "verify", "reconcile")
+# The one session whose window is for the user (owner, 2026-10-24: "Email support" on Failures and logs):
+# the AI starts a support email in the user's webmail and leaves the draft open for the user to send.
+# Its Chrome is headed and on-screen from the start (never headless, minimized or kept from the front),
+# and the session's end leaves it running (browser_guard.Proxy.stop_background_chrome,
+# outreach_history_browser.execute); support_email brings it to the front and closes it once the user
+# has closed the window.
+SHOWN_OPERATIONS = ("support_email",)
 HEADLESS_SWITCH = "--headless=new"
 AUTOMATION_SWITCH = "--disable-blink-features=AutomationControlled"
 # Chrome's reduced user agent on macOS (the OS part is frozen at 10_15_7 and the minor versions at 0.0.0
@@ -633,7 +641,8 @@ def headless_user_agent(config, operation, platform=None, binary=None):
     """The user agent a headless session of `operation` presents, or None when the operation runs headed:
     not macOS's background launch, not in `headless_operations`, or the installed Chrome's version cannot
     be read (then it runs headed and minimized as before, never as "HeadlessChrome")."""
-    if not background_launch(config, platform) or operation not in headless_operations(config):
+    if (not background_launch(config, platform) or operation not in headless_operations(config)
+            or operation in SHOWN_OPERATIONS):
         return None
     if binary is None:
         import setup_steps
@@ -706,7 +715,7 @@ def launch_config(config=None, operation=None):
     fallback is headed and minimized for every operation (H2): the guard reaches it only when its own
     launch failed, and then runs the session by the --offscreen rules (browser_guard)."""
     value = json.loads(json.dumps(LAUNCH_CONFIG))
-    if offscreen(config):
+    if offscreen(config) and operation not in SHOWN_OPERATIONS:
         value["browser"]["launchOptions"]["args"] = list(WINDOW_SWITCHES)
     return value
 
@@ -757,13 +766,15 @@ def chrome_app(binary):
     return None
 
 
-def background_command(app, path, port=0):
+def background_command(app, path, port=0, onscreen=False):
     """`open -g -n -a <Chrome.app> --args ...`: Chrome on `path`, never activated, DevTools on a free port
     (or on `port`: the CAPTCHA wait reopens a headless session's profile headed on the port
-    @playwright/mcp is attached to)."""
+    @playwright/mcp is attached to). `onscreen` (SHOWN_OPERATIONS): the window opens at
+    ONSCREEN_POSITION instead of the off-screen one."""
+    position = ("--window-position=%d,%d" % ONSCREEN_POSITION, WINDOW_SWITCHES[1]) if onscreen else WINDOW_SWITCHES
     return ["/usr/bin/open", "-g", "-n", "-a", str(app), "--args", "--user-data-dir=" + str(path),
             # Live parity (CK3, accepted): Playwright's own launch also opens a local DevTools port.
-            "--remote-debugging-port=%d" % port, *BACKGROUND_SWITCHES, *WINDOW_SWITCHES, "about:blank"]
+            "--remote-debugging-port=%d" % port, *BACKGROUND_SWITCHES, *position, "about:blank"]
 
 
 def headless_command(binary, path, user_agent, scale=None):
@@ -796,7 +807,7 @@ def launch_headless(binary, path, user_agent, popen=None, timeout=BACKGROUND_LAU
 
 
 def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, stop=None,
-                      port=0):
+                      port=0, onscreen=False):
     """Start Chrome on profile `path` without activating it; return its DevTools endpoint
     (`http://127.0.0.1:<port>`, from the DevToolsActivePort file Chrome writes into the profile).
     Raises OSError when `open` fails or no port appears within `timeout`; before that last raise the
@@ -805,7 +816,7 @@ def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sl
     import subprocess
     path = Path(path)
     port_file = _fresh_port_file(path)
-    done = (run or subprocess.run)(background_command(app, path, port), stdin=subprocess.DEVNULL,
+    done = (run or subprocess.run)(background_command(app, path, port, onscreen), stdin=subprocess.DEVNULL,
                                    capture_output=True, text=True, timeout=timeout)
     if done.returncode != 0:
         raise OSError("open -g failed: " + (done.stderr or "").strip()[:200])
@@ -869,7 +880,7 @@ def guard_command(config, directory, operation, claim=None, human_check=None):
             command.extend(["--headless-client-hints", json.dumps(hints, sort_keys=True, separators=(",", ":"))])
         screen = screen_metrics()
         command.extend(["--headless-screen", "%dx%d@%s" % (screen["width"], screen["height"], _number(screen["scale"]))])
-    elif offscreen(config):
+    elif offscreen(config) and operation not in SHOWN_OPERATIONS:
         command.append("--offscreen")
     return command + ["--"] + mcp_command(config, directory, operation)
 

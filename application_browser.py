@@ -436,7 +436,12 @@ review, sourced from fresh actual browser observations of the destination/form/a
 Every question carries answer_type: the kind of control the page actually shows for it.
 Report "file" whenever the control uploads a document (a resume or a cover letter file
 input, a Choose/Upload File button), otherwise the displayed kind (text, boolean, choice,
-number, date). Read this off the control, never off the question's wording: a question
+multi_choice, number, date): multi_choice is a question where several options can be chosen
+at once (a group of checkboxes, a multi-select list). Every option question (choice,
+multi_choice, a yes/no shown as options) lists the options it displays in choices, each verbatim,
+in the order shown (owner, 2026-10-24: Approvals shows them). Every question also carries control: the element the page uses, one of select (a
+dropdown or menu), radio, checkbox, text (a one-line box), textarea (a box of several lines)
+or file. Read this off the control, never off the question's wording: a question
 worded "Cover letter" may be a text box on one form and a file input on another, and the
 orchestrator generates and attaches a file only for the ones you report as "file".
 Every free-text question (text, textarea) also carries max_characters (owner, 2026-10-01): the
@@ -445,6 +450,9 @@ counter such as "0/300" or "300 characters remaining", or help text such as "max
 characters" - as a whole number, and null when the page shows none. Read it off the control
 or the text beside it; never guess one, and a word limit ("max 150 words") is not a character
 limit (say it in the label instead). Other answer types report max_characters null.
+Every question also carries format: the input format the page itself states for the control (a
+placeholder, a mask or help text such as "mm/dd/yyyy" or "Date format: mm/dd/yyyy"), verbatim, and
+null when the page states none. Never guess one.
 Report role as the page renders it. When it is context.role.role under a different rendering
 (punctuation, a prefix or suffix, a level written differently), set role_matches_expected true;
 when it is a different role, leave it false. The same holds for employer and
@@ -494,11 +502,24 @@ such as its heading, does this for the whole batch), then re-read the form befor
 message next to a field means it did not register, so clear and re-type it; for a yes/no,
 radio or checkbox control, select the other option and then the intended one again (Ashby
 forms at Veidt, Aperture and Ingen reported clicked and typed answers as missing until re-entered
-this way). A supplied answer that is a range of amounts (e.g. "USD 180,000–250,000") for a
+this way). A supplied answer that is a LIST is a multi-select answer (owner, 2026-10-24): tick or
+select every option in the list, exactly those, and leave every other option of that question
+unticked. A supplied answer that is a range of amounts (e.g. "USD 180,000–250,000") for a
 field that takes only one number (it accepts digits only, or typing the range runs the two
 numbers together) gets the range's LOWER limit, typed as a plain number in the form the field
 takes (180000; currency only if the field asks for it); this is the owner's decision
 (2026-10-01), not a changed answer. A field that accepts text keeps the range as supplied.
+A date answer supplied as an ISO date (yyyy-mm-dd) is the same date entered in the format the
+field takes (05/31/2019 for mm/dd/yyyy), or picked on its date picker; that is not a changed answer.
+If the field does not make the day/month order clear (no format shown, no placeholder, no locale
+cue such as a picker or a named month), do not guess: stop before arming with DATE_ORDER_UNCLEAR,
+a next_action, and "field": the exact field of that question from request.questions (copied
+verbatim).
+When the form refuses a supplied answer itself (it clears it, or shows a format or validation
+error for it) and re-entering it as above does not help, do not arm and do not change the answer:
+return blocked with code INVALID_SUPPLIED_ANSWER, a next_action, "field": the exact field of that
+question from request.questions (copied verbatim; null only for a question not in that list),
+and "reason": what the page says that field needs, in its own words.
 If the units or magnitude are unclear (which unit or period the field wants, or whether
 thousands are meant), do not guess: stop before arming with CONDITIONAL_QUESTION_UNANSWERED.
 Character limits on free text (owner, 2026-10-01: "Some text fields have character limits and
@@ -603,7 +624,7 @@ MATCHES the recorded facts is right; choosing a more favourable one because the 
 then submit is a false legal statement to an employer.
 If a required question has no supplied answer and no recorded fact answers it, do NOT arm:
 return blocked with code CONDITIONAL_QUESTION_UNANSWERED, a next_action, and observed_questions listing every
-displayed required question as {id, label (verbatim), semantic, required, answer_type,
+displayed required question as {id, label (verbatim), semantic, required, answer_type, control,
 choices, max_characters (a free-text field's shown character limit, else null)}. For an option control - a select, radio group or menu - `choices` MUST list every
 option it displays, each verbatim, in the order shown; that is what lets the host render the
 right literal for the next attempt instead of re-deriving the same unusable one.
@@ -855,7 +876,7 @@ def result_contract(operation):
         # without it the next pass re-derives the same bare "Yes" against the same menu.
         return {"acknowledged": False, "status": "UNKNOWN", "requires_independent_receipt": True, "confirmation_text": None,
                 "observed_questions": [{"id": None, "field": None, "label": None, "semantic": None,
-                                        "required": True, "answer_type": None, "choices": [],
+                                        "required": True, "answer_type": None, "control": None, "choices": [],
                                         "max_characters": None}],
                 # Free-text answers rewritten to fit a character limit (owner, 2026-10-01).
                 "shortened_answers": [{"field": None, "label": None, "max_characters": None,
@@ -907,9 +928,14 @@ def result_contract(operation):
                            # needing a cover letter as a file dead-ended at
                            # REQUIRED_ATTACHMENT_MISSING (pawnee health) - the generated PDF
                            # was never built because no question ever looked like a file control.
-                           "answer_type": "this control's own kind as displayed: file when it uploads a document, else text/boolean/choice/number/date",
+                           "answer_type": "this control's own kind as displayed: file when it uploads a document, else text/boolean/choice/multi_choice/number/date",
+                           # Owner, 2026-10-24: the control itself, for the Approvals card in Review mode.
+                           "control": "select|radio|checkbox|text|textarea|file",
+                           "choices": ["every option a select, radio group, checkbox group or menu displays, verbatim, in order; [] otherwise"],
                            # Owner, 2026-10-01: the answering AI writes free text within this.
-                           "max_characters": "free text only: the character limit the page shows (maxlength, a counter like 0/300, or 'max N characters'), as a whole number; null when none"}],
+                           "max_characters": "free text only: the character limit the page shows (maxlength, a counter like 0/300, or 'max N characters'), as a whole number; null when none",
+                           # Owner, 2026-10-24: shown as the hint on the owner's question card.
+                           "format": "the input format the page states for this control (e.g. mm/dd/yyyy), verbatim; null when none"}],
             "visible_required_questions_enumerated": False,
             "all_required_questions_enumerated": False, "form_revision": None,
             "application_method": "FORM|EMAIL",
@@ -2606,6 +2632,22 @@ def live_observation(bound, pointer, value):
                and entry.get("source_kind") != "failed_tool_diagnostic" for entry in bound.get(pointer, []))
 
 
+def resume_upload_name(path):
+    """The name employers receive the résumé under (owner, 2026-10-24), never the hashed storage
+    name: the user's uploaded file name when the original is the file being uploaded, else (the
+    ATS version) that name's stem with .pdf; "Resume" plus the uploaded file's own extension when no uploaded name is known."""
+    try:
+        raw = user_profile.load().get("resume_raw")
+    except (OSError, ValueError):
+        raw = None
+    uploaded = Path(raw["file_name"]).name if isinstance(raw, dict) and isinstance(raw.get("file_name"), str) else ""
+    if not uploaded.strip() or not Path(uploaded).stem.strip():
+        return "Resume" + ((Path(path).suffix.lower() if isinstance(path, str) else "") or ".pdf")
+    if isinstance(path, str) and isinstance(raw.get("path"), str) and Path(path).resolve() == Path(raw["path"]).resolve():
+        return uploaded
+    return Path(uploaded).stem + ".pdf"
+
+
 def staged_uploads(payload, directory):
     """(payload copy, {staged copy: original}) for a submit: the résumé and generated attachments
     point at copies in the session's read-only upload folder, the only place @playwright/mcp uploads
@@ -2614,13 +2656,21 @@ def staged_uploads(payload, directory):
     attachment's own file (cover_letter.verify); the arm also checks every copy against its original."""
     staged, pairs = json.loads(json.dumps(payload)), {}
 
-    def copy(path):
+    def copy(path, name=None):
         if isinstance(path, str) and Path(path).is_file():
-            target = browser_runtime.stage(path, directory)
+            target = browser_runtime.stage(path, directory, name)
             pairs[target] = str(Path(path).resolve())
             return target
         return path
-    staged["resume"] = copy(staged.get("resume"))
+    original = staged.get("resume")
+    staged["resume"] = copy(original, resume_upload_name(original))
+    if isinstance(original, str) and staged["resume"] != original and isinstance(staged.get("answers"), dict):
+        # A file control answered with the stored résumé (its path or file name) now names the
+        # staged copy, so the submit prompt's "answer is the designated resume" match still holds.
+        for field, value in staged["answers"].items():
+            if isinstance(value, str) and value.strip() and (
+                    value.strip() == original or Path(value.strip()).name.casefold() == Path(original).name.casefold()):
+                staged["answers"][field] = staged["resume"]
     for entry in (staged.get("attachments") or {}).values():
         if isinstance(entry, dict):
             entry["path"] = copy(entry.get("path"))

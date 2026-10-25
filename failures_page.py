@@ -604,8 +604,6 @@ def scheduler_failures(loop, config, now, fmt, log_tail=None, secrets=()):
 
 def _research_reason(result):
     state = str((result or {}).get("state") or "").upper()
-    if state == "INTERRUPTED":
-        return "it was stopped before it finished (Sidedoor was closed or restarted)"
     if state == "FAILED" and (result or {}).get("error"):
         return "it ran into an error"
     if state == "FAILED":
@@ -628,13 +626,14 @@ def _research_label(industry):
 
 def research_causes(result, attempt_id, at, secrets=()):
     """One cause per industry that did not complete (its state or abandonment reason, the code, its
-    error), and the run's own error; each links to that industry's step logs (`run_view`)."""
+    error), and the run's own error; each links to that industry's step logs (`run_view`). An industry
+    still waiting (`overview_page.RESEARCH_WAITING`) is not a cause: a wait is not a failure."""
     causes = Causes(secrets, logs_href("research", at))
     result = result if isinstance(result, dict) else {}
     industries = result.get("industries")
     grouped = {}   # (code, error) -> [(name, link)]: one line for industries that stopped the same way
     for industry in industries if isinstance(industries, list) else []:
-        if not isinstance(industry, dict) or str(industry.get("state") or "").upper() in ("COMPLETE", "WAITING_SHARED_RESEARCH"):
+        if not isinstance(industry, dict) or str(industry.get("state") or "").upper() in ("COMPLETE",) + overview.RESEARCH_WAITING:
             continue
         name = str(industry.get("industry") or "An industry")
         state = str(industry.get("state") or "UNKNOWN").upper()
@@ -660,43 +659,54 @@ def research_causes(result, attempt_id, at, secrets=()):
 
 
 def research_failures(reader, config, now, fmt, secrets=()):
+    """A research day that did not finish, with its causes (owner 2026-10-24). Not failures: a day whose
+    last try was interrupted (Sidedoor was quit or restarted), a day with no cause (only waiting), and an
+    earlier day once research has completed a later day (the problem is resolved)."""
     zone = config.get("timezone") or "America/Los_Angeles"
     hour = config.get("research_hour", workflow_tasks.day_start_hour(config))
     today = workflow_tasks.service_date(now, zone, hour)
     first = (now - dt.timedelta(days=RECENT_DAYS)).date().isoformat()
     days = reader.rows("SELECT day,state,attempts,attempt_id,next_retry_at,compute_wait_attempts FROM research_days "
                        "WHERE day>=? AND state IN ('RETRY_WAIT','EXHAUSTED') ORDER BY day DESC", (first,), "research_days")
+    completed = reader.rows("SELECT MAX(day) AS day FROM research_days WHERE state='COMPLETE'", (), "research_days")
+    resolved = (completed[0]["day"] if completed else None) or ""
     found = []
     for day in days:
+        if day["day"] != today and day["day"] <= resolved:
+            continue
         attempt = reader.rows("SELECT started_at,state,result FROM research WHERE id=?", (day["attempt_id"],), "research")
         result = overview._json(attempt[0]["result"]) if attempt else None
         if result is None and attempt:
             result = {"state": attempt[0]["state"]}
-        if day["state"] == "RETRY_WAIT" and result and result.get("compute_wait") is True:
-            continue   # waiting for the shared compute budget, not a failed run
+        if str((result or {}).get("state") or "").upper() == "INTERRUPTED":
+            continue
         tries = max(1, (day["attempts"] or 0) - (day["compute_wait_attempts"] or 0))
         at = overview._utc(attempt[0]["started_at"]) if attempt else None
         reason = _research_reason(result)
         causes = research_causes(result, day["attempt_id"], at, secrets)
+        if not causes.found:
+            continue
         extra = {"reasons": causes, "refs": {"research_id": day["attempt_id"], "day": day["day"]},
                  "log_href": run_href("research", day["attempt_id"]) if day["attempt_id"] else None}
         if day["day"] == today:
-            text = "Research didn't finish today: %s." % reason
             retry = overview._utc(day["next_retry_at"]) if day["next_retry_at"] else None
             if day["state"] == "RETRY_WAIT" and retry is not None and retry > now:
-                todo = "It will try again %s." % _at(fmt, retry)
+                text = "Research will try again %s: today's last try didn't finish because %s." % (_at(fmt, retry), reason)
+                todo = "Nothing you need to do."
             elif day["state"] == "RETRY_WAIT":
+                text = "Research will try again soon: today's last try didn't finish because %s." % reason
                 todo = "It will try again on Sidedoor's next research check, within a few minutes while Sidedoor runs."
                 retry = None
             else:
+                text = "Research didn't finish today: %s." % reason
                 retry = None
                 todo = ("It used all of today's tries. Nothing you need to do: research runs again %s."
                         % _at(fmt, workflow_tasks.next_day_start(now, zone, hour)))
             found.append(_item("research", text, todo, at, tries, retry, job="research", **extra))
         else:
             found.append(_item("research", "Research didn't finish on %s: %s." % (_day_label(day["day"]), reason),
-                               "Nothing you need to do. That day is over; research runs again every day.", at, tries,
-                               job="research", **extra))
+                               "Nothing you need to do. Research hasn't finished a day since; it runs again every day.",
+                               at, tries, job="research", **extra))
     return found
 
 
@@ -757,6 +767,7 @@ def application_failures(reader, now, fmt, secrets=()):
     for row in overview._pending_questions(reader, now):
         pending[row[0]] = pending.get(row[0], 0) + 1
     asked = set(pending)
+    held = set(overview.held_application_keys(reader))
     codes = application_failure_codes()
     counts, recorded_causes = {}, {}
     for key, detail, moment in reader.rows("SELECT job_key,detail,at FROM application_events WHERE event IN ('BLOCKED','RETRY_WAIT') "
@@ -784,6 +795,13 @@ def application_failures(reader, now, fmt, secrets=()):
                                "The application goes on after you answer.", at, href=_job_link(key),
                                fix={"label": "Answer on Approvals", "href": "/approvals#questions"},
                                code="QUESTION_PENDING", refs={"job_key": key}, calm="question"))
+            continue
+        if key in held:
+            # Review mode: waiting for the owner's approval, not a failure (owner 2026-10-24).
+            found.append(_item("applications", "Approve or reject %s." % name,
+                               "Nothing is submitted until you approve it on Approvals.", at, href=_job_link(key),
+                               fix={"label": "Review on Approvals", "href": "/approvals#applications"},
+                               code="AWAITING_APPLICATION_APPROVAL", refs={"job_key": key}, calm="question"))
             continue
         if key in owner_keys and not overview.blocked_on_owner(True, False, row["blocker"]):
             # Answered (no open question): not a failure, it waits for its next run (owner 2026-10-24).
@@ -1101,12 +1119,13 @@ def browser_failures(reader, now, fmt):
 
 # --- Gathering ----------------------------------------------------------------------------------------------------
 
-def explain_exits(sections, loop_items, reader=None):
+def explain_exits(sections, loop_items, reader=None, config=None):
     """One item per real failure (F1): a job child that exited non-zero is shown on its own only when
     a more specific failure of that very run is not already listed; otherwise that failure carries
     the job's error log. The hourly round's exit is matched to the round that ended at that exit
     (`round_ending_at`) and to that round's own crashed steps or runs row only; an exit with no runs
-    row from its window stands alone."""
+    row from its window stands alone. A research exit is its service day's research failure, whenever in
+    that day it happened (never both, owner 2026-10-24)."""
     specific = [entry for section in sections.values() for entry in section["entries"] if entry["job"]]
     for entry in loop_items:
         job, exited = entry.get("exited"), entry["at"]
@@ -1115,6 +1134,11 @@ def explain_exits(sections, loop_items, reader=None):
             slot = overview.section(reader, round_ending_at, exited)
             if slot and slot != UNAVAILABLE:
                 matches = [other for other in specific if other["job"] == "run" and slot in other["slots"]]
+        elif job == "research" and exited is not None:
+            zone = (config or {}).get("timezone") or "America/Los_Angeles"
+            hour = (config or {}).get("research_hour", workflow_tasks.day_start_hour(config or {}))
+            served = {workflow_tasks.service_date(moment, zone, hour) for moment in (exited, exited - JOB_REACH[job])}
+            matches = [other for other in specific if other["job"] == job and other["refs"].get("day") in served]
         elif job in JOB_REACH and exited is not None:
             matches = [other for other in specific if other["job"] == job
                        and any(exited - JOB_REACH[job] <= moment <= exited + JOB_SLACK for moment in other["moments"])]
@@ -1185,7 +1209,7 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=Non
     for entry in codex_failures(home, finished):
         sections[entry["group"]]["entries"].append(entry)
     explain_exits(sections, scheduler_failures(loop if isinstance(loop, dict) else {}, config, now, fmt, log_tail, secrets),
-                  None if reader.broken else reader)
+                  None if reader.broken else reader, config)
     if reader.broken:
         for section in sections.values():
             section["unavailable"] = section["key"] != "scheduler"

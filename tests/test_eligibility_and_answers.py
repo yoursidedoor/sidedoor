@@ -140,13 +140,14 @@ class ResumeAnswerTests(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(list(answers.values()), [POLICY["resume"]["path"]])
 
-    def test_a_resume_answer_naming_any_other_file_is_refused(self):
+    def test_a_resume_answer_naming_any_other_file_still_attaches_the_designated_file(self):
+        # Owner, 2026-10-24 (Settings > Résumé "Use for application"): the pointer's path is not
+        # used; the answer is always the designated file (user_profile.application_resume).
         policy = json.loads(json.dumps(POLICY))
         policy["answers"]["resume"]["value"] = "/tmp/some-other-resume.pdf"
         question = [{"id": None, "semantic": "resume", "required": True}]
         answers, missing = applications.resolve_answers(question, policy)
-        self.assertEqual(answers, {})
-        self.assertEqual(len(missing), 1)
+        self.assertEqual((list(answers.values()), missing), ([POLICY["resume"]["path"]], []))
 
     def test_owner_supplied_resume_path_cannot_override_the_designated_file(self):
         policy = json.loads(json.dumps(POLICY))

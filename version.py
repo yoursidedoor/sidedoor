@@ -5,7 +5,7 @@ A plain module constant, so it is the same in a source checkout, a pip install a
 from pyproject.toml's [project] version. Releases use plain N.N.N only (no pre-release or build
 suffix): the update check compares exactly three numbers."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def current():

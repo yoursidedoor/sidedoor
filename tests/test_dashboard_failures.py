@@ -83,12 +83,25 @@ class GatherBase(unittest.TestCase):
 
 class GatherTest(GatherBase):
     def test_example_1_research_failed_today_says_when_it_tries_again(self):
-        research_day(self.database, "2026-10-22", "RETRY_WAIT", "a1", "INTERRUPTED", base.pacific(2026, 10, 22, 9, 0),
+        research_day(self.database, "2026-10-22", "RETRY_WAIT", "a1", "FAILED", base.pacific(2026, 10, 22, 9, 0),
+                     result={"state": "FAILED", "error": "Parallel research failed (KeyError)"},
                      retry=base.pacific(2026, 10, 22, 10, 30))
-        [item] = self.items(self.gather(), "research")
+        [item] = self.items(self.gather(), "research")   # F: a pending retry, not "didn't finish today"
         self.assertEqual(item["text"] + " " + item["todo"],
-                         "Research didn't finish today: it was stopped before it finished (Sidedoor was closed or "
-                         "restarted). It will try again at 10:30.")
+                         "Research will try again at 10:30: today's last try didn't finish because it ran into an "
+                         "error. Nothing you need to do.")
+
+    def test_c_an_interrupted_day_is_not_a_failure(self):
+        research_day(self.database, "2026-10-22", "RETRY_WAIT", "a1", "INTERRUPTED", base.pacific(2026, 10, 22, 9, 0),
+                     result={"state": "INTERRUPTED", "error": "Research stopped"}, retry=base.pacific(2026, 10, 22, 10, 30))
+        self.assertEqual(self.items(self.gather(), "research"), [])
+
+    def test_b_a_day_that_is_only_waiting_is_not_a_failure(self):
+        industries = [{"industry": "fintech", "state": "COMPLETE"}, {"industry": "health", "state": "COMPUTE_WAIT"},
+                      {"industry": "media", "state": "WAITING_SHARED_RESEARCH"}]
+        research_day(self.database, "2026-10-22", "RETRY_WAIT", "a1", "FAILED", base.pacific(2026, 10, 22, 9, 0),
+                     result={"state": "FAILED", "industries": industries}, retry=base.pacific(2026, 10, 22, 10, 30))
+        self.assertEqual(self.items(self.gather(), "research"), [])
 
     def test_research_compute_wait_and_finished_days_are_not_failures(self):
         research_day(self.database, "2026-10-22", "RETRY_WAIT", "a1", "PARTIAL", base.pacific(2026, 10, 22, 9, 0),
@@ -97,6 +110,9 @@ class GatherTest(GatherBase):
         self.assertEqual(self.items(self.gather(), "research"), [])
         research_day(self.database, "2026-10-20", "EXHAUSTED", "a3", "FAILED", base.pacific(2026, 10, 20, 9, 0),
                      result={"state": "FAILED", "error": "Parallel research failed (KeyError); inspect"})
+        # D: Oct 21 completed after it, so Oct 20's failure is resolved and drops off.
+        self.assertEqual(self.items(self.gather(), "research"), [])
+        self.database.execute("DELETE FROM research_days WHERE day='2026-10-21'")
         [item] = self.items(self.gather(), "research")
         self.assertEqual(item["text"], "Research didn't finish on Tue Oct 20: it ran into an error.")
         self.assertNotIn("KeyError", item["text"] + item["todo"])
@@ -291,16 +307,27 @@ class ReviewFixTest(GatherBase):
 
     def test_f1_a_research_failure_and_its_job_exit_are_one_item(self):
         research_day(self.database, "2026-10-22", "RETRY_WAIT", "a1", "FAILED", base.pacific(2026, 10, 22, 9, 0),
-                     result={"state": "FAILED"}, retry=base.pacific(2026, 10, 22, 10, 30))
+                     result={"state": "FAILED", "industries": [{"industry": "health", "state": "FAILED"}]},
+                     retry=base.pacific(2026, 10, 22, 10, 30))
         loop = {"running": True, "last_error": None,
                 "job_failures": {"research": {"exit_code": 1, "at": base.pacific(2026, 10, 22, 9, 40).isoformat()}}}
         view = self.gather(loop)
         everything = [item["text"] for section in view["sections"] for item in section["entries"]]
-        self.assertEqual(everything, ["Research didn't finish today: no industry finished its search."])
+        self.assertEqual(everything, ["Research will try again at 10:30: today's last try didn't finish because no "
+                                      "industry finished its search."])
         # An exit nothing explains still shows on its own (worked example 2).
         loop["job_failures"]["run"] = {"exit_code": 1, "at": base.pacific(2026, 10, 22, 9, 50).isoformat()}
         self.assertEqual([item["text"] for item in self.items(self.gather(loop), "scheduler")],
                          ["The hourly round stopped with an error at 09:50."])
+
+    def test_e1_an_exhausted_day_and_a_late_research_exit_are_one_item(self):
+        self.now = base.pacific(2026, 10, 22, 22, 0)
+        research_day(self.database, "2026-10-22", "EXHAUSTED", "a1", "FAILED", base.pacific(2026, 10, 22, 9, 0),
+                     result={"state": "FAILED", "error": "Parallel research failed (KeyError)"})
+        loop = {"running": True, "last_error": None,
+                "job_failures": {"research": {"exit_code": 1, "at": base.pacific(2026, 10, 22, 21, 30).isoformat()}}}
+        everything = [item["text"] for section in self.gather(loop)["sections"] for item in section["entries"]]
+        self.assertEqual(everything, ["Research didn't finish today: it ran into an error."])
 
     def test_f2_a_reply_with_tries_left_is_retried_not_abandoned(self):
         recent = self.now - dt.timedelta(hours=3)

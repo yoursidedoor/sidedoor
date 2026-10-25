@@ -120,7 +120,7 @@
         {% if j.duplicate %}<span class="app-summary-todo app-summary-closed">{{ same_job(j, v) }}</span>{% endif %}
         {% if j.reason %}<span class="app-summary-todo app-summary-reason muted">{{ j.reason }}</span>{% endif %}
         {% if j.todo and (j.needs_you or not j.closed) %}<span class="app-summary-todo{% if j.attention %} app-todo-you{% endif %}">{{ j.todo }}</span>{% endif %}
-        {% if j.todo_href and j.todo_href == "/approvals#questions" %}<a class="button app-answer" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}
+        {% if j.todo_href in ("/approvals#questions", "/approvals#applications") %}<a class="button app-answer" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}
       </summary>
       <div class="app-body">
         <p>{% if j.url %}<a href="{{ j.url }}" rel="noopener noreferrer" target="_blank">Open the posting</a> · {% endif %}<a href="{{ v.link(company=j.employer, page=None) }}">More at {{ j.company }}</a></p>

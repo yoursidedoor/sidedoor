@@ -18,9 +18,14 @@ every caller and every hash over the policy is unchanged.
 
 Two résumés (E4.T2, owner 2026-10-21, "Keep Both"): `resume_raw` is the user's own upload and its
 text saved once at upload (`reply_resume` reads it for claims, replies, packets, research and the
-composer); `resume` is the application résumé, the ATS version written from that text, the only
-file applications upload (`applications`, `desktop_adapter`, `ats_browser`). `resume_intake.ingest`
-writes both.
+composer); `resume` is the ATS version written from that text. `resume_intake.ingest` writes both.
+
+Which of the two applications upload (owner, 2026-10-24, Settings > Résumé "Use for application"):
+`application_resume` is "original" for the user's own upload, else (absent, "ats") the ATS version.
+`application_resume(policy)` returns the chosen file's record ({"path", "sha256", ...}); every
+upload and every designated-résumé check (`applications`, `desktop_adapter`, `ats_browser`) reads
+it, so the strict checks follow the choice. A re-upload or retry keeps the choice (ingest writes
+only `resume` and `resume_raw`).
 """
 
 import resources
@@ -42,11 +47,11 @@ SETTINGS_KEYS = ("max_attempts", "max_reconcile_attempts", "retry_delays_seconds
 PROFILE_KEYS = ("source", "minimum_base_salary_usd", "desired_base_salary_usd", "salary_relaxation",
                 "funding_stages", "industries", "levels", "minimum_years_experience",
                 "location_priority", "onsite_location_exclusions", "countries",
-                "target_specializations", "resume", "resume_raw", "answers")
+                "target_specializations", "resume", "resume_raw", "application_resume", "answers")
 # Added by E1.T7 (countries, target_specializations) and E4.T2 (resume_raw). Optional: a profile
 # without them restricts and ranks nothing, and merge() adds
 # a key only when the profile has it, so an older profile's merged dict and hashes are unchanged.
-OPTIONAL_PROFILE_KEYS = ("countries", "target_specializations", "resume_raw")
+OPTIONAL_PROFILE_KEYS = ("countries", "target_specializations", "resume_raw", "application_resume")
 # The key order of the old application-policy.json, kept so the merged dict serializes as before.
 KEY_ORDER = ("source", "minimum_base_salary_usd", "desired_base_salary_usd", "salary_relaxation",
              "funding_stages", "industries", "levels", "minimum_years_experience",
@@ -54,6 +59,29 @@ KEY_ORDER = ("source", "minimum_base_salary_usd", "desired_base_salary_usd", "sa
              "target_specializations", "max_attempts",
              "max_reconcile_attempts", "retry_delays_seconds", "preapproved_applications",
              "referrals_block_applications", "resume", "resume_raw", "answers")
+
+
+APPLICATION_RESUME = "application_resume"
+ORIGINAL = "original"
+ATS = "ats"
+
+
+def application_resume(policy):
+    """The résumé record applications upload: the user's original when they chose it, else `resume`.
+
+    When the original was chosen but its file is no longer on this computer, the ATS version is
+    used; Settings > Résumé says so (`original_missing`).
+    """
+    raw = policy.get("resume_raw")
+    if (policy.get(APPLICATION_RESUME) == ORIGINAL and isinstance(raw, dict) and isinstance(raw.get("path"), str)
+            and raw.get("sha256") and Path(raw["path"]).is_file()):
+        return raw
+    return policy.get("resume") if isinstance(policy.get("resume"), dict) else {}
+
+
+def original_missing(policy):
+    """True when the original was chosen for applications but the ATS version is used instead."""
+    return policy.get(APPLICATION_RESUME) == ORIGINAL and application_resume(policy) is not policy.get("resume_raw")
 
 
 class ProfileMissing(FileNotFoundError):

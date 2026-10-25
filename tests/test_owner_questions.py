@@ -175,9 +175,9 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         failures = self.page("/failures")
         self.assertNotIn("UNKNOWN_REQUIRED_ANSWERS", failures)
 
-        # A wrong answer type gets a way forward: the question is asked again.
-        self.assertIn("does not fit this question", self.answer(decision, "Something else"))
-        [decision] = self.pending(asi)
+        # An answer that is not one of the options is refused on the same card (owner, 2026-10-24).
+        self.assertIn("Choose one of the form's options.", self.answer(decision, "Something else"))
+        self.assertEqual([row["id"] for row in self.pending(asi)], [decision["id"]])
         green_card = EXPORT_CHOICES[1]
         self.assertIn("Answer saved.", self.answer(decision, green_card))
         self.assertIsNone(self.job(asi)["next_at"])                                  # due again now
@@ -340,6 +340,140 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         saved = {answer["semantic"]: answer["value"] for _key, answer in setup_steps.owner_answers(self.home)}
         self.assertEqual(saved, {"github_profile": "https://github.com/example-user", "twitter_profile": "https://x.com/example_user"})
 
+
+    # --- Typed controls (owner, 2026-10-24: Blueprints' "Graduation date" was a text box) ------------
+
+    GRADUATION = {"id": None, "required": True, "semantic": "graduation_date", "answer_type": "date", "choices": [],
+                  "label": "Graduation date", "format": "mm/dd/yyyy"}
+    YEARS = {"id": None, "required": True, "semantic": "years_experience_rust", "answer_type": "number", "choices": [],
+             "label": "Years of Rust experience"}
+    RELOCATE = {"id": None, "required": True, "semantic": "willing_to_relocate_sf", "answer_type": "boolean", "choices": [],
+                "label": "Are you willing to relocate to San Francisco?"}
+
+    def test_owner_each_control_type_renders_the_forms_own_control(self):
+        self.policy["answers"].pop("github", None)
+        profile_home.use(self, self.policy)
+        self.dashboard()
+        key = self.discover(fixtures.role("Blueprints AI", "bp-typed"))
+        self.form({"blueprints ai": [self.GRADUATION, self.YEARS, self.RELOCATE, EXPORT, GITHUB]})
+        self.run_cycle(Model("CANNOT_ANSWER"))
+        page = self.page()
+        date = self.card(page, "Graduation date")
+        self.assertIn('<input type="date" name="answer"', date)
+        self.assertIn("Graduation date</strong> · <span class=\"approval-q-required\">Required</span>", date)
+        self.assertIn("Format: mm/dd/yyyy", date)
+        number = self.card(page, "Years of Rust experience")
+        self.assertIn('<input type="number" name="answer"', number)
+        yes_no = self.card(page, self.RELOCATE["label"])
+        self.assertIn('type="radio" name="answer" value="Yes"', yes_no)
+        self.assertIn('type="radio" name="answer" value="No"', yes_no)
+        choice = self.card(page, EXPORT["label"])
+        self.assertEqual(choice.count('type="radio"'), len(EXPORT_CHOICES))
+        text = self.card(page, GITHUB["label"])
+        self.assertIn('<input type="text" name="answer"', text)
+        self.assertNotIn("Format:", text)
+
+    def test_owner_a_date_question_refuses_na_and_keeps_its_card(self):
+        key = self.discover(fixtures.role("Blueprints AI", "bp-na"))
+        self.form({"blueprints ai": [self.GRADUATION]})
+        self.run_cycle(Model("CANNOT_ANSWER"))
+        [decision] = self.pending(key)
+        self.assertEqual(decision["answer_type"], "date")
+        for bad in ("NA", "n/a", "05/2019", "2019-13-01"):
+            with self.subTest(answer=bad):
+                self.assertIn("This question needs a date.", self.answer(decision, bad))
+        self.assertEqual([row["id"] for row in self.pending(key)], [decision["id"]])   # the same card, not re-asked
+        self.assertIsNone(self.database.execute("SELECT 1 FROM application_answers WHERE job_key=?", (key,)).fetchone())
+        self.assertIn("Answer saved.", self.answer(decision, "2019-05-31"))
+        stored = self.database.execute("SELECT value FROM application_answers WHERE job_key=? AND field=?",
+                                       (key, decision["field"])).fetchone()[0]
+        self.assertEqual(json.loads(stored), "2019-05-31")
+
+    def test_owner_a_multi_select_question_gets_checkboxes_and_stores_a_list(self):
+        stack = {"id": None, "required": True, "semantic": "production_stack", "answer_type": "multi_choice",
+                 "label": "Which of these have you used in production?", "choices": ["Rust", "Go", "PostgreSQL"]}
+        key = self.discover(fixtures.role("Blueprints AI", "bp-multi"))
+        self.form({"blueprints ai": [stack]})
+        self.run_cycle(Model("CANNOT_ANSWER"))
+        [decision] = self.pending(key)
+        self.assertEqual(decision["answer_type"], "multi_choice")
+        card = self.card(self.page(), stack["label"])
+        for choice in stack["choices"]:
+            self.assertIn('type="checkbox" name="answer_multi" value="%s"' % choice, card)
+
+        def tick(values):
+            response = self.client.post("/approvals/questions/answer", headers=ORIGIN, data={
+                "decision_id": decision["id"], "payload_hash": decision["payload_hash"], "answer_multi": values})
+            return html.unescape(response.text)
+        self.assertIn("Tick one or more of the form's options.", tick(["Rust", "Haskell"]))
+        self.assertIn("Answer saved.", tick(["Rust", "PostgreSQL"]))
+        stored = self.database.execute("SELECT value FROM application_answers WHERE job_key=? AND field=?",
+                                       (key, decision["field"])).fetchone()[0]
+        self.assertEqual(json.loads(stored), ["Rust", "PostgreSQL"])
+
+    # --- Optional questions (owner, 2026-10-24: "ANY question, not only required ones") -------------
+
+    CLEARANCE = {"id": None, "required": False, "semantic": "active_security_clearance", "answer_type": "boolean",
+                 "choices": [], "label": "Do you hold an active security clearance?"}
+
+    def unsure_model(self, verdict):
+        """The answering AI is unsure (UNKNOWN) about the clearance question until the owner's answer is in
+        the packet; the judge returns `verdict` for that UNKNOWN."""
+        inner = Model(verdict)
+
+        def model(prompt):
+            if is_judge_prompt(prompt):
+                return inner(prompt)
+            packet = json.loads(prompt.split(PACKET_MARKER, 1)[1])
+            inner.packets.append(packet)
+            owner = [answer for answer in packet["policy"]["answers"].values()
+                     if answer.get("semantic") == self.CLEARANCE["semantic"]
+                     and str(answer.get("source", "")).startswith("authenticated-owner-decision:")]
+            answers = [entry(question, status="ANSWERED", unknown_reason=None, value=owner[-1]["value"], derivation="owner")
+                       if owner else entry(question, unknown_reason="The packet does not record this.")
+                       for question in packet["questions"]]
+            return json.dumps({"packet_sha256": packet["packet_sha256"], "answers": answers})
+        return model
+
+    def optional_setup(self):
+        # A recorded yes/no fact for the semantic is what puts an optional question to the answering AI
+        # (`applications.recorded_fact_for_ai`); the AI still judges it does not answer this question.
+        self.policy["answers"]["clearance"] = {"value": False, "semantic": self.CLEARANCE["semantic"], "source": "Setup"}
+        profile_home.use(self, self.policy)
+        self.dashboard()
+        key = self.discover(fixtures.role("ASI", "asi-opt"))
+        self.form({"asi": [self.CLEARANCE]})
+        return key, applications.question_field(self.CLEARANCE)
+
+    def test_owner_optional_question_both_unsure_is_asked_and_the_answer_is_used(self):
+        key, field = self.optional_setup()
+        self.run_cycle(self.unsure_model("ACCEPT"))
+        job = self.job(key)
+        self.assertEqual((job["state"], job["blocker"], job["attempts"]), ("BLOCKED", "UNKNOWN_REQUIRED_ANSWERS:" + field, 0))
+        self.assertEqual(self.submissions(), [])
+        [decision] = self.pending(key)
+        self.assertEqual((decision["field"], decision["answer_type"]), (field, "boolean"))
+        self.card(self.page(), self.CLEARANCE["label"])
+        self.assertIn("Answer saved.", self.answer(decision, "No"))
+        self.run_cycle(self.unsure_model("ACCEPT"), days=1)
+        self.assertEqual(self.job(key)["state"], "SUBMITTED")
+        evidence = json.loads(self.database.execute("SELECT evidence FROM application_attempts WHERE job_key=?", (key,)).fetchone()[0])
+        self.assertIs(evidence["answers"][field], False)
+        self.assertEqual(self.pending(), [])
+
+    def test_owner_optional_question_judge_cannot_answer_is_asked(self):
+        key, field = self.optional_setup()
+        self.run_cycle(self.unsure_model("CANNOT_ANSWER"))
+        self.assertEqual(self.job(key)["blocker"], "UNKNOWN_REQUIRED_ANSWERS:" + field)
+        self.assertEqual(len(self.pending(key)), 1)
+
+    def test_owner_optional_question_judge_revise_is_not_asked_and_left_blank(self):
+        key, field = self.optional_setup()
+        self.run_cycle(self.unsure_model("REVISE"))
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.job(key)["state"], "SUBMITTED")
+        evidence = json.loads(self.database.execute("SELECT evidence FROM application_attempts WHERE job_key=?", (key,)).fetchone()[0])
+        self.assertNotIn(field, evidence["answers"])
 
     # --- Blueprints (2026-10-24): an answer saved on Approvals while the applications run is going ---
 

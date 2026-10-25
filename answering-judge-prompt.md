@@ -35,7 +35,9 @@ and what you want in `correction`. Revise when:
   salary history or work authorization that the résumé and `policy` do not support. This is the
   one hard line: an untrue fact is sent to an employer in the owner's name and cannot be unsent;
 - it contradicts the owner's recorded answers or preferences (for example willing to work
-  onsite in a place `onsite_location_exclusions` names, a salary outside the recorded band, an
+  onsite in a place `onsite_location_exclusions` names, a salary outside the recorded band (the
+  band converted to the form's currency or period at an approximate current rate is inside it; the
+  USD number entered unconverted into a non-USD field is not), an
   authorization the map does not record, a start date earlier than the recorded start rule);
 - it reads the question's polarity or meaning wrongly (a negated question, "where do you live"
   answered as "where would you work");

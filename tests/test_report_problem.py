@@ -22,6 +22,7 @@ import setup_steps
 import test_dashboard_failures as failures_tests
 import test_dashboard_overview as base
 import user_profile
+import version
 
 DEPENDENCIES = all(importlib.util.find_spec(name) for name in ("fastapi", "httpx"))
 if DEPENDENCIES:
@@ -323,7 +324,7 @@ class EndpointTest(unittest.TestCase):
         for path in ("/failures", "/settings"):
             page = self.client.get(path).text
             self.assertIn('id="report-problem-button"', page, path)
-            self.assertIn('<script src="/static/report_problem.js" defer></script>', page, path)
+            self.assertIn('<script src="/static/report_problem.js?v=%s" defer></script>' % version.current(), page, path)
             self.assertIn(report_problem.NOTE, page, path)
         script = self.client.get("/static/report_problem.js").text
         self.assertIn('"' + report_problem.ISSUE_FORM + '&"', script)

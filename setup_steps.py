@@ -483,7 +483,9 @@ def save_resume(file_name, data, config, home=None):
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(data)
     os.replace(temporary, target)
-    shown_name = re.sub(r"[^\w .()-]", "_", Path(file_name).name)[:120]
+    shown_name = re.sub(r"[^\w .()-]", "_", Path(file_name).name)
+    suffix = Path(shown_name).suffix   # a checked extension; shortened by its stem only, so it survives
+    shown_name = shown_name[:len(shown_name) - len(suffix)][:120 - len(suffix)] + suffix
     raw = {"path": str(target), "sha256": hashlib.sha256(data).hexdigest(), "file_name": shown_name,
            "kind": RESUME_EXTENSIONS[extension], "bytes": len(data), "uploaded_at": now_iso()}
     return start_resume_read(config, home, raw)
@@ -918,6 +920,18 @@ def save_profile(form, home=None):
     result = record(home, "profile", "done", "Saved.", form=clean)
     guess_webmail(home)  # step 8's webmail from the email's domain, when it is a well-known one
     return load_state(home) if load_state(home).get("webmail") else result, {}
+
+
+def set_application_resume(choice, home=None):
+    """Settings > Résumé "Use for application" (owner, 2026-10-24): which file applications upload,
+    `user_profile.ORIGINAL` or `user_profile.ATS`. Returns False for any other value (nothing written)."""
+    if choice not in (user_profile.ORIGINAL, user_profile.ATS):
+        return False
+    with resume_intake.PROFILE_LOCK:
+        profile = read_profile(home)
+        profile[user_profile.APPLICATION_RESUME] = choice
+        _write_private(_home(home) / "profile.json", json.dumps(profile, indent=2) + "\n")
+    return True
 
 
 # --- Answers the owner gave on Approvals, kept for later jobs (owner, 2026-10-22, "a") ---------------
