@@ -435,9 +435,66 @@ def ingest(database, role, now=None, source="research"):
                            (key, employer, requisition, json.dumps(role), now))
     if row.rowcount:
         event(database, key, "DISCOVERED", {"url": role["url"], "source": source}, now)
+        verdict = research_ineligible_reason(role)
+        if verdict:
+            job = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (key,)).fetchone()
+            hold(database, job, verdict[0], verdict[1], now, "INELIGIBLE")
     if source_key:
         database.execute("INSERT OR IGNORE INTO application_source_keys VALUES (?,?)", (source_key, key))
     return key
+
+
+def research_ineligible_reason(role):
+    """Research's own INELIGIBLE verdict on this role, as (code, reason), or None.
+
+    The same verdict that keeps research from drafting outreach for the role
+    (`research_workflow.research_eligible`, owner 2026-10-01); the apply side honours it too
+    (owner, 2026-10-25, AuxoAI: an India-only role research ruled out was queued, read five
+    times and parked as an investigation failure). A role queued from elsewhere carries no
+    research verdict and is unaffected.
+    """
+    if not isinstance(role, dict) or role.get("eligibility") != "INELIGIBLE":
+        return None
+    assessment = role.get("assessment") if isinstance(role.get("assessment"), list) else []
+    code = assessment[1] if len(assessment) > 1 and isinstance(assessment[1], str) and assessment[1] else "OUTSIDE_CONFIRMED_SCOPE"
+    reason = research_scope_reason(role) or (assessment[2] if len(assessment) > 2 and isinstance(assessment[2], str)
+                                             and assessment[2].strip() else "Research judged this role outside your search.")
+    return code, "Research judged this role outside your search: " + reason.strip()[:900]
+
+
+def research_scope_reason(role):
+    """Research's own words for the first scope dimension it judged out of scope, or None."""
+    policy_fit = role.get("policy_fit") if isinstance(role, dict) and isinstance(role.get("policy_fit"), dict) else {}
+    for dimension in ("funding_stage", "location"):
+        verdict = policy_fit.get(dimension)
+        if (isinstance(verdict, dict) and verdict.get("in_scope") is False
+                and isinstance(verdict.get("reason"), str) and verdict["reason"].strip()):
+            return verdict["reason"].strip()
+    return None
+
+
+def close_research_ineligible(database, now, only=None):
+    """Close every open job research ruled out, before any browser read or approval.
+
+    A job whose submission may have happened is left alone, its outcome settled first: one
+    mid-submission (SUBMITTING, RECONCILE), held on an unknown submission outcome, or with an
+    outstanding submission attempt.
+    """
+    closed = []
+    for job in list(database.execute("SELECT * FROM application_jobs WHERE state NOT IN "
+                                     "('SUBMITTED','DUPLICATE','INELIGIBLE','EXHAUSTED','ABANDONED','SUBMITTING','RECONCILE')")):
+        if only is not None and job["job_key"] not in only:
+            continue
+        if job["blocker"] in UNCERTAIN_SUBMISSION_CODES or database.execute(
+                "SELECT 1 FROM application_attempts WHERE job_key=? AND state='SUBMITTING'", (job["job_key"],)).fetchone():
+            continue
+        try:
+            verdict = research_ineligible_reason(json.loads(job["payload"]))
+        except (TypeError, ValueError):
+            continue
+        if verdict and hold(database, job, verdict[0], verdict[1], now, "INELIGIBLE"):
+            closed.append(job["job_key"])
+    return closed
 
 
 def register_posting_keys(database, role, job_key, evidence):
@@ -4790,6 +4847,10 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
         adapter = build_adapter(database, config, root, clock or (lambda: now))
     import workflow_tasks
     settle_all_browser_reservations(database, now)
+    # Research's INELIGIBLE verdict closes a job before any read (owner, 2026-10-25), including
+    # one queued before this check existed or parked on a hold the loop below skips.
+    with database:
+        close_research_ineligible(database, now, only)
     # Jobs waiting on a submission the submit page already confirmed are settled first, with no
     # browser read (owner, 2026-10-06).
     settle_page_confirmations(database, now, root, only)

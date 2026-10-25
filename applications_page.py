@@ -692,6 +692,12 @@ def closed_reason(reader, key, state, code, closing=None):
         found = _scope_reason(overview._json(evidence) or {})
         if found:
             return found
+        # Closed on research's own verdict before any read (owner, 2026-10-25): its words.
+        payload = overview._json(_latest(reader, "SELECT payload FROM application_jobs WHERE job_key=?", key,
+                                          "application_jobs")) or {}
+        found = applications.research_scope_reason(payload)
+        if found:
+            return "Research judged: " + _sentence(found)
     if root == applications.ACCESS_GIVE_UP_CODE:
         detail = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND event='%s' "
                                         "ORDER BY id DESC LIMIT 1" % applications.ACCESS_GIVE_UP_EVENT, key)) or {}

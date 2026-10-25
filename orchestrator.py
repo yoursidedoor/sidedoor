@@ -438,7 +438,8 @@ def store_research(database, pipeline, result):
         raise ValueError("Invalid research result")
     if database.in_transaction:
         required = {"opportunities", "drafts", "history", "suppressions", "application_jobs",
-                    "application_events", "application_aliases", "application_source_keys"}
+                    "application_events", "application_aliases", "application_source_keys",
+                    "application_blockers"}
         existing = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         missing = required - existing
         if missing:

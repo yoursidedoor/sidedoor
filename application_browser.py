@@ -222,6 +222,11 @@ context.scope_targets.onsite_location_exclusions (its note says which places and
 options included, is excluded (e.g. "San Francisco (onsite) or Toronto"); true when at least
 one place is allowed (e.g. a remote option or a city in an allowed country).
 Washington, DC is not Washington state. Give a one-sentence reason for each.
+Research already judged this role: context.role.role_fit (level and specialization) and
+context.role.policy_fit (funding stage and location), with context.role.evidence. Build on
+those verdicts rather than starting over: where the page agrees, keep research's verdict; where
+the page states something research did not have or contradicts it, judge from the page and say
+in the reason what changed.
 A posting often states a YEARS requirement instead of a title. context.scope_targets
 carries minimum_years_experience for that case: when the posting states a minimum years of
 experience at or above it, level is in_scope TRUE on that basis alone - say so in the
