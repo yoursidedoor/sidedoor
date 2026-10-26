@@ -929,7 +929,7 @@ def application_control(item):
     2026-10-24): the form's own control as the read reported it ("select", "radio", "checkbox" for
     several choices, "text", "textarea"), else the one its answer type and options imply. A yes/no
     question without options is "radio" with Yes and No; a date or number is "date" / "number" (a held
-    card shows those as a one-line box); prose (a long-text type, a long question, a long answer, the
+    card shows a date as a date picker and a number as a one-line box); prose (a long-text type, a long question, a long answer, the
     unreadable-form note) is "textarea"."""
     kind = str(item.get("answer_type") or "").strip().casefold().replace(" ", "_").replace("-", "_")
     control = str(item.get("control") or "").strip().casefold()

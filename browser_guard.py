@@ -22,7 +22,9 @@ JSON-RPC message both ways. What it adds, all at the live harness's positions (o
   This is the only arm route (E7.T2, owner decision 2; tests/test_arm_guard.py covers its guarantees).
 * `wait_for_human_check` (given --human-check): today's application_browser.HumanCheckWait: notify,
   extend the claim, write human_check.json (which `application_browser.execute` reads to move its
-  deadline), wait 600 s, then one re-read. This is the only CAPTCHA-wait route.
+  deadline), wait 600 s, then one re-read. This is the only CAPTCHA-wait route. In support_email the
+  same flag and tool are support_email.SignInWait instead (owner, 2026-10-25): the user signs in to
+  their webmail in the draft window; no claim, database or notification.
 * every operation: nothing brings Sidedoor's Chrome in front of the user's screen (owner, 2026-10-22:
   "is it possible to stop the sidedoor browser from just snatching control of my screen?", option a).
   Code that calls bringToFront (browser_run_code_unsafe / browser_evaluate) is refused with
@@ -49,9 +51,13 @@ JSON-RPC message both ways. What it adds, all at the live harness's positions (o
   (WINDOW_NOT_MINIMIZED); a failed placement never stops the call.
 * support_email (owner, 2026-10-24: the "Email support" button on Failures and logs), the one exception to
   the above: the window is the user's. Its Chrome starts headed and on-screen (browser_runtime
-  SHOWN_OPERATIONS: no --offscreen, no headless, no focus keeper), and the guard leaves it running when
-  the session ends, so the draft the AI started stays open for the user to send (support_email brings it
-  to the front and closes it once the user has closed the window). bringToFront in code is still refused.
+  SHOWN_OPERATIONS: no --offscreen, no headless), and the guard leaves it running when the session ends,
+  so the draft the AI started stays open for the user to send (support_email brings it to the front and
+  closes it once the user has closed the window). bringToFront in code is still refused. Owner,
+  2026-10-25: while the AI works the window stays behind the user's app: the focus keeper runs from
+  before Chrome starts, giving the front back whenever Chrome takes it, but never minimizes (the window
+  stays on-screen, behind). It stops for good once support_email.SignInWait.front_released (the sign-in
+  wait has begun, or the dashboard is bringing the finished draft forward).
 Every other @playwright/mcp tool is listed and forwarded unjudged in every operation; the trace checks
 that live ran on cua_repl code run in `application_browser.tool_item`, on the Codex trace, as before.
 
@@ -100,7 +106,8 @@ ARM_DENIED_TEXT = "APPLICATION_ARM_DENIED; stop, never submit or retry"
 # A forwarded browser call the browser has not answered by then is answered by the guard with an error
 # (review fix 6), under Codex's ordinary 120 s tool timeout: only the CAPTCHA wait runs longer.
 CALL_TIMEOUT_SECONDS = 110
-# The code tools are neither listed nor run in the webmail read (review fix 8).
+# The code tools are neither listed nor run in the webmail read (review fix 8) or the support email
+# (browser_runtime.CODE_FREE_OPERATIONS).
 WEBMAIL_HIDDEN = ("browser_evaluate", "browser_run_code_unsafe")
 REF = re.compile(r"^(?:f\d+)?e\d+$")
 # An aria-ref locator clicked, double-clicked or pressed in browser_run_code_unsafe code (live judged
@@ -662,7 +669,10 @@ class Proxy:
         if arm_binding is None and claim:
             import application_browser
             arm_binding = application_browser.ArmBinding(claim)
-        if human_check_wait is None and human_check:
+        if human_check_wait is None and human_check and operation == "support_email":
+            import support_email
+            human_check_wait = support_email.SignInWait(human_check)
+        elif human_check_wait is None and human_check:
             import application_browser
             human_check_wait = application_browser.HumanCheckWait(human_check)
         self.arm_binding = arm_binding
@@ -717,9 +727,11 @@ class Proxy:
         # a moment after it starts (and macOS may leave the user's full-screen Space for it), so the app in
         # front is recorded and the focus keeper runs BEFORE Chrome starts: its first activation is undone
         # at once, not left until a later poll finds nothing to return to.
-        if self.offscreen:
-            self.record_front()
-            self.start_focus_keeper()
+        # support_email (SHOWN_OPERATIONS, owner 2026-10-25): the same, headed, without minimizing.
+        shown = self.operation in browser_runtime.SHOWN_OPERATIONS
+        if self.offscreen or shown:
+            self.record_front(headed=shown)
+            self.start_focus_keeper(headed=shown)
         try:
             if launch is None:
                 import setup_steps
@@ -761,7 +773,8 @@ class Proxy:
         if self.arm_binding is not None:
             tools.append(arm_tool())
         if self.human_check_wait is not None:
-            tools.append(human_check_tool())
+            listing = getattr(self.human_check_wait, "listing", None)
+            tools.append(listing() if callable(listing) else human_check_tool())
         return tools
 
     def spawn_child(self):
@@ -798,7 +811,8 @@ class Proxy:
                     self.listing.discard(ident)
                     result = message.get("result")
                     if isinstance(result, dict) and isinstance(result.get("tools"), list):
-                        hidden = OWN_TOOLS + (WEBMAIL_HIDDEN if self.operation == "webmail" else ())
+                        import browser_runtime
+                        hidden = OWN_TOOLS + (WEBMAIL_HIDDEN if self.operation in browser_runtime.CODE_FREE_OPERATIONS else ())
                         result["tools"] = [tool for tool in result["tools"]
                                            if not (isinstance(tool, dict) and tool.get("name") in hidden)]
                         result["tools"].extend(self.own_tools())
@@ -945,9 +959,18 @@ class Proxy:
                 return None
             mac = MacFrontmost()
             self.focus_keeper = FocusKeeper(self.chrome_pid, mac.front, mac.activate,
-                                            suspended=lambda: self.showing, log=self.log, clock=self.clock,
+                                            suspended=lambda: self.showing or self.front_released(),
+                                            log=self.log, clock=self.clock,
                                             chrome_shown=mac.shown, hide=self.hide_now)
         return self.focus_keeper or None
+
+    def front_released(self):
+        """support_email: the window may now come forward (SignInWait.front_released). Never raises."""
+        released = getattr(getattr(self, "human_check_wait", None), "front_released", None)   # set after Chrome starts
+        try:
+            return bool(callable(released) and released())
+        except Exception:
+            return False
 
     def start_focus_keeper(self, headed=False):
         """Start the focus keeper's poll (once per guard; later calls return the same thread)."""
@@ -1046,7 +1069,9 @@ class Proxy:
             try:
                 text, error = self.human_check_wait.call(), False
             except Exception:
-                text, error = "WAIT_EXPIRED: the wait could not start. Return blocked with code CAPTCHA_REQUIRED.", True
+                text = getattr(self.human_check_wait, "FAILED_TEXT", None) or \
+                    "WAIT_EXPIRED: the wait could not start. Return blocked with code CAPTCHA_REQUIRED."
+                error = True
             finally:
                 self.showing = False
                 self.place_window()
@@ -1147,7 +1172,8 @@ class Proxy:
         params = message.get("params")
         params = params if isinstance(params, dict) else {}
         name = params.get("name")
-        if self.operation == "webmail" and name in WEBMAIL_HIDDEN:
+        import browser_runtime
+        if self.operation in browser_runtime.CODE_FREE_OPERATIONS and name in WEBMAIL_HIDDEN:
             self.log(decision="NOT_OFFERED", tool=name)
             self.answer(message, f"Tool {name} is not available in this session.", True)
             return
@@ -1201,7 +1227,8 @@ class Proxy:
     def run(self):
         threading.Thread(target=self.pump_child, daemon=True).start()
         threading.Thread(target=self.pump_client, daemon=True).start()
-        self.start_focus_keeper()
+        import browser_runtime
+        self.start_focus_keeper(headed=self.operation in browser_runtime.SHOWN_OPERATIONS and not self.headless)
         try:
             self.loop()
         finally:

@@ -290,6 +290,28 @@ class QuitTest(Base):
         self.assertIsNone(scheduler_loop.current())
 
     @unittest.skipUnless(DASHBOARD, "dashboard packages (fastapi, httpx) are not installed")
+    def test_an_ordinary_open_starts_once_setups_start_succeeded(self):
+        """Owner, 2026-10-25: after an update (the new app is opened without --start), a crash or a
+        reopen, Sidedoor keeps running once Start succeeded; before that it still waits."""
+        setup_steps.update_state(lambda state: state.update(setup_finished_at="2026-10-22T00:00:00Z"), self.home)
+        for done in (False, True):
+            if done:
+                setup_steps.record(self.home, "start", "done", "Sidedoor is running.")
+            loop = mock.Mock()
+            with mock.patch.object(dashboard, "bind", return_value=mock.Mock()), \
+                    mock.patch.object(dashboard.uvicorn.Server, "run", return_value=None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(dashboard.serve(open_browser=False, home=self.home, scheduler=loop, resume=True), 0)
+            self.assertEqual(loop.start.called, done)
+        # `sidedoor dashboard` / `setup` (no resume, no --start) only serve the pages.
+        loop = mock.Mock()
+        with mock.patch.object(dashboard, "bind", return_value=mock.Mock()), \
+                mock.patch.object(dashboard.uvicorn.Server, "run", return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(dashboard.serve(open_browser=False, home=self.home, scheduler=loop), 0)
+        loop.start.assert_not_called()
+
+    @unittest.skipUnless(DASHBOARD, "dashboard packages (fastapi, httpx) are not installed")
     def test_owner2_item6_serve_start_waits_for_setups_start(self):
         setup_steps.update_state(lambda state: state.update(setup_finished_at="2026-10-22T00:00:00Z"), self.home)
         for done in (False, True):  # steps 1-9 done throughout; only Setup's Start (step 11) differs

@@ -22,6 +22,10 @@ Sources (why each is a real failure):
   (COMPUTE_WAIT, PROVIDER_USAGE_LIMIT_WAIT, CAPACITY_DEFERRED) or a RETRY_WAIT whose blocker is a
   budget/capacity code, and never count. EXHAUSTED with no failed try at all ran out of time
   (waiting for compute, F11). UNCERTAIN is never reconciled by `workflow_tasks`, so it says so (F6).
+  A note check (`outreach-draft-inspection`) waiting with only the judge's rejection
+  (AGENT_DECISION_NOT_READY) is a rewrite in progress, not a failure; a rewritten note's old check
+  is closed CANCELLED (REPLACED_BY_REWRITE). One whose rewrites kept being rejected until its tries
+  ran out is listed per person (owner, 2026-10-25).
 - the scheduler (`overview_page.loop_state`, the loop object's `last_error` and `job_failures`,
   read as Overview reads them): a job child that exited non-zero, and a problem keeping the
   schedule. The hourly cycle's own record (`runs`, state FAILED or INTERRUPTED) is a cycle that
@@ -37,7 +41,8 @@ Sources (why each is a real failure):
   `needs_calm`); a BLOCKED/RETRY_WAIT job not on route OWNER or RECONCILE (`applications.job_route`)
   is a failure only when its blocker is one of applications.py's failure sets
   (`application_failure_codes`); every other hold is a wait or a check in progress. Given-up jobs
-  live under Applications' "Given up" only (owner, D5).
+  (EXHAUSTED or ABANDONED, never one the user rejected on Approvals) are listed too, with the causes
+  their tries recorded (owner, 2026-10-25, replacing D5's "Given up only").
 - outreach writes (`outreach_actions`, `outreach_attempts`): INVITE_RETRY_WAIT (an invitation that
   did not land, `sequence`), WRITE_RETRY_WAIT/WRITE_FAILED (campaign preparation, `outreach_campaign`),
   CONFIRMED_NOT_SENT (three tries, not sent), UNCERTAIN_NO_RETRY (a send whose outcome is unknown; a
@@ -140,7 +145,13 @@ HOURLY_STEPS = {"provider-observation", "reply-monitor", "guarded-outreach", "gu
 # (the Applications page's "Waiting to retry"), and route OWNER/RECONCILE is decided by
 # `applications.job_route`, as the Applications page decides it.
 EXTRA_FAILURE_CODES = {"SUBMISSION_REPORTED_FAILED", "CONDITIONAL_QUESTION_UNANSWERED", "FIELD_LIMIT_TOO_SHORT_FOR_FACT", "PREFLIGHT_TRANSIENT",
-                       "MALFORMED_OR_UNAVAILABLE_EVIDENCE", "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED", "ANSWERING_RETRY"}
+                       "MALFORMED_OR_UNAVAILABLE_EVIDENCE", "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED", "ANSWERING_RETRY",
+                       # Owner, 2026-10-25: these stops are failed tries too, counted while the job retries.
+                       # RECONCILED_ABSENT is `applications.retry` after a submit try whose check found no
+                       # application at the site (the guard never armed, or the reconcile read's authoritative
+                       # absence). APPLICATION_TOOL_LIMIT is kept for the rows recorded before the limit went.
+                       "APPLICATION_BROWSER_EXECUTOR_FAILED", "APPLICATION_BROWSER_FAILED", "RECONCILED_ABSENT",
+                       "FORM_UNAVAILABLE", "APPLICATION_TOOL_LIMIT"}
 
 
 def application_failure_codes():
@@ -229,6 +240,7 @@ CAUSE_WORDS = {
     "RESEARCH_INTERRUPTED": "It was stopped before it finished (Sidedoor was closed or restarted).",
     "RESEARCH_FAILED": "It stopped with an error.",
     "NOTIFICATION_RECONCILIATION_EXHAUSTED": "Sidedoor checked 5 times and could not confirm delivery.",
+    "AGENT_DECISION_NOT_READY": "Sidedoor's check rejected the note before it was sent.",
 }
 
 
@@ -419,11 +431,40 @@ def _counts(reader, row, since, out=None):
     return failed, ever, waited
 
 
+# The note check (outreach_agent.prepare_drafts) records the judge's rejection as this blocker and
+# hands the note back to its writer (owner, 2026-10-25): a normal step, not a failure, while tries
+# remain. Only a check whose rewrites kept being rejected until its tries ran out is listed.
+JUDGE_WORKER = "outreach-draft-inspection"
+JUDGE_REJECTED = "AGENT_DECISION_NOT_READY"
+
+
+def _judge_rejection_only(blocker):
+    codes = [code for code in str(blocker or "").split(";") if code]   # prepare_drafts joins its gate codes with ";"
+    return bool(codes) and all(code == JUDGE_REJECTED for code in codes)
+
+
+def task_person(row):
+    """"Name (Company)" for a task about one person, from the names its own result recorded (the
+    drafted note's recipient, as outreach names people), else None; never a profile address."""
+    result = overview._json(row["result"]) if "result" in row.keys() else None
+    result = result if isinstance(result, dict) else {}
+    draft = result.get("draft") if isinstance(result.get("draft"), dict) else {}
+    name = next((value.strip() for value in (draft.get("recipient"), result.get("recipient"))
+                 if isinstance(value, str) and value.strip()), None)
+    if not name:
+        return None
+    company = next((value.strip() for value in (row["company_id"] if "company_id" in row.keys() else None,
+                                                draft.get("company"), result.get("company"))
+                    if isinstance(value, str) and value.strip()), None)
+    return "%s (%s)" % (name, company) if company else name
+
+
 def task_failures(reader, now, fmt, secrets=()):
     """Tasks with a real failed try in the window (F8/F12: counted from the failure events
     themselves, never from waits), one item per worker and kind, with the tries' recorded causes."""
     since = _since(now)
-    rows = reader.rows("""SELECT t.task_id, t.worker, t.status, t.blocker, t.next_at, t.updated_at, t.effect, t.parent_run_id
+    rows = reader.rows("""SELECT t.task_id, t.worker, t.status, t.blocker, t.next_at, t.updated_at, t.effect, t.parent_run_id,
+               t.result, t.company_id
         FROM workflow_tasks t
         WHERE t.status IN ('RETRY_WAIT','EXHAUSTED','UNCERTAIN','BLOCKED') AND t.updated_at>=?
           AND (t.status!='BLOCKED' OR t.blocker='WORKER_EXCEPTION')""",
@@ -431,20 +472,26 @@ def task_failures(reader, now, fmt, secrets=()):
     grouped = {}
     for row in _recent(rows, since, "updated_at"):
         status = row["status"]
+        worker = str(row["worker"] or "")
+        judged = worker == JUDGE_WORKER and _judge_rejection_only(row["blocker"])
+        if judged and status == "RETRY_WAIT":
+            continue   # the note went back to its writer for a rewrite: a normal step, not a failure
         tries = []
         failed, ever, waited = _counts(reader, row, since, tries)
+        person = task_person(row)
         if status == "RETRY_WAIT":
             if not failed:
                 continue   # only waits in the window: clears on its own
             kind = "retry"
+        elif status == "EXHAUSTED" and judged:
+            kind = "judge_gave_up"
         elif status == "EXHAUSTED":
             kind = "gave_up" if ever else ("out_of_time_waiting" if waited else "out_of_time")
         elif status == "UNCERTAIN":
             kind = "interrupted_write" if row["effect"] == "WRITE" else "interrupted"
         else:
             kind = "crashed"
-        worker = str(row["worker"] or "")
-        key = (worker_words(worker), kind, worker in HOURLY_STEPS)
+        key = (worker_words(worker), kind, worker in HOURLY_STEPS) + ((person,) if kind == "judge_gave_up" else ())
         component = "applications" if worker in ("applications", "agent-investigation") else "launchd"
         entry = grouped.setdefault(key, {"count": 0, "at": None, "retry_at": None, "moments": [], "job": None, "slots": [],
                                          "code": "%s:%s" % (kind.upper(), worker.split(":", 1)[0]), "tasks": [],
@@ -453,9 +500,9 @@ def task_failures(reader, now, fmt, secrets=()):
         moment = overview._utc(row["updated_at"])
         link = run_href("task", row["task_id"])
         for code, at, error in tries:
-            entry["causes"].add(code, at, error, log_href=link)
+            entry["causes"].add(code, at, error, where=person, log_href=link)
         if not tries:   # ran out of time, or a crash recorded before events kept the cause
-            entry["causes"].add(row["blocker"] or kind.upper(), moment, log_href=link)
+            entry["causes"].add(row["blocker"] or kind.upper(), moment, where=person, log_href=link)
         entry["tasks"].append((moment, row["task_id"]))
         entry["at"] = max(filter(None, (entry["at"], moment)), default=None)
         if kind == "crashed" and worker in HOURLY_STEPS:
@@ -466,8 +513,13 @@ def task_failures(reader, now, fmt, secrets=()):
         if retry is not None and retry > now:
             entry["retry_at"] = min(filter(None, (entry["retry_at"], retry)), default=None)
     found = []
-    for ((group, name), kind, hourly), entry in grouped.items():
-        if kind == "retry":
+    for ((group, name), kind, hourly, *person), entry in grouped.items():
+        if kind == "judge_gave_up":
+            whom = person[0] if person and person[0] else "someone"
+            text = ("Sidedoor tried a few times, but its check kept rejecting the note to %s, so it stopped trying. "
+                    "Nothing was sent." % whom)
+            todo = "Nothing you need to do. Sidedoor moves on to its other work."
+        elif kind == "retry":
             text = "%s didn't work." % name
             todo = ("Nothing you need to do. Sidedoor will try again %s." % _at(fmt, entry["retry_at"]) if entry["retry_at"]
                     else "Nothing you need to do. Sidedoor will try again on its own.")
@@ -497,10 +549,16 @@ def task_failures(reader, now, fmt, secrets=()):
                     else "Nothing you need to do. Sidedoor moves on to its other work.")
         oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
         newest = max(entry["tasks"], key=lambda pair: pair[0] or oldest)[1]
-        found.append(_item(group, text, todo, entry["at"], entry["count"], entry["retry_at"], job=entry["job"],
-                           moments=entry["moments"], slots=entry["slots"], code=entry["code"], reasons=entry["causes"],
-                           refs={"task_ids": [task for _, task in entry["tasks"]][:20]},
-                           log_href=run_href("task", newest)))
+        item = _item(group, text, todo, entry["at"], entry["count"], entry["retry_at"], job=entry["job"],
+                     moments=entry["moments"], slots=entry["slots"], code=entry["code"], reasons=entry["causes"],
+                     refs={"task_ids": [task for _, task in entry["tasks"]][:20]},
+                     log_href=run_href("task", newest))
+        if kind == "judge_gave_up":
+            # Owner, 2026-10-25: no number of tries here, only "tried a few times" in the headline.
+            item["count"] = 1
+            for reason in item["reasons"]:
+                reason["count"] = 1
+        found.append(item)
     return found
 
 
@@ -759,7 +817,7 @@ def application_failures(reader, now, fmt, secrets=()):
     """Owner holds (Needs you, by the one rule `overview.blocked_on_owner` that Overview and
     Applications count with: questions and answered jobs are calm items) and held jobs whose blocker is a failed
     attempt. Words and next steps are the Applications page's own (`applications_page.job_view`).
-    Given-up jobs are not listed here: they live under Applications' "Given up" (owner, D5)."""
+    Given-up jobs in the window are listed too (`given_up_failures`, owner 2026-10-25)."""
     since = _since(now)
     owner, _ = overview._blocked(reader)
     owner_keys = set(owner)
@@ -832,6 +890,60 @@ def application_failures(reader, now, fmt, secrets=()):
             found.append(_item("applications", "%s: %s" % (name, view["problem"]), "Nothing you need to do. " + view["todo"],
                                at, counts.get(key, 1), retry if retry is not None and retry > now else None, fix=link,
                                href=_job_link(key), code=code, **extra))
+    return found + given_up_failures(reader, now, fmt, secrets)
+
+
+# Attempt states that mean nothing reached the employer (`applications`: a submit the guard never
+# armed, or one the reconcile read found absent; a submit stopped for a question).
+NOT_SENT_ATTEMPTS = ("CONFIRMED_NOT_SUBMITTED", "SUPERSEDED_BY_FACT_REQUEST")
+GIVEN_UP_STATES = ("EXHAUSTED", "ABANDONED")
+
+
+def nothing_sent(reader, key):
+    """True when every submit attempt of the job is on record as not submitted (or there were none)."""
+    rows = reader.rows("SELECT state FROM application_attempts WHERE job_key=?", (key,), "application_attempts")
+    return all(row[0] in NOT_SENT_ATTEMPTS for row in rows)
+
+
+def given_up_failures(reader, now, fmt, secrets=()):
+    """Jobs Sidedoor gave up on in the window (EXHAUSTED or ABANDONED; owner 2026-10-25, replacing D5),
+    never one the user rejected on Approvals. The causes are the stops its tries recorded (the
+    counted failures, and the sign-in or human-check stops whose third closed it, owner D6); with none,
+    the Applications page's own closing reason, else its blocker."""
+    import applications
+    since = _since(now)
+    codes = application_failure_codes() | set(applications.ACCESS_BLOCK_CODES)
+    rows = [row for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,updated_at,receipt FROM application_jobs "
+                                       "WHERE state IN ('EXHAUSTED','ABANDONED') AND updated_at>=? ORDER BY updated_at DESC",
+                                       (overview._prefilter(since),), "application_jobs")
+            if _code(row["blocker"]) != applications.APPLICATION_REJECTED and _recent([row], since, "updated_at")]
+    found = []
+    for row in rows:
+        key = row["job_key"]
+        view = applications_page.job_view(row, set(), set(), set(), fmt)
+        name = "%s, %s" % (view["company"], view["role"]) if view["role"] != "Role not recorded" else view["company"]
+        at = overview._utc(row["updated_at"])
+        log_link = run_href("job", key)
+        causes = Causes(secrets, logs_href("applications", at))
+        tries = 0
+        for detail, moment in reader.rows("SELECT detail,at FROM application_events WHERE job_key=? AND event IN "
+                                          "('BLOCKED','RETRY_WAIT') ORDER BY id DESC LIMIT 20", (key,), "application_events"):
+            recorded = overview._json(detail) or {}
+            if _code(recorded.get("code")) in codes:
+                tries += 1
+                causes.add(recorded.get("code"), overview._utc(moment), _error_text(recorded), log_href=log_link)
+        why = None
+        if not causes.found:
+            why = applications_page.closed_reason(reader, key, row["state"], row["blocker"],
+                                                  applications_page.closing_reason(reader, key, row["state"]))
+            if not why:
+                causes.add(row["blocker"] or "APPLICATION_" + str(row["state"]), at, log_href=log_link)
+        todo = " ".join(part for part in (why, "Nothing was sent." if nothing_sent(reader, key) else None,
+                                          view["todo"] or "Sidedoor will not try this one again.") if part)
+        found.append(_item("applications", "%s: %s" % (name, view["closed"]), todo, at, max(1, tries),
+                           fix={"label": "Open application", "href": _job_link(key)}, href=_job_link(key),
+                           code=_code(row["blocker"]) or "APPLICATION_" + str(row["state"]), reasons=causes,
+                           refs={"job_key": key}, log_href=log_link))
     return found
 
 

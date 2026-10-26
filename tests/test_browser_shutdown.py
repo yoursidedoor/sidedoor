@@ -8,6 +8,9 @@ Job state survived that (the guard writes `armed_at` itself) but the machine did
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
 import inspect
+import json
+import sys
+import time
 import signal
 import tempfile
 import os
@@ -69,6 +72,22 @@ class ReapTests(unittest.TestCase):
             application_browser.execute({}, "prompt", pathlib.Path(root), 5)
         self.assertIs(seen.get("start_new_session"), True,
                       "killpg only reaches the whole tree if the child is its own session")
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
+    def test_a_banned_call_ends_the_running_session_at_once(self):
+        """No tool-call count limit (owner, 2026-10-25), but every call is still checked as it arrives:
+        a worker that runs a shell command is stopped then, not at the deadline."""
+        event = json.dumps({"type": "item.started", "item": {"id": "x", "type": "command_execution"}})
+        worker = [sys.executable, "-c", "import sys, time; print(%r, flush=True); time.sleep(60)" % event]
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(application_browser.browser_runtime, "require"), \
+                patch.object(application_browser.browser_runtime, "settings", return_value={"isolated": True}), \
+                patch.object(application_browser, "command", return_value=worker), \
+                patch.object(application_browser.reply_worker, "_environment", return_value={}), \
+                self.assertRaisesRegex(ValueError, "APPLICATION_UNAUTHORIZED_TOOL"):
+            application_browser.execute({}, "prompt", pathlib.Path(root), 30)
+        self.assertLess(time.monotonic() - started, 15)
 
     def test_consume_installs_and_restores_shutdown_handlers(self):
         source = inspect.getsource(application_browser.consume)

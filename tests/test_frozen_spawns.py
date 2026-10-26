@@ -203,7 +203,7 @@ class FrozenDispatchTests(unittest.TestCase):
             with frozen(), mock.patch.object(sys, "argv", argv), \
                     mock.patch.object(dashboard, "serve", return_value=0) as serve:
                 self.assertEqual(orchestrator.main(), 0)
-            serve.assert_called_once_with(open_browser=True, path="/", start=False, tray=True)
+            serve.assert_called_once_with(open_browser=True, path="/", start=False, tray=True, resume=True)
 
     def test_no_arguments_from_source_is_still_a_usage_error(self):
         with frozen(False), mock.patch.object(sys, "argv", ["orchestrator.py"]), self.assertRaises(SystemExit):

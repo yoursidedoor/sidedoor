@@ -1,7 +1,9 @@
 // Email support (owner, 2026-10-24): ask Sidedoor to start an email to support in the user's webmail
 // (POST /report-problem/email), copy the same summary the GitHub button copies, and show the draft's
-// status (GET /report-problem/email) until it is open or could not be started. Nothing is sent: the
-// user presses Send in their own browser.
+// status (GET /report-problem/email) until the session has ended: it could not be started, or its draft
+// window was closed (idle with `last`, which a poll that never saw "open" still reads). While the user
+// signs in to their webmail ("signin") the page keeps polling. The button is usable again once the
+// draft is open. Nothing is sent: the user presses Send in their own browser.
 document.addEventListener("DOMContentLoaded", function () {
   var button = document.getElementById("support-email-button");
   if (!button) return;
@@ -49,18 +51,23 @@ document.addEventListener("DOMContentLoaded", function () {
       var after = copied ? " Your summary is copied. You can paste it into an email to " + address + " yourself."
                          : " Copy the summary below and paste it into an email to " + address + " yourself.";
       if (!copied) { fallback.hidden = false; link.hidden = true; }
-      show(message + after);
+      show(message + after, typeof answer.settings === "string" ? settingsLink(answer.settings) : null);
     } else if (message) {
       show(message);
     }
-    return state === "starting";
+    return state === "starting" || state === "signin" || state === "open";
+  }
+  function settle(answer) {
+    var more = render(answer);
+    button.disabled = answer.state === "starting" || answer.state === "signin";
+    if (more) poll();
   }
   function poll() {
     timer = window.setTimeout(function () {
       fetch("/report-problem/email", { credentials: "same-origin", headers: { "Accept": "application/json" } })
         .then(function (response) { return response.json(); })
         .then(function (answer) {
-          if (render(answer || {})) poll(); else button.disabled = false;
+          settle(answer || {});
         })
         .catch(function () { poll(); });
     }, 2000);
@@ -83,7 +90,7 @@ document.addEventListener("DOMContentLoaded", function () {
         var copying = typeof answer.summary === "string" ? copy(answer.summary) : Promise.resolve(false);
         return copying.then(function (done) {
           copied = !!done;
-          if (render(answer)) poll(); else button.disabled = false;
+          settle(answer);
         });
       })
       .catch(function () {

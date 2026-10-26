@@ -248,6 +248,22 @@ class CharacterLimitTests(unittest.TestCase):
         with open(answering_agent.Path(__file__).resolve().parent.parent / "answering-prompt.md", encoding="utf-8") as prompt:
             self.assertIn("max_characters", prompt.read())
 
+    def test_a_bare_file_input_upload_can_be_confirmed_without_a_file_name(self):
+        # A native <input type=file> shows in the snapshot only as a button with its label, so the
+        # file name never appears; the AI confirms from the upload tool's own answer instead.
+        submit = " ".join(application_browser.OPERATION_PROMPTS["submit"].split())
+        self.assertIn("Some pages show no file name at all", submit)
+        self.assertIn('the "File chooser" modal state is gone', submit)
+        self.assertIn("cannot be confirmed as step 3 says, stop before arming with blocked.code FILE_UPLOAD_FAILED", submit)
+        self.assertNotIn("or the page does not show the file name", submit)
+
+    def test_the_read_reports_a_dropdown_placeholder_as_no_choice(self):
+        # The browser AI leaves a "Select..." prompt entry out of choices, so a card never offers it.
+        inspect = " ".join(application_browser.OPERATION_PROMPTS["inspect"].split())
+        self.assertIn("A placeholder is not an option", inspect)
+        schema = application_browser.result_contract("inspect")["questions"][0]["choices"][0]
+        self.assertIn("never a placeholder entry", schema)
+
     def test_submit_may_open_an_embedded_forms_own_address(self):
         # Owner, 2026-10-02: the frame's address carries `token=<id>`; the submit trace guard
         # accepts opening it in a new tab (only investigate reads check URLs in code).

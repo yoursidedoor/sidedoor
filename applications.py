@@ -624,6 +624,9 @@ def hold(database, job, code, action, now, state="BLOCKED", next_at=None, route=
         # of umbrella cost on 2026-09-22.
         event(database, job["job_key"], state, {"code": code, "next_action": action,
                                                 "route": route, "attempts": job["attempts"]}, now)
+    # Every stop, also one that repeats the job's blocker (no new event then): Together AI's three
+    # tool-limit reads were one BLOCKED event (owner, 2026-10-25: one line each time a job stops).
+    log_stop(database, job["job_key"], state, code, next_at)
     owner = "user" if code.startswith("UNKNOWN_REQUIRED_ANSWERS:") or code in {"REQUIRED_ELIGIBILITY_ANSWER", "DESIGNATED_RESUME_MISMATCH", "AUTHENTICATION_REQUIRED", "CAPTCHA_REQUIRED", "MFA_REQUIRED", "APPLICATION_AUTHORIZATION_REQUIRED"} else "orchestrator"
     database.execute("INSERT INTO application_blockers VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_key) DO UPDATE SET code=excluded.code,owner=excluded.owner,required_input=excluded.required_input,attempts=excluded.attempts,next_retry=excluded.next_retry,updated_at=excluded.updated_at",
                      (job["job_key"], code, owner, action, job["attempts"], next_at, now))
@@ -631,6 +634,44 @@ def hold(database, job, code, action, now, state="BLOCKED", next_at=None, route=
         notify(database, job["job_key"] + ":" + code,
                f"Job search: {job['employer']} / {job['requisition']}: {code}. Attempts: {job['attempts']}. Owner: {owner}. Next: {action}. Deadline: {next_at or 'before this application can proceed'}.", now)
     return True
+
+
+LOG = log.get(__name__)
+
+
+def log_stop(database, key, state, code, next_at):
+    """One plain line in the applications job's log (logs/applications.stdout.log, which the Failures
+    page's Logs view shows) each time a job stops on a failed try or is given up (owner, 2026-10-25):
+    company, role and the reason in plain words; the line's own stamp is the time. Never an answer, a
+    code or the engineer's next action. A failed write never stops the hold it describes."""
+    try:
+        import applications_page
+        import failures_page
+        gave_up = state in ("EXHAUSTED", "ABANDONED") and str(code).split(":", 1)[0] != APPLICATION_REJECTED
+        if not gave_up and not failures_page.is_application_failure(code, state):
+            return
+        row = database.execute("SELECT employer,payload FROM application_jobs WHERE job_key=?", (key,)).fetchone()
+        try:
+            payload = json.loads(row["payload"]) if row and row["payload"] else {}
+        except (TypeError, ValueError):
+            payload = {}
+        payload = payload if isinstance(payload, dict) else {}
+        text = lambda value: " ".join(value.split())[:120] if isinstance(value, str) and value.strip() else None
+        company = text(payload.get("company")) or text(row["employer"] if row else None) or "Unknown company"
+        role = text(payload.get("role")) or text(payload.get("title"))
+        name = company + (", " + role if role else "")
+        words = failures_page.cause_words(code)
+        if gave_up:
+            last = applications_page.last_try_reason(applications_page.overview.Reader(database), key)
+            LOG.info("%s: Sidedoor gave up on this application. %s%s", name, words, (" " + last) if last else "")
+        else:
+            try:
+                when = dt.datetime.fromisoformat(next_at).astimezone(dt.timezone.utc).strftime(" at %Y-%m-%d %H:%M UTC")
+            except (TypeError, ValueError):
+                when = ""
+            LOG.info("%s: this try failed. %s Sidedoor will try again%s.", name, words, when)
+    except Exception as error:
+        LOG.warning("Could not write the stop line for an application (%s)", type(error).__name__)
 
 
 def fresh(record, now, max_age=86400):

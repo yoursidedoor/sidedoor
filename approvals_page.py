@@ -287,6 +287,16 @@ def question_words(label, semantic, field):
     return " ".join(label.split()) if isinstance(label, str) and label.strip() else _words(semantic or field)
 
 
+def _iso_date(value):
+    """True for an empty answer or a YYYY-MM-DD date, the only values a date picker can show."""
+    if value == "":
+        return True
+    try:
+        return isinstance(value, str) and len(value) == 10 and bool(dt.date.fromisoformat(value))
+    except ValueError:
+        return False
+
+
 def answer_control(answer_type, options, question, operational=False):
     """The Questions card's control: the one mapping the held-application card uses too
     (`approvals.application_control`), from the stored answer type, the form's options and the
@@ -575,6 +585,8 @@ def applications_waiting(database, only=None, page=1):
                 subject = approvals.shown_answer(item)
             else:
                 control, options = approvals.application_control(item)
+                if control == "date" and not _iso_date(approvals.shown_answer(item)):
+                    control = "text"   # a date picker holds only YYYY-MM-DD: any other stored answer is kept as written
                 answers.append({"field": item["field"], "question": question_words(item.get("label"), item.get("semantic"), item["field"]),
                                 "control": control, "options": options, "answer": approvals.shown_answer(item)})
         destination = snapshot.get("destination") if isinstance(snapshot.get("destination"), str) else ""

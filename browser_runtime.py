@@ -51,6 +51,9 @@ OUTPUT_FOLDER = "browser"   # @playwright/mcp's --output-dir: snapshots, screens
 UPLOAD_FOLDER = "uploads"   # the staged résumé and cover letters: read-only, the guard's one MCP root
 # Tools whose argument is code; the webmail read (setup's email check) neither lists nor approves them.
 CODE_TOOLS = ("browser_evaluate", "browser_run_code_unsafe")
+# The operations that are never offered the code tools: the webmail read, and the support email (owner,
+# 2026-10-25: a body written into the page's DOM by code may lose its line breaks or never reach the draft).
+CODE_FREE_OPERATIONS = ("webmail", "support_email")
 
 
 class RuntimeMissing(Exception):
@@ -486,6 +489,9 @@ def end_session(config=None, wait_seconds=5.0, run=None):
     import signal
     import time
     path = profile(config)
+    started = _STARTED.pop(str(Path(path)), None)
+    if started is not None:
+        portable.kill_tree(started)   # Windows: the Chrome Sidedoor started (launch_windows), by its own job
     pid = lock_holder(path)
     if not holds_profile(pid, path, run):
         # Windows: the session's Chrome ended with its worker's Job Object (portable.kill_tree);
@@ -577,11 +583,15 @@ MIXED_WORDS = ("Sidedoor's browser runs without a window (some jobs run it minim
 HEADLESS_OPERATIONS = ("linkedin", "webmail", "inspect", "investigate", "submit", "verify", "reconcile")
 # The one session whose window is for the user (owner, 2026-10-24: "Email support" on Failures and logs):
 # the AI starts a support email in the user's webmail and leaves the draft open for the user to send.
-# Its Chrome is headed and on-screen from the start (never headless, minimized or kept from the front),
+# Its window is headed and on-screen (never minimized; kept behind the user's app until the draft is ready
+# or the user must sign in), after a first phase that runs headless (HEADLESS_PHASE, owner 2026-10-25),
 # and the session's end leaves it running (browser_guard.Proxy.stop_background_chrome,
 # outreach_history_browser.execute); support_email brings it to the front and closes it once the user
 # has closed the window.
 SHOWN_OPERATIONS = ("support_email",)
+# Owner, 2026-10-25 ("B + C"): support_email's first phase runs headless (the AI makes and saves the draft
+# out of sight); run_session sets this config key for that phase only (support_email.run_session).
+HEADLESS_PHASE = "_browser_headless_phase"
 HEADLESS_SWITCH = "--headless=new"
 AUTOMATION_SWITCH = "--disable-blink-features=AutomationControlled"
 # Chrome's reduced user agent on macOS (the OS part is frozen at 10_15_7 and the minor versions at 0.0.0
@@ -641,8 +651,10 @@ def headless_user_agent(config, operation, platform=None, binary=None):
     """The user agent a headless session of `operation` presents, or None when the operation runs headed:
     not macOS's background launch, not in `headless_operations`, or the installed Chrome's version cannot
     be read (then it runs headed and minimized as before, never as "HeadlessChrome")."""
-    if (not background_launch(config, platform) or operation not in headless_operations(config)
-            or operation in SHOWN_OPERATIONS):
+    if operation in SHOWN_OPERATIONS:
+        if not (background_launch(config, platform) and (config or {}).get(HEADLESS_PHASE)):
+            return None
+    elif not background_launch(config, platform) or operation not in headless_operations(config):
         return None
     if binary is None:
         import setup_steps
@@ -766,15 +778,16 @@ def chrome_app(binary):
     return None
 
 
-def background_command(app, path, port=0, onscreen=False):
+def background_command(app, path, port=0, onscreen=False, url=None):
     """`open -g -n -a <Chrome.app> --args ...`: Chrome on `path`, never activated, DevTools on a free port
     (or on `port`: the CAPTCHA wait reopens a headless session's profile headed on the port
     @playwright/mcp is attached to). `onscreen` (SHOWN_OPERATIONS): the window opens at
-    ONSCREEN_POSITION instead of the off-screen one."""
+    ONSCREEN_POSITION instead of the off-screen one. `url` (support_email's saved draft) is the first page
+    instead of about:blank."""
     position = ("--window-position=%d,%d" % ONSCREEN_POSITION, WINDOW_SWITCHES[1]) if onscreen else WINDOW_SWITCHES
     return ["/usr/bin/open", "-g", "-n", "-a", str(app), "--args", "--user-data-dir=" + str(path),
             # Live parity (CK3, accepted): Playwright's own launch also opens a local DevTools port.
-            "--remote-debugging-port=%d" % port, *BACKGROUND_SWITCHES, *position, "about:blank"]
+            "--remote-debugging-port=%d" % port, *BACKGROUND_SWITCHES, *position, url or "about:blank"]
 
 
 def headless_command(binary, path, user_agent, scale=None):
@@ -806,8 +819,60 @@ def launch_headless(binary, path, user_agent, popen=None, timeout=BACKGROUND_LAU
     return _await_port(port_file, path, timeout, sleep, clock, stop)
 
 
+# Windows (owner, 2026-10-25): a session's Chrome that Playwright launches is a child of the Codex worker,
+# inside the worker's Job Object (portable.contain), so the session's end (portable.kill_tree) ends it. For
+# SHOWN_OPERATIONS (support_email's draft window, which must outlive the session) Sidedoor starts Chrome
+# itself instead, outside the worker's job, the way macOS's background launch does, and @playwright/mcp
+# attaches to it over CDP (CDP_ENDPOINT, mcp_command). That Chrome goes in a Job Object of its own, held by
+# this process, so end_session can stop it (kill_tree) and it never outlives Sidedoor.
+CDP_ENDPOINT = "_browser_cdp_endpoint"
+_STARTED = {}   # profile path -> pid of the Chrome launch_windows started (its job is in portable._jobs)
+
+
+def windows_launch(config=None, operation=None):
+    """True when Sidedoor starts the session's Chrome itself on Windows: a shown operation on the real
+    profile, headed (tests' isolated or headless sessions keep Playwright's own launch)."""
+    driver = settings(config)
+    return (BACKGROUND_ALLOWED and portable.WINDOWS and operation in SHOWN_OPERATIONS
+            and not driver.get("isolated") and not driver.get("headless"))
+
+
+def windows_command(binary, path, url=None):
+    """chrome.exe on `path`, on-screen at the normal size, DevTools on a free port (Playwright's switches,
+    as background_command)."""
+    return [str(binary), "--user-data-dir=" + str(path), "--remote-debugging-port=0", *BACKGROUND_SWITCHES,
+            "--window-position=%d,%d" % ONSCREEN_POSITION, WINDOW_SWITCHES[1], url or "about:blank"]
+
+
+def launch_windows(binary, path, popen=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, url=None):
+    """Windows: start Chrome on profile `path` from this process, in a Job Object of its own (never the
+    worker's); return its DevTools endpoint (DevToolsActivePort, as launch_background). Raises OSError when
+    it cannot start or writes no port within `timeout` (that Chrome is then stopped)."""
+    import subprocess
+    path = Path(path)
+    port_file = _fresh_port_file(path)
+    chrome = (popen or subprocess.Popen)(windows_command(binary, path, url), stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         **portable.worker_spawn_options(core=False))
+    portable.contain(chrome)
+    previous = _STARTED.pop(str(path), None)
+    if previous is not None:
+        portable.kill_tree(previous)   # an earlier one's job (that Chrome is gone: prepare_profile checked)
+    _STARTED[str(path)] = chrome.pid
+    return _await_port(port_file, path, timeout, sleep, clock)
+
+
+def chrome_running(path):
+    """True while a Chrome holds profile `path`: Windows, Chrome's lockfile (portable.profile_busy);
+    elsewhere a SingletonLock pid whose command line carries this profile."""
+    if portable.WINDOWS:
+        return portable.profile_busy(path)
+    pid = lock_holder(path)
+    return pid is not None and holds_profile(pid, path)
+
+
 def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, stop=None,
-                      port=0, onscreen=False):
+                      port=0, onscreen=False, url=None):
     """Start Chrome on profile `path` without activating it; return its DevTools endpoint
     (`http://127.0.0.1:<port>`, from the DevToolsActivePort file Chrome writes into the profile).
     Raises OSError when `open` fails or no port appears within `timeout`; before that last raise the
@@ -816,7 +881,7 @@ def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sl
     import subprocess
     path = Path(path)
     port_file = _fresh_port_file(path)
-    done = (run or subprocess.run)(background_command(app, path, port, onscreen), stdin=subprocess.DEVNULL,
+    done = (run or subprocess.run)(background_command(app, path, port, onscreen, url), stdin=subprocess.DEVNULL,
                                    capture_output=True, text=True, timeout=timeout)
     if done.returncode != 0:
         raise OSError("open -g failed: " + (done.stderr or "").strip()[:200])
@@ -852,6 +917,8 @@ def mcp_command(config, directory, operation=None):
     command = [str(node_path(config)), str(mcp_cli(config)), "--browser", settings(config).get("browser", "chrome")]
     if settings(config).get("isolated"):
         command.append("--isolated")  # tests only: an in-memory profile
+    elif (config or {}).get(CDP_ENDPOINT):
+        command.extend(["--cdp-endpoint", str(config[CDP_ENDPOINT])])   # Windows: the Chrome Sidedoor started
     elif not background_launch(config):
         command.extend(["--user-data-dir", str(profile(config))])
     if settings(config).get("headless"):
@@ -909,7 +976,7 @@ def codex_options(config, directory, operation, claim=None, human_check=None):
     import browser_guard
     import user_profile
     argv = guard_command(config, directory, operation, claim, human_check)
-    tools = [tool for tool in browser_guard.TOOLS if operation != "webmail" or tool not in CODE_TOOLS]
+    tools = [tool for tool in browser_guard.TOOLS if operation not in CODE_FREE_OPERATIONS or tool not in CODE_TOOLS]
     if claim:
         tools.append(browser_guard.ARM_TOOL)
     if human_check:

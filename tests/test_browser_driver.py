@@ -655,11 +655,10 @@ class RealBrowserTests(unittest.TestCase):
         saved = json.loads(fixture.database.execute("SELECT result FROM desktop_requests WHERE request_id=?", (request_id,)).fetchone()[0])
         self.assertTrue(saved["acknowledged"])
 
-    def test_5_forty_fields_finish_well_under_seventy_calls(self):
+    def test_5_forty_fields_finish_in_a_few_calls(self):
         fixture, request_id, summary, seen = self.submit(questions=40)
         self.assertEqual(summary["state"], "COMPLETE", summary)
         self.assertFalse(seen["fill"][0], seen["fill"][1])
-        self.assertLess(seen["calls"], application_browser.MAX_TOOLS)
         self.assertLessEqual(seen["calls"], 12)
         body = json.loads(self.pages.posts[0]["body"])
         self.assertEqual([body["q%d" % i] for i in range(1, 41)], ["Answer %d" % i for i in range(1, 41)])

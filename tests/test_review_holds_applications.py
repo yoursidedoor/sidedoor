@@ -16,6 +16,7 @@ import hashlib
 import html
 import importlib.util
 import json
+import re
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -367,6 +368,20 @@ class ApprovalsCard(Base):
         [submitted] = self.submits()
         self.assertEqual(("Within 3 months", ["TypeScript", "Rust"]),
                          (submitted["answers"][field(START)], submitted["answers"][field(STACK)]))
+
+
+    def test_a_date_question_is_a_date_picker_holding_the_drafted_date(self):
+        graduated = {"id": "grad", "required": True, "semantic": "graduation_date", "label": "Graduation date",
+                     "answer_type": "date", "control": "text", "choices": []}
+        self.questions = [START, graduated]
+        DRAFTED["graduation_date"] = "2016-05-15"
+        self.addCleanup(DRAFTED.pop, "graduation_date")
+        self.review_mode()
+        self.discover()
+        self.cycle()
+        page = html.unescape(self.client.get("/approvals").text)
+        name = "answer:" + field(graduated)
+        self.assertRegex(page, r'<input type="date"[^>]*name="%s" value="2016-05-15"' % re.escape(name))
 
 
 if __name__ == "__main__":

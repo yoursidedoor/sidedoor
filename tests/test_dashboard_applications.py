@@ -160,6 +160,25 @@ class GatherTest(unittest.TestCase):
                 self.assertTrue(item["todo"], item["key"])
         self.assertIsNone(RAW_CODE.search(visible_text(self.gather())))
 
+    def test_a_submit_stopped_before_arming_says_nothing_was_sent(self):
+        db = self.database
+        now = self.now.isoformat()
+        for key, armed in (("stopped", None), ("maybe-sent", now)):
+            job(db, key, "RECONCILE", "FILE_UPLOAD_FAILED")
+            db.execute("INSERT INTO application_attempts(attempt_id,job_key,idempotency_key,state,started_at) "
+                       "VALUES (?,?,?,'SUBMITTING',?)", ("a-" + key, key, key, now))
+            db.execute("INSERT INTO desktop_requests(request_id,binding,job_key,operation,payload,state,created_at,expires_at,"
+                       "armed_at,attempt_id) VALUES (?,'b',?,'submit','{}','CONSUMED',?,?,?,?)",
+                       ("r-" + key, key, now, now, armed, "a-" + key))
+        db.commit()
+        views = {item["key"]: item for item in self.gather()["list"]["jobs"]}
+        jobs = {key: item["todo"] for key, item in views.items()}
+        self.assertIn("nothing was sent", jobs["stopped"])
+        self.assertIn("try again", jobs["stopped"])
+        self.assertEqual(jobs["maybe-sent"], "Sidedoor is checking whether the application went through. Nothing to do.")
+        self.assertEqual(views["stopped"]["state"], "Waiting to retry")
+        self.assertEqual(views["maybe-sent"]["state"], "Waiting for confirmation")
+
     def test_only_a_verified_receipt_is_submitted(self):
         """Worked example 1: an acknowledged submit stays "Waiting for confirmation" with no receipt."""
         db = self.database

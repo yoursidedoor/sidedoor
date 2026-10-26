@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 from urllib.parse import unquote
 
 import portable
@@ -189,6 +190,34 @@ def command(config, directory):
                                          str(directory / "output.json"), "-"])
 
 
+def communicate(worker, prompt, timeout, directory, arguments, clock=time.monotonic):
+    """Send the prompt and wait for the worker until `timeout` seconds have passed. A support email's
+    sign-in wait (support_email.SignInWait) writes its SIGNIN_FILE in `directory`: the deadline then moves
+    to that file's `until`, never past SIGNIN_SECONDS + SIGNIN_FINISH beyond the first deadline (as
+    application_browser.execute does for the CAPTCHA wait)."""
+    import support_email
+    deadline = clock() + timeout
+    ceiling = deadline + support_email.SIGNIN_SECONDS + support_email.SIGNIN_FINISH
+    extension = Path(directory) / support_email.SIGNIN_FILE
+    pending = prompt
+    while True:
+        if extension.exists():
+            try:
+                until = dt.datetime.fromisoformat(json.loads(extension.read_text())["until"])
+                waited = (until - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                deadline = min(ceiling, max(deadline, clock() + waited))
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(arguments, timeout)
+        try:
+            worker.communicate(pending, timeout=min(0.5, remaining))
+            return
+        except subprocess.TimeoutExpired:
+            pending = None
+
+
 def execute(config, prompt, directory, timeout):
     environment = reply_worker._environment()
     worker = None
@@ -205,7 +234,7 @@ def execute(config, prompt, directory, timeout):
                 env=openai_auth.environment(arguments, environment),
                 **portable.worker_spawn_options())
             portable.contain(worker)
-            worker.communicate(prompt, timeout=timeout)
+            communicate(worker, prompt, timeout, directory, arguments)
             if worker.returncode:
                 trace.flush()
                 errors.flush()

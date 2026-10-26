@@ -1629,7 +1629,7 @@ def main(argv=None):
                              "Scopes the Gmail history sweep too, not just the job loop.")
     parser.add_argument("--no-browser", action="store_true", help="dashboard, setup, serve: print the link without opening it")
     parser.add_argument("--start", action="store_true",
-                        help="serve: start the scheduler at once instead of waiting for [Start] (start at login, E5.T2)")
+                        help="serve: start the scheduler at once (start at login, E5.T2); serve already does once Setup's Start succeeded")
     parser.add_argument("--at-login", action="store_true",
                         help="serve, supervise: started by the start-at-login entry (E5.T2)")
     parser.add_argument("--home", help="serve, supervise: the Sidedoor home the start-at-login entry was registered for")
@@ -1655,11 +1655,12 @@ def main(argv=None):
         # FastAPI and uvicorn are imported only for these commands. `setup` (E4.T1 option C) asks
         # nothing in the terminal: it creates the home and the dashboard token, starts the dashboard
         # (or reopens the running one) and opens it on the Setup page. `serve` is the Sidedoor
-        # process (E5.T1): the dashboard plus the scheduler loop, started at once with --start;
-        # `dashboard` is `serve` without --start.
+        # process (E5.T1): the dashboard plus the scheduler loop, started at once once Setup's Start
+        # has succeeded (what opening the app runs; owner, 2026-10-25); `dashboard` and `setup` only
+        # serve the pages until [Start].
         import dashboard
         return dashboard.serve(open_browser=not args.no_browser, path="/setup" if args.command == "setup" else "/",
-                               start=args.start, tray=True)
+                               start=args.start, tray=True, resume=args.command == "serve")
     # Everything this command reads or writes is in the Sidedoor home (E9.T1); data an older
     # version left in the code folder moves there first, once (paths.migrate).
     try:

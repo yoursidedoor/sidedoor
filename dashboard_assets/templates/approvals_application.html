@@ -41,6 +41,8 @@
     <select class="approval-a-control" form="{{ fid }}" name="{{ name }}" aria-labelledby="{{ qid }}">{% for o in q.options %}<option value="{{ o }}"{% if chosen(q, o) == "True" %} selected{% endif %}>{{ o }}</option>{% endfor %}</select>
     {% elif q.control in ("radio", "checkbox") %}
     <span class="approval-a-control approval-a-choices">{% for o in q.options %}<label><input type="{{ q.control }}" form="{{ fid }}" name="{{ name }}" value="{{ o }}"{% if chosen(q, o) == "True" %} checked{% endif %}> {{ o }}</label>{% endfor %}</span>
+    {% elif q.control == "date" %}
+    <input type="date" class="approval-a-control" form="{{ fid }}" name="{{ name }}" value="{{ q.answer }}" aria-labelledby="{{ qid }}">
     {% else %}
     <textarea class="approval-a-control" form="{{ fid }}" name="{{ name }}" rows="{{ 4 if q.control == 'textarea' else 1 }}" aria-labelledby="{{ qid }}">{{ q.answer }}</textarea>
     {% endif %}

@@ -1367,6 +1367,88 @@ def reinspection_grant(database, draft_id):
     return None
 
 
+INSPECTION_WORKER = "outreach-draft-inspection"
+INSPECTION_TRIES = 7
+JUDGE_REJECTED = "AGENT_DECISION_NOT_READY"
+REPLACED_BY_REWRITE = "REPLACED_BY_REWRITE"
+
+
+def judge_rejection_only(blocker):
+    """True when a check's recorded blocker is the judge's rejection of the note and nothing else
+    (the blocker is the `;`-joined gate codes prepare_drafts records)."""
+    codes = [code for code in str(blocker or "").split(";") if code]
+    return bool(codes) and all(code == JUDGE_REJECTED for code in codes)
+
+
+def _tries_used(database, task):
+    """Real tries a task spent: its claims minus the ones a compute or provider wait handed back."""
+    refunds = database.execute("SELECT COUNT(*) FROM workflow_task_events WHERE task_id=? AND event IN (?,?)",
+                               (task["task_id"], "PROVIDER_USAGE_LIMIT_WAIT", "COMPUTE_WAIT")).fetchone()[0]
+    return max(0, task["attempts"] - refunds)
+
+
+def _carried_tries(database, draft_id):
+    """Tries the checks of the notes this draft rewrote already spent (owner, 2026-10-25: a rejected
+    note handed back for a rewrite is one check, so its rewrites share its 7 tries). Read from the
+    REPLACED_BY_REWRITE record that closed the check of the note this draft replaced."""
+    found = database.execute("""SELECT detail FROM workflow_task_events WHERE event='CANCELLED'
+        AND json_extract(detail,'$.reason')=? AND json_extract(detail,'$.replacement_draft_id')=?
+        ORDER BY id DESC LIMIT 1""", (REPLACED_BY_REWRITE, draft_id)).fetchone()
+    tries = json.loads(found[0]).get("chain_tries") if found else 0
+    return tries if type(tries) is int and 0 <= tries < INSPECTION_TRIES else 0
+
+
+def _close_as_replaced(database, task_id, now, detail):
+    """Close a waiting check whose note was replaced by a newer version (caller commits). The
+    replaced version is never inspected again (prepare_drafts reads only each person's latest
+    version), so the check ends here, CANCELLED like any other superseded task, and can never later
+    run out of tries and show as given up."""
+    changed = database.execute("""UPDATE workflow_tasks SET status='CANCELLED',blocker=?,next_action=?,next_at=NULL,
+        token_hash=NULL,lease_until=NULL,updated_at=? WHERE task_id=? AND worker=? AND status IN ('QUEUED','RETRY_WAIT')
+        AND token_hash IS NULL""",
+        (REPLACED_BY_REWRITE, "None: a newer version of this note replaced it and is checked on its own",
+         now.isoformat(), task_id, INSPECTION_WORKER))
+    if changed.rowcount:
+        workflow_tasks.record(database, task_id, "CANCELLED", now.isoformat(), dict(detail, reason=REPLACED_BY_REWRITE))
+    return bool(changed.rowcount)
+
+
+def close_rewritten_check(database, task_id, replacement, now):
+    """The judge rejected this check's note and a rewrite replaced it (caller commits). The record
+    names the rewrite and the tries spent so far, which its own check inherits (_carried_tries)."""
+    task = database.execute("SELECT * FROM workflow_tasks WHERE task_id=?", (task_id,)).fetchone()
+    if task is None:
+        return False
+    previous = task["parent_run_id"].split(":", 1)[1] if task["parent_run_id"].startswith("outreach-draft:") else None
+    chain = (_carried_tries(database, previous) if previous else 0) + _tries_used(database, task)
+    return _close_as_replaced(database, task_id, now, {
+        "replacement_draft_id": outreach_promotion._source(replacement)["draft_id"],
+        "replacement_version": replacement["version"], "chain_tries": chain, "previous_blocker": task["blocker"]})
+
+
+def close_replaced_rejections(database, now):
+    """Close the judge-rejected checks waiting on a note a newer version already replaced: the ones
+    left from before close_rewritten_check existed (2026-10-25: Mahadev Konar's check stayed
+    RETRY_WAIT after its rewrite was sent). Linked by the check's own input (rw_drafts identity and
+    version), never by text. Returns the closed task ids."""
+    closed = []
+    with database:
+        for task in database.execute("SELECT task_id,blocker,inputs FROM workflow_tasks WHERE worker=? AND status='RETRY_WAIT'",
+                                     (INSPECTION_WORKER,)).fetchall():
+            if not judge_rejection_only(task["blocker"]):
+                continue
+            try:
+                source = json.loads(task["inputs"])[0]
+                identity, version = source["source"].split("rw_drafts:", 1)[1], source["version"]
+            except (ValueError, TypeError, KeyError, IndexError):
+                continue
+            latest = database.execute("SELECT MAX(version) FROM rw_drafts WHERE identity=?", (identity,)).fetchone()[0]
+            if type(version) is int and type(latest) is int and latest > version and _close_as_replaced(
+                    database, task["task_id"], now, {"replacement_version": latest, "previous_blocker": task["blocker"]}):
+                closed.append(task["task_id"])
+    return closed
+
+
 def enqueue_inspection(database, row, draft, source, now):
     """The first guarded step for a draft: bounded local-records history inspection."""
     grant = reinspection_grant(database, source["draft_id"])
@@ -1381,7 +1463,9 @@ def enqueue_inspection(database, row, draft, source, now):
         # 7 attempts on the growing backoff, not 3 then a grave (owner, 2026-09-23). Three
         # failures made the task EXHAUSTED with next_at NULL and nothing re-arms it: 6 of 7
         # outreach tasks are in that state and 4 of 5 people became permanently uncontactable.
-        effect="READ", max_attempts=7)
+        # A rewrite of a rejected note continues that note's check, so it gets only the tries
+        # left (2026-10-25); the record it reads is immutable, so every call computes the same.
+        effect="READ", max_attempts=max(1, INSPECTION_TRIES - _carried_tries(database, source["draft_id"])))
     # No deadline for this check, only its 7 tries (owner, 2026-09-28); one its old deadline
     # ended with tries left is reopened here, keeping its attempts and failures.
     workflow_tasks.reopen_without_deadline(database, task_id, now.isoformat())
@@ -1411,6 +1495,7 @@ def prepare_drafts(root, database, config, client, execute=None, now=None, *, hi
     adapter = Adapter(root, database, config, client, execute, history_collector=history_collector,
                       port=port, port_drafts=port is not None)
     output = {"state": "COMPLETE", "items": [], "contexts": {}, "campaign_candidates": []}
+    output["replaced_checks"] = close_replaced_rejections(database, now)
     rows = database.execute("SELECT * FROM rw_drafts WHERE version=(SELECT MAX(version) FROM rw_drafts latest WHERE latest.identity=rw_drafts.identity) ORDER BY identity").fetchall()
     attempts = 0
     # One repair turn per recipient per cycle. A repaired version is appended to `rows` so it is
@@ -1539,7 +1624,10 @@ def prepare_drafts(root, database, config, client, execute=None, now=None, *, hi
                     next_action=(proof or {}).get("next_action", "Retry bounded authenticated history inspection; do not send") if blocker else None)
             item.update(_task_summary(database, task_id))
             item["outcome"] = "SUPPRESSED" if suppressed else "CAPABILITY_GATED" if (proof or {}).get("capability_gates") else "READY" if not blocker else "HELD"
-            if blocker and not suppressed and row["identity"] not in repaired_identities:
+            # Only while the check has tries left (2026-10-25): its rewrites share its 7 tries, so a
+            # note the judge keeps rejecting stops here, EXHAUSTED, and Failures says so.
+            if (blocker and not suppressed and row["identity"] not in repaired_identities
+                    and item.get("state") == "RETRY_WAIT"):
                 # The judge rejected the note, so hand its objection back to the composer instead
                 # of stopping here (owner, 2026-09-23). One turn per identity per cycle; the new
                 # version is appended to this run's work list so it is judged in the SAME run,
@@ -1549,6 +1637,11 @@ def prepare_drafts(root, database, config, client, execute=None, now=None, *, hi
                 repair = _draft_repair_turn(root, database, config, row, draft, proof, execute, now)
                 if repair is not None:
                     repaired_identities.add(row["identity"])
+                    # The rewrite replaces this note, so its check ends now, as replaced; the
+                    # rewrite is checked as its own task with the tries left.
+                    with database:
+                        close_rewritten_check(database, task_id, repair, now)
+                    item.update(_task_summary(database, task_id))
                     rows.append(repair)
                     item["repair"] = {"state": "RECOMPOSED", "version": repair["version"],
                                       "rejection": (proof or {}).get("agent_decision")}

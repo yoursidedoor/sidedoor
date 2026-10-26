@@ -351,7 +351,7 @@ class SetupCommandTest(unittest.TestCase):
             with mock.patch.object(sys, "argv", ["sidedoor", command, "--no-browser"]), \
                     mock.patch.object(dashboard, "serve", return_value=0) as serve:
                 self.assertEqual(orchestrator.main(), 0)
-            serve.assert_called_once_with(open_browser=False, path=path, start=False, tray=True)
+            serve.assert_called_once_with(open_browser=False, path=path, start=False, tray=True, resume=False)
 
 
 if __name__ == "__main__":

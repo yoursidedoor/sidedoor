@@ -1061,13 +1061,15 @@ def announce(url, open_browser):
         webbrowser.open(url)
 
 
-def serve(open_browser=True, home=None, path="/", start=False, scheduler=None, tray=False):
+def serve(open_browser=True, home=None, path="/", start=False, scheduler=None, tray=False, resume=False):
     """Run the dashboard on 127.0.0.1:47823 until interrupted, or reopen the one already running.
     `sidedoor setup` passes path "/setup" (E4.T1 option C).
 
     This is the Sidedoor process (E5.T1 option B): it installs the scheduler loop
-    (`scheduler_loop`), started by [Start] or at once with `start` (`sidedoor serve --start`, what
-    start at login registers, E5.T2) once Setup is finished. When the dashboard stops (Quit, Ctrl-C,
+    (`scheduler_loop`), started by [Start], or at once once Setup's Start has succeeded: with `start`
+    (`sidedoor serve --start`, what start at login registers, E5.T2) or `resume` (every `sidedoor
+    serve`, which is what opening the app runs: after an update, a crash or a reopen it keeps running,
+    owner 2026-10-25). `sidedoor dashboard` and `setup` pass neither and only serve the pages. When the dashboard stops (Quit, Ctrl-C,
     SIGTERM) the loop stops at once, any running job child finishes on its own (owner, 2026-10-22,
     option (a)) and the exit code is 0, so the OS never restarts a deliberate stop; a crash exits
     non-zero. SIGTERM is a normal stop for the whole of serve (login_item.clean_stop, L4).
@@ -1082,7 +1084,7 @@ def serve(open_browser=True, home=None, path="/", start=False, scheduler=None, t
     os.environ[paths.DASHBOARD_PID_VARIABLE] = str(os.getpid())
     try:
         with login_item.clean_stop():
-            return _serve(open_browser, home, path, start, scheduler, tray)
+            return _serve(open_browser, home, path, start, scheduler, tray, resume)
     except KeyboardInterrupt:
         return 0
 
@@ -1244,7 +1246,7 @@ def prepare_data(home, listener=None, secret=None, announce_waiting=None, sleep=
             page.stop()
 
 
-def _serve(open_browser, home, path, start, scheduler, tray=False):
+def _serve(open_browser, home, path, start, scheduler, tray=False, resume=False):
     home_path = Path(home) if home is not None else user_profile.home()
     if login_item.unregistered_login_launch(home=home_path):
         return 0  # start at login was turned off from inside the session: a KeepAlive restart ends here (L3)
@@ -1306,9 +1308,11 @@ def _serve(open_browser, home, path, start, scheduler, tray=False):
         scheduler_loop.start_license_heartbeat(root, home=home)  # E8.T2: checks once now, then daily
         import update_check
         update_check.start(home=home)  # E9.T3: checks once now, then every 30 minutes; never blocks a page
-        # Wait for Start (owner, 2026-10-22): `--start` starts the loop only once Setup's own Start
-        # (step 11) has succeeded; before that, that Start does.
-        if (start or start_requested) and setup_steps.started(home):
+        # Wait for Start (owner, 2026-10-22): nothing runs until Setup's own Start (step 11) has
+        # succeeded. After that, every app open (`resume`, `sidedoor serve`) starts the loop (owner,
+        # 2026-10-25: after an update, a crash or a reopen it keeps running); Pause, which is saved,
+        # still holds new work. `sidedoor dashboard` and `setup` only serve the pages.
+        if (start or start_requested or resume) and setup_steps.started(home):
             loop.start()
         if not announced:  # the waiting page was announced already: it turns into the dashboard
             announce(url, open_browser)

@@ -135,6 +135,12 @@ CODE_WORDS = {
     "SUBMISSION_OUTCOME_UNKNOWN": "Sidedoor could not confirm whether the application went through.",
     "SUBMISSION_REPORTED_FAILED": "The application page reported a problem after Submit.",
     "SUBMISSION_OBSERVATION_LOST": "Sidedoor lost track of the submit before seeing the result.",
+    # Tries that failed and are retried (owner, 2026-10-25: counted on Failures)
+    "APPLICATION_BROWSER_EXECUTOR_FAILED": "The AI running the browser stopped with an error before it finished.",
+    "APPLICATION_BROWSER_FAILED": "The browser session stopped with an error before it finished.",
+    "APPLICATION_TOOL_LIMIT": "The browser session used all of its allowed steps before it finished.",
+    "FORM_UNAVAILABLE": "The application form could not be opened.",
+    "RECONCILED_ABSENT": "The submit try did not go through. Sidedoor checked and found no application at the site.",
     # Holds that need you
     "REQUIRED_ELIGIBILITY_ANSWER": "Sidedoor is not sure you can work in this role's location.",
     "DESIGNATED_RESUME_MISMATCH": "Your résumé file changed since you set it.",
@@ -451,6 +457,9 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
     if state == "WAITING_BROWSER":
         return ("Sidedoor will continue when the browser is free" + (", next check " + fmt(next_at) if next_at else "") + ".",
                 None, None)
+    if state in ("SUBMITTING", "RECONCILE") and "never_armed" in row.keys() and row["never_armed"]:
+        return ("Sidedoor stopped before sending this application, so nothing was sent. It will try again "
+                "automatically. Nothing to do.", None, None)
     if state in ("SUBMITTING", "RECONCILE"):
         return ("Sidedoor is checking whether the application went through. Nothing to do.", None, None)
     if state == "QUEUED":
@@ -489,7 +498,8 @@ def job_view(row, owner_keys, asked, live_reading, fmt):
         words, tone = "Blocked, needs you", "error"
     elif reading:
         words, tone = "Reading now", "info"
-    elif state == "BLOCKED":
+    elif state == "BLOCKED" or (state in ("SUBMITTING", "RECONCILE") and "never_armed" in row.keys() and row["never_armed"]):
+        # A submit that stopped before arming sent nothing: it waits to retry, not for a confirmation.
         words, tone = "Waiting to retry", "warning"
     else:
         words, tone = STATE_WORDS.get(state, "In progress"), STATE_TONES.get(state, "muted")
@@ -729,22 +739,28 @@ def closed_reason(reader, key, state, code, closing=None):
     if note:
         return note
     if state in ("EXHAUSTED", "ABANDONED"):
-        # The real stop of the last try (owner, 2026-10-24): a submit's own stop is held as RECONCILE,
-        # and the RETRY_WAIT after it only says the try is over (RECONCILED_ABSENT), so that wrapper
-        # is skipped; a closed job is never described with "will retry" words.
-        for (detail,) in reader.rows("SELECT detail FROM application_events WHERE job_key=? AND event IN "
-                                     "('BLOCKED','RETRY_WAIT','RECONCILE') ORDER BY id DESC LIMIT 20", (key,),
-                                     "application_events"):
-            last = overview._json(detail) or {}
-            code = _text(last.get("code"))
-            if not code or code_root(code) in RETRY_ONLY_CODES:
-                continue
-            if code_root(code) == "INVALID_SUPPLIED_ANSWER":
-                refused = refused_question(reader, key)
-                if refused:
-                    return refused
-            words = CODE_WORDS.get(code_root(code)) if code != FORM_NOT_READABLE else FORM_NOT_READABLE_WORDS
-            return "Its last try stopped on this: " + (words or CLOSED_PROBLEM_WORDS)
+        return last_try_reason(reader, key)
+    return None
+
+
+def last_try_reason(reader, key):
+    """The real stop of a closed job's last try, in plain words, or None (owner, 2026-10-24): a
+    submit's own stop is held as RECONCILE, and the RETRY_WAIT after it only says the try is over
+    (RECONCILED_ABSENT), so that wrapper is skipped; a closed job is never described with "will
+    retry" words."""
+    for (detail,) in reader.rows("SELECT detail FROM application_events WHERE job_key=? AND event IN "
+                                 "('BLOCKED','RETRY_WAIT','RECONCILE') ORDER BY id DESC LIMIT 20", (key,),
+                                 "application_events"):
+        last = overview._json(detail) or {}
+        code = _text(last.get("code"))
+        if not code or code_root(code) in RETRY_ONLY_CODES:
+            continue
+        if code_root(code) == "INVALID_SUPPLIED_ANSWER":
+            refused = refused_question(reader, key)
+            if refused:
+                return refused
+        words = CODE_WORDS.get(code_root(code)) if code != FORM_NOT_READABLE else FORM_NOT_READABLE_WORDS
+        return "Its last try stopped on this: " + (words or CLOSED_PROBLEM_WORDS)
     return None
 
 
@@ -806,8 +822,17 @@ def _rows_for(reader, keys):
         # Named columns: an older table without one fails here as a DatabaseError (the section degrades).
         approval = ("(SELECT snapshot FROM application_approvals a WHERE a.job_key=application_jobs.job_key AND a.state='WAITING')"
                     if reader.has("application_approvals") else "NULL")
-        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,receipt,updated_at,%s AS approval "
-                               "FROM application_jobs WHERE job_key IN (%s)" % (approval, ",".join("?" * len(chunk))),
+        # The job's current submit session ended without the arm guard ever opening: submit is reachable
+        # only through the arm guard, so nothing was sent (`applications._never_armed_submission`).
+        never_armed = ("(SELECT request.armed_at IS NULL AND request.state IN ('DONE','CONSUMED','UNKNOWN','FAILED','EXPIRED') "
+                       "FROM desktop_requests AS request JOIN application_attempts AS attempt "
+                       "ON attempt.attempt_id=request.attempt_id AND attempt.job_key=request.job_key "
+                       "WHERE request.job_key=application_jobs.job_key AND request.operation='submit' "
+                       "AND attempt.state='SUBMITTING' ORDER BY attempt.started_at DESC,request.rowid DESC LIMIT 1)"
+                       if reader.has("desktop_requests", "application_attempts") else "NULL")
+        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,receipt,updated_at,%s AS approval,"
+                               "%s AS never_armed FROM application_jobs WHERE job_key IN (%s)"
+                               % (approval, never_armed, ",".join("?" * len(chunk))),
                                tuple(chunk), "application_jobs"):
             rows[row["job_key"]] = row
     return [rows[key] for key in keys if key in rows]

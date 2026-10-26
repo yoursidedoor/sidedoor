@@ -474,6 +474,55 @@ class Item8WebmailIsReadOnly(unittest.TestCase):
         options = browser_runtime.codex_options({}, scratch(self), "webmail")
         self.assertFalse([option for option in options if "browser_run_code_unsafe" in option or "browser_evaluate" in option])
 
+    def test_the_support_email_is_never_offered_or_run_the_code_tools(self):
+        guard = InProcessGuard(self, "support_email", '- textbox "Message Body" [ref=e1]\n')
+        names = {tool["name"] for tool in guard.client.request("tools/list")["tools"]}
+        self.assertNotIn("browser_evaluate", names)
+        self.assertNotIn("browser_run_code_unsafe", names)
+        self.assertIn("browser_type", names)
+        error, text = guard.client.call("browser_evaluate", {"function": "() => { document.body.textContent = 'b'; }"})
+        self.assertTrue(error)
+        self.assertIn("not available", text)
+        self.assertTrue(guard.client.call("browser_run_code_unsafe", {"code": "async (page) => 1"})[0])
+        self.assertEqual(guard.forwarded(), [])
+        self.assertFalse(guard.client.call("browser_type", {"target": "e1", "text": "Line one\nLine two"})[0])
+        self.assertEqual([call["tool"] for call in guard.forwarded()], ["browser_type"])
+        options = browser_runtime.codex_options({}, scratch(self), "support_email")
+        self.assertFalse([option for option in options if "browser_run_code_unsafe" in option or "browser_evaluate" in option])
+        self.assertTrue([option for option in options if "browser_type" in option])
+
+    def test_the_support_email_sign_in_wait_is_offered_without_application_side_effects(self):
+        import support_email
+        directory = scratch(self)
+        context = directory / support_email.SIGNIN_CONTEXT
+        context.write_text(json.dumps({"directory": str(directory)}))   # no root, request, claim or job
+        guard = InProcessGuard(self, "support_email", '- heading "Choose an account" [ref=e1]\n', human_check=str(context))
+        self.assertIsInstance(guard.proxy.human_check_wait, support_email.SignInWait)
+        slept = []
+        guard.proxy.human_check_wait.sleep = slept.append
+        tools = {tool["name"]: tool for tool in guard.client.request("tools/list")["tools"]}
+        self.assertIn("wait_for_human_check", tools)
+        self.assertIn("sign in", tools["wait_for_human_check"]["description"])
+        self.assertNotIn("owner", tools["wait_for_human_check"]["description"])
+        self.assertFalse(set(tools) & {"browser_evaluate", "browser_run_code_unsafe"})
+        error, text = guard.client.call("wait_for_human_check", {})
+        self.assertFalse(error, text)
+        self.assertIn("call wait_for_human_check again", text)
+        self.assertEqual(slept, [support_email.SIGNIN_INTERVAL])
+        self.assertTrue((directory / support_email.SIGNIN_FILE).exists())
+        self.assertEqual(guard.forwarded(), [])
+        self.assertFalse(guard.proxy.offscreen or guard.proxy.headless)   # nothing is placed or reopened
+        options = browser_runtime.codex_options({}, scratch(self), "support_email", human_check=str(context))
+        self.assertIn("mcp_servers.browser.tool_timeout_sec=630", options)
+        self.assertTrue([option for option in options if "wait_for_human_check" in option])
+        self.assertFalse([option for option in options if "browser_run_code_unsafe" in option or "browser_evaluate" in option])
+        with mock.patch.object(browser_runtime, "background_launch", return_value=True):   # macOS, the real profile
+            argv = browser_runtime.guard_command({}, scratch(self), "support_email", human_check=str(context))
+            self.assertTrue(browser_runtime.offscreen({}))
+        self.assertIn("--background-chrome", argv)
+        self.assertNotIn("--offscreen", argv)
+        self.assertNotIn("--headless-user-agent", argv)
+
     def test_the_email_check_trace_is_checked_and_its_clicks_recorded(self):
         root = scratch(self)
 

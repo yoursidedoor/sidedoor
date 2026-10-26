@@ -53,6 +53,10 @@ def task(database, task_id, worker, status, updated, blocker=None, next_at=None,
                          (task_id, at.isoformat(), kind, detail))
 
 
+def app_event(database, key, kind, at, detail):
+    database.execute("INSERT INTO application_events(job_key,at,event,detail) VALUES (?,?,?,?)", (key, at, kind, json.dumps(detail)))
+
+
 def research_day(database, day, state, attempt_id, attempt_state, started, result=None, retry=None, waits=0):
     database.execute("INSERT INTO research_days(day,state,attempts,attempt_id,next_retry_at,completed_at,compute_wait_attempts) "
                      "VALUES (?,?,?,?,?,NULL,?)", (day, state, 1 + waits, attempt_id, retry.isoformat() if retry else None, waits))
@@ -192,8 +196,9 @@ class GatherTest(GatherBase):
         self.assertEqual(you["text"], "Acme, Own: Your résumé file changed since you set it.")
         self.assertEqual(you["fix"], {"label": "Open Settings", "href": "/settings#resume"})
         texts = [item["text"] for item in self.items(view, "applications")]
-        # D5: given-up jobs live under Applications only; F4: an unknown code is a hold, not a failure.
-        self.assertEqual(texts, ["Acme, Fail: The site did not take the résumé upload."])
+        # Given-up jobs are listed too (owner 2026-10-25); F4: an unknown code is a hold, not a failure.
+        self.assertEqual(sorted(texts), ["Acme, Fail: The site did not take the résumé upload.",
+                                         "Acme, Gone: The site refused the résumé upload three times."])
         for item in self.items(view, "applications"):
             self.assertNotRegex(item["text"] + item["todo"], r"[A-Z]{3,}_[A-Z_]+|ValueError")
 
@@ -280,10 +285,52 @@ class ReviewFixTest(GatherBase):
                               "VALUES (?,?,?,?,?,?,?)", (key, "acme", key, json.dumps({"company": "Acme", "role": key}), state,
                                                          code, (updated or self.now - dt.timedelta(hours=1)).isoformat()))
 
-    def test_d5_given_up_jobs_are_not_failures(self):
-        self.job_row("gone", "EXHAUSTED", "FILE_UPLOAD_FAILED_3_TIMES")
+    def test_given_up_jobs_are_failures_but_not_rejections_or_closures(self):
+        # Owner 2026-10-25 (replacing D5): Together AI's shape, three tool-limit reads then RETRIES_EXHAUSTED.
+        self.job_row("together", "EXHAUSTED", "RETRIES_EXHAUSTED")
+        for hours in (5, 4, 3):
+            app_event(self.database, "together", "BLOCKED", (self.now - dt.timedelta(hours=hours)).isoformat(),
+                      {"code": "APPLICATION_TOOL_LIMIT", "route": "ORDINARY"})
         self.job_row("left", "ABANDONED", "ACCESS_BLOCKED_3_TIMES")
-        self.assertTrue(self.gather()["nothing"])
+        app_event(self.database, "left", "BLOCKED", (self.now - dt.timedelta(hours=2)).isoformat(),
+                  {"code": "CAPTCHA_REQUIRED", "route": "ORDINARY"})
+        self.job_row("mine", "ABANDONED", "APPLICATION_REJECTED_BY_YOU")
+        self.job_row("no", "INELIGIBLE", "OUTSIDE_CONFIRMED_SCOPE")
+        self.job_row("same", "DUPLICATE", "SAME_POSTING_AS_EXISTING_JOB")
+        self.job_row("old", "EXHAUSTED", "RETRIES_EXHAUSTED", self.now - dt.timedelta(days=15))
+        items = {item["refs"]["job_key"]: item for item in self.items(self.gather(), "applications")}
+        self.assertEqual(sorted(items), ["left", "together"])
+        together = items["together"]
+        self.assertEqual(together["text"], "Acme, together: Sidedoor used all of its tries.")
+        self.assertEqual(together["todo"], "Nothing was sent. Sidedoor will not try this one again.")
+        self.assertEqual(together["count"], 3)
+        self.assertEqual([(r["words"], r["count"]) for r in together["reasons"]],
+                         [("The browser session used all of its allowed steps before it finished.", 3)])
+        self.assertEqual(together["href"], "/applications?job=together")
+        self.assertEqual(items["left"]["reasons"][0]["words"], "The application site asked for a human check.")
+
+    def test_given_up_nothing_sent_only_when_true(self):
+        self.job_row("sent", "EXHAUSTED", "RETRIES_EXHAUSTED")
+        self.database.execute("INSERT INTO application_attempts(attempt_id,job_key,idempotency_key,started_at,state) VALUES ('a','sent','sent',?,?)",
+                              (self.now.isoformat(), "SUBMITTING"))
+        [item] = self.items(self.gather(), "applications")
+        self.assertNotIn("Nothing was sent", item["todo"])
+
+    def test_owner_picked_stops_count_while_retrying(self):
+        codes = ("APPLICATION_BROWSER_EXECUTOR_FAILED", "APPLICATION_BROWSER_FAILED", "RECONCILED_ABSENT",
+                 "FORM_UNAVAILABLE", "APPLICATION_TOOL_LIMIT")
+        for number, code in enumerate(codes):
+            self.job_row("k%d" % number, "RETRY_WAIT", code)
+            for hours in (3, 2):
+                app_event(self.database, "k%d" % number, "RETRY_WAIT", (self.now - dt.timedelta(hours=hours)).isoformat(), {"code": code})
+        self.job_row("login", "BLOCKED", "AUTHENTICATION_REQUIRED")   # D6: not counted while retrying
+        items = {item["refs"]["job_key"]: item for item in self.items(self.gather(), "applications")}
+        self.assertEqual(sorted(items), ["k0", "k1", "k2", "k3", "k4"])
+        for item in items.values():
+            self.assertEqual(item["count"], 2)
+            self.assertNotRegex(item["text"] + item["todo"], r"[A-Z]{3,}_[A-Z_]+|\u2014")
+        self.assertEqual(items["k2"]["text"], "Acme, k2: The submit try did not go through. "
+                                              "Sidedoor checked and found no application at the site.")
 
     def test_d8_the_window_is_fourteen_days(self):
         task(self.database, "old", "reply-monitor", "BLOCKED", self.now - dt.timedelta(days=13), "WORKER_EXCEPTION",
