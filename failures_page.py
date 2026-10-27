@@ -182,7 +182,7 @@ def _plural(count, words):
 
 
 def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=None, detail=None, log=None, href=None,
-          job=None, moments=(), slots=(), code=None, reasons=None, refs=None, log_href=None, calm=None):
+          job=None, moments=(), slots=(), code=None, reasons=None, refs=None, log_href=None, calm=None, all_time=False):
     """One failure. `todo` always says what happens next or what to do; `fix` is {"label", "href"}.
     `job` names the scheduler job ("run", "research", "applications") whose exit this failure
     explains, and `moments` when each such failure happened (F1: one item per real failure). `code` is a
@@ -206,7 +206,8 @@ def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=Non
             "moments": [moment for moment in moments if moment is not None] or ([at] if job and at else []),
             "slots": list(slots), "code": code, "reasons": shown, "reasons_more": more,
             "reasons_href": reasons.more_href if reasons is not None else None, "refs": dict(refs or {}),
-            "log_href": log_href or (shown[0]["log_href"] if shown else None)}
+            "log_href": log_href or (shown[0]["log_href"] if shown else None),
+            "all_time": all_time}   # the count includes answering failures of any age: no "last N days"
 
 
 # --- Recorded causes (2026-10-23: "why dont we display the actual failure reasons?") ---------------
@@ -826,11 +827,23 @@ def application_failures(reader, now, fmt, secrets=()):
         pending[row[0]] = pending.get(row[0], 0) + 1
     asked = set(pending)
     held = set(overview.held_application_keys(reader))
+    import applications
     codes = application_failure_codes()
-    counts, recorded_causes = {}, {}
-    for key, detail, moment in reader.rows("SELECT job_key,detail,at FROM application_events WHERE event IN ('BLOCKED','RETRY_WAIT') "
-                                           "AND at>=?", (overview._prefilter(since),), "application_events"):
+    counts, recorded_causes, answering_retry_holds, answering_failed = {}, {}, {}, {}
+    # Answering failures are counted however old (the running total that decides the card and the
+    # give-up has no window); every other stop only inside the page's window.
+    for key, kind, detail, moment in reader.rows("SELECT job_key,event,detail,at FROM application_events WHERE "
+                                                 "(event IN ('BLOCKED','RETRY_WAIT') AND at>=?) OR event=?",
+                                                 (overview._prefilter(since), applications.ANSWERING_FAILED_EVENT),
+                                                 "application_events"):
         recorded = overview._json(detail) or {}
+        if kind == applications.ANSWERING_FAILED_EVENT:
+            # Each answering failure records its own event, by question set (owner, 2026-10-26).
+            failed = answering_failed.setdefault(key, {})
+            failed[recorded.get("code")] = failed.get(recorded.get("code"), 0) + 1
+            continue
+        if _code(recorded.get("code")) == "ANSWERING_RETRY":
+            answering_retry_holds[key] = answering_retry_holds.get(key, 0) + 1
         if _code(recorded.get("code")) in codes:   # F8: only failed attempts count, never waits or holds
             counts[key] = counts.get(key, 0) + 1
             # Never the event's next_action: it is a note for engineers, not a cause (owner 2026-10-24).
@@ -869,6 +882,11 @@ def application_failures(reader, now, fmt, secrets=()):
                                refs={"job_key": key}, calm="waiting"))
             continue
         code = _code(row["blocker"]) or "APPLICATION_" + str(row["state"])
+        all_time = bool(code == "ANSWERING_RETRY" and answering_failed.get(key, {}).get(row["blocker"]))
+        if all_time:
+            # A repeated retry hold writes no new BLOCKED event: the tries are this question set's failures.
+            counts[key] = (counts.get(key, 0) - answering_retry_holds.get(key, 0)
+                           + answering_failed[key][row["blocker"]])
         causes = Causes(secrets, logs_href("applications", at))
         extra = {"reasons": causes, "refs": {"job_key": key}, "log_href": run_href("job", key)}
         for recorded, moment, error in recorded_causes.get(key, []):
@@ -889,7 +907,7 @@ def application_failures(reader, now, fmt, secrets=()):
             retry = view["next_at"]
             found.append(_item("applications", "%s: %s" % (name, view["problem"]), "Nothing you need to do. " + view["todo"],
                                at, counts.get(key, 1), retry if retry is not None and retry > now else None, fix=link,
-                               href=_job_link(key), code=code, **extra))
+                               href=_job_link(key), code=code, all_time=all_time, **extra))
     return found + given_up_failures(reader, now, fmt, secrets)
 
 
@@ -926,13 +944,30 @@ def given_up_failures(reader, now, fmt, secrets=()):
         log_link = run_href("job", key)
         causes = Causes(secrets, logs_href("applications", at))
         tries = 0
+        gave_up_answering = _code(row["blocker"]) == applications.ANSWERING_GAVE_UP_CODE
+        retry_code = "ANSWERING_RETRY:" + row["blocker"].split(":", 1)[1] if gave_up_answering else None
+        answering = [(code, moment) for code, moment in (
+            ((overview._json(detail) or {}).get("code"), moment) for detail, moment in reader.rows(
+                "SELECT detail,at FROM application_events WHERE job_key=? AND event=? ORDER BY id DESC",
+                (key, applications.ANSWERING_FAILED_EVENT), "application_events"))
+            if isinstance(code, str) and (retry_code is None or code == retry_code)]
         for detail, moment in reader.rows("SELECT detail,at FROM application_events WHERE job_key=? AND event IN "
                                           "('BLOCKED','RETRY_WAIT') ORDER BY id DESC LIMIT 20", (key,), "application_events"):
             recorded = overview._json(detail) or {}
+            if answering and _code(recorded.get("code")) == "ANSWERING_RETRY":
+                continue   # counted below, one per failure
             if _code(recorded.get("code")) in codes:
                 tries += 1
                 causes.add(recorded.get("code"), overview._utc(moment), _error_text(recorded), log_href=log_link)
+        # Each answering failure records its own event (a repeated retry hold writes no new BLOCKED
+        # one): every one of them, however many other events came between; only the given-up question
+        # set's when the job gave up on answering.
+        for _code_seen, moment in answering:
+            tries += 1
+            causes.add(applications.ANSWERING_FAILED_EVENT, overview._utc(moment), None, log_href=log_link)
         why = None
+        if gave_up_answering:   # the reason is the headline; this says what to do (owner pick, 2026-10-26)
+            why = applications_page.closed_reason(reader, key, row["state"], row["blocker"])
         if not causes.found:
             why = applications_page.closed_reason(reader, key, row["state"], row["blocker"],
                                                   applications_page.closing_reason(reader, key, row["state"]))
@@ -943,7 +978,7 @@ def given_up_failures(reader, now, fmt, secrets=()):
         found.append(_item("applications", "%s: %s" % (name, view["closed"]), todo, at, max(1, tries),
                            fix={"label": "Open application", "href": _job_link(key)}, href=_job_link(key),
                            code=_code(row["blocker"]) or "APPLICATION_" + str(row["state"]), reasons=causes,
-                           refs={"job_key": key}, log_href=log_link))
+                           refs={"job_key": key}, log_href=log_link, all_time=bool(answering)))
     return found
 
 

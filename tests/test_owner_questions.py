@@ -238,6 +238,91 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         self.assertTrue(self.job(asi)["blocker"].startswith("ANSWERING_RETRY:"))
         self.assertEqual(self.pending(), [])
 
+    # --- Identical answering failures (owner, 2026-10-26: card after 3, give up after 7) ---------------
+
+    OFFICE = {"id": None, "required": True, "semantic": "preferred_office", "answer_type": "choice",
+              "label": "Preferred office", "choices": ["Austin", "Denver"]}
+    TEAM = {"id": None, "required": True, "semantic": "preferred_team", "answer_type": "choice",
+            "label": "Preferred team", "choices": ["Core", "Edge"]}
+    UNFIT = {"preferred_office": "Paris", "preferred_team": "Ops"}    # answers the controls cannot take
+
+    def answering_fails(self, key, hours):
+        self.run_cycle(Model("ACCEPT", values=self.UNFIT), days=hours / 24)
+        return self.job(key)
+
+    def test_owner_identical_answering_failures_become_a_card_then_give_up(self):
+        dedalus = self.discover(fixtures.role("Dedalus Labs", "dedalus-1"))
+        self.form({"dedalus labs": [self.OFFICE]})
+        field = applications.question_field(self.OFFICE)
+        for hours in (0, 1.01):                                                      # failures 1 and 2: the AI retries
+            self.assertEqual(self.answering_fails(dedalus, hours)["blocker"], "ANSWERING_RETRY:" + field)
+            self.assertEqual(self.pending(dedalus), [])
+        self.assertIn("2 times", self.page("/failures"))                               # a retrying job's real tries
+        job = self.answering_fails(dedalus, 2.02)                                            # failure 3: a card
+        self.assertEqual((job["state"], job["blocker"]), ("BLOCKED", "UNKNOWN_REQUIRED_ANSWERS:" + field))
+        [card] = self.pending(dedalus)
+        self.assertEqual(card["site_reason"], applications.ANSWERING_CARD_REASON)
+        shown = self.card(self.page(), self.OFFICE["label"])
+        self.assertIn(applications.ANSWERING_CARD_REASON, shown)
+        self.assertNotIn("site didn't accept", shown)                                  # Sidedoor's note, not a site refusal
+        job = self.answering_fails(dedalus, 8 * 24)                                          # card expired; failure 4: no new card
+        self.assertEqual(job["blocker"], "ANSWERING_RETRY:" + field)
+        self.assertEqual([row["id"] for row in self.pending(dedalus)], [card["id"]])   # the expired one only
+        for hours in (8 * 24 + 1.01, 8 * 24 + 2.02):                                 # failures 5 and 6
+            self.assertEqual(self.answering_fails(dedalus, hours)["blocker"], "ANSWERING_RETRY:" + field)
+        with self.database:   # failures older than the page's 14-day window still count toward the shown tries
+            self.database.execute("UPDATE application_events SET at=? WHERE id IN (SELECT id FROM application_events WHERE "
+                                  "job_key=? AND event=? ORDER BY id LIMIT 3)",
+                                  ((self.clock - dt.timedelta(days=20)).isoformat(), dedalus, applications.ANSWERING_FAILED_EVENT))
+        self.assertIn("6 times", self.page("/failures"))
+        with self.database:   # more other events than the page's 20-row window: every failure still counts
+            for _ in range(25):
+                applications.event(self.database, dedalus, "BLOCKED", {"code": "PROVIDER_USAGE_LIMIT_WAIT"}, self.clock.isoformat())
+        job = self.answering_fails(dedalus, 8 * 24 + 3.03)                                   # failure 7: given up
+        self.assertEqual((job["state"], job["blocker"]), ("EXHAUSTED", "ANSWERING_GAVE_UP:" + field))
+        self.assertEqual([row["id"] for row in self.pending(dedalus)], [card["id"]])
+        self.assertEqual(self.submissions(), [])
+        failures = self.page("/failures")
+        self.assertIn("Dedalus Labs", failures)
+        self.assertIn("could not fill in the same answers in 7 tries", failures)
+        self.assertIn("7 times", failures)                                              # every failure is a try
+        self.assertNotIn("7 times in the last", failures)                               # tries of any age: no window
+        self.assertNotIn("still need to be written", failures)                          # a closed job has nothing pending
+        detail = self.page("/applications?job=" + dedalus)
+        for number in range(2, 8):   # each try in its History (try 1 is past the 50-line limit, after the 25 waits above)
+            self.assertIn("Try %d failed: Sidedoor's AI couldn't enter an answer on the form" % number, detail)
+        self.assertNotIn("same required answers", detail)                               # the reason once, then what to do
+        self.assertIn("Apply by hand if you want this one.", detail)
+        self.assertNotIn("still need to be written", detail)                            # each try's own line instead
+        self.assertIn("Apply by hand if you want this one.", failures)
+
+    def test_owner_answering_failures_count_on_a_job_given_up_for_another_reason(self):
+        dedalus = self.discover(fixtures.role("Dedalus Labs", "dedalus-3"))
+        self.form({"dedalus labs": [self.OFFICE]})
+        self.answering_fails(dedalus, 0)
+        self.answering_fails(dedalus, 1.01)
+        with self.database:
+            applications.hold(self.database, self.job(dedalus), "RETRIES_EXHAUSTED", "Given up", self.clock.isoformat(), "EXHAUSTED")
+        self.assertIn("2 times", self.page("/failures"))
+
+    def test_owner_each_question_set_keeps_its_own_running_count(self):
+        # A running total, not a streak (owner, 2026-10-26: "after 3 identical failures"): another
+        # question set failing, or any other stop in between, resets nothing.
+        dedalus = self.discover(fixtures.role("Dedalus Labs", "dedalus-2"))
+        office = applications.question_field(self.OFFICE)
+        self.form({"dedalus labs": [self.OFFICE]})
+        self.answering_fails(dedalus, 0)
+        self.answering_fails(dedalus, 1.01)
+        with self.database:
+            applications.event(self.database, dedalus, "BLOCKED", {"code": "PROVIDER_USAGE_LIMIT_WAIT"}, self.clock.isoformat())
+        self.form({"dedalus labs": [self.TEAM]})
+        self.assertEqual(self.answering_fails(dedalus, 2.02)["blocker"], "ANSWERING_RETRY:" + applications.question_field(self.TEAM))
+        self.assertEqual(self.pending(dedalus), [])                                  # the team's count is 1
+        self.form({"dedalus labs": [self.OFFICE]})
+        job = self.answering_fails(dedalus, 3.03)                                    # the office's 3rd: a card
+        self.assertEqual(job["blocker"], "UNKNOWN_REQUIRED_ANSWERS:" + office)
+        self.assertEqual(len(self.pending(dedalus)), 1)
+
     # --- Review round 1 -------------------------------------------------------------------------------
 
     def test_owner_q1_mixed_case_is_one_owner_hold_no_reread_then_the_rest_is_answered(self):

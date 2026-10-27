@@ -22,7 +22,7 @@
 <li class="card fail-item{% if f.calm %} fail-calm fail-calm-{{ f.calm }}{% elif f.you %} fail-you{% endif %}">
   <p class="fail-text">{{ f.text }} <span class="fail-todo{% if f.you and not f.calm %} fail-todo-you{% endif %}">{{ f.todo }}</span></p>
   <p class="muted fail-meta">
-    {% if f.at %}{{ v.when(f.at) }}{% endif %}{% if f.count > 1 %}{% if f.at %} · {% endif %}{{ f.count }} times in the last {{ v.recent_days }} days{% endif %}
+    {% if f.at %}{{ v.when(f.at) }}{% endif %}{% if f.count > 1 %}{% if f.at %} · {% endif %}{{ f.count }} times{% if not f.all_time %} in the last {{ v.recent_days }} days{% endif %}{% endif %}
   </p>
   {% if f.reasons %}
   <ul class="fail-reasons">

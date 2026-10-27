@@ -158,6 +158,8 @@ CODE_WORDS = {
     "EXISTING_INTERVIEW": "You are already interviewing for this posting.",
     "RETRIES_EXHAUSTED": "Sidedoor used all of its tries.",
     "ANSWER_REFUSED_TWICE": "The application site refused the same answer twice.",
+    "ANSWERING_GAVE_UP": "Sidedoor's AI could not fill in the same answers in 7 tries.",
+    "ANSWERING_FAILED": "Sidedoor's AI couldn't enter an answer on the form.",
     "DATE_ORDER_UNCLEAR": "The site's date field doesn't show whether it's day/month or month/day.",
     "FILE_UPLOAD_FAILED_3_TIMES": "The site refused the résumé upload three times.",
     "ACCESS_BLOCKED_3_TIMES": "The site asked for a sign-in or a human check three times.",
@@ -567,10 +569,16 @@ def _resume(sha, current):
 
 def history(reader, key):
     found = []
-    for row in reader.rows("SELECT at,event,detail FROM application_events WHERE job_key=? ORDER BY id DESC LIMIT ?",
-                           (key, HISTORY_LIMIT), "application_events"):
+    rows = reader.rows("SELECT at,event,detail FROM application_events WHERE job_key=? ORDER BY id DESC LIMIT ?",
+                       (key, HISTORY_LIMIT), "application_events")
+    # Where each answering failure has its own "Try N failed" line, the retry hold's "Held: Some form
+    # answers still need to be written" repeats it (and reads as pending work once the job closed).
+    per_try = any(row["event"] == "ANSWERING_FAILED" for row in rows)
+    for row in rows:
         detail = overview._json(row["detail"]) or {}
         event = str(row["event"] or "")
+        if per_try and event in STATE_EVENTS and code_root(detail.get("code")) == "ANSWERING_RETRY":
+            continue
         if event in STATE_EVENTS:
             code = detail.get("code")
             route = detail.get("route") if isinstance(detail.get("route"), str) and detail["route"] in ROUTE_WORDS else None
@@ -578,6 +586,11 @@ def history(reader, key):
         elif event == "ELIGIBILITY_CHECKED":
             decision = detail.get("decision")
             text = "Read the posting: " + (ELIGIBLE_WORDS if decision == "ELIGIBLE" else code_words(decision))
+        elif event == "ANSWERING_FAILED":
+            # One line per answering failure (a repeated retry hold writes no new BLOCKED event).
+            streak = detail.get("streak")
+            text = ("Try %d failed: " % streak if isinstance(streak, int) and not isinstance(streak, bool)
+                    else "A try failed: ") + "Sidedoor's AI couldn't enter an answer on the form"
         elif event in EVENT_WORDS:
             text = EVENT_WORDS[event]
         else:
@@ -728,6 +741,8 @@ def closed_reason(reader, key, state, code, closing=None):
         label = _text(detail.get("label"))
         return ("The application site wouldn't accept the answer to %s twice, so nothing was submitted. "
                 "Apply by hand if you want this one." % ("\u201c%s\u201d" % " ".join(label.split()) if label else "one question"))
+    if root == applications.ANSWERING_GAVE_UP_CODE:
+        return "Apply by hand if you want this one."   # the headline already says why (owner pick, 2026-10-26)
     if root == applications.DATE_ORDER_CODE:
         detail = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND event='%s' "
                                         "ORDER BY id DESC LIMIT 1" % applications.DATE_ORDER_EVENT, key)) or {}

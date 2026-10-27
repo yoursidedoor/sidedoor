@@ -37,6 +37,11 @@ class StopLogTests(unittest.TestCase):
                           "of its tries. Its last try stopped on this: The browser session used all of its allowed steps "
                           "before it finished."])
 
+    def test_an_answering_give_up_says_why_once_then_what_to_do(self):
+        self.assertEqual(self.lines("ANSWERING_GAVE_UP:unidentified-question:x:1", "EXHAUSTED"),
+                         ["Together AI, Senior Backend Engineer: Sidedoor gave up on this application. Sidedoor's AI "
+                          "could not fill in the same answers in 7 tries. Apply by hand if you want this one."])
+
     def test_holds_waits_and_rejections_write_nothing(self):
         self.assertEqual(self.lines("CAPTCHA_REQUIRED", "BLOCKED"), [])            # owner D6: not a failure while retrying
         self.assertEqual(self.lines("APPLICATION_BROWSER_BUSY", "BLOCKED"), [])    # a wait

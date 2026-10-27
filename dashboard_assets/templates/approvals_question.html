@@ -5,7 +5,7 @@
   <p class="approval-q-job"><strong>{{ q.employer }}</strong>{% if q.role %} · {% if q.url %}<a href="{{ q.url }}" rel="noopener noreferrer" target="_blank">{{ q.role }}</a>{% else %}{{ q.role }}{% endif %}{% endif %}</p>
   <p class="approval-q-text" id="label-{{ q.dom }}"><strong>{{ q.question }}</strong>{% if q.required %} · <span class="approval-q-required">Required</span>{% endif %}</p>
   {% if q.hint %}<p class="muted approval-q-hint" id="hint-{{ q.dom }}">Format: {{ q.hint }}</p>{% endif %}
-  {% if q.site_reason %}<p class="note note-warning">The application site didn't accept this answer: {{ q.site_reason }}</p>{% endif %}
+  {% if q.site_reason %}<p class="note note-warning">{% if not q.own_note %}The application site didn't accept this answer: {% endif %}{{ q.site_reason }}</p>{% endif %}
   {% if q.expires %}<p class="muted approval-q-due">Answer by {{ v.when(q.expires) }}. Nothing is submitted without your answer.</p>{% endif %}
   {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
   <form class="approval-q-form{{ ' approval-q-prose' if q.control == 'textarea' }}" method="post" action="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">

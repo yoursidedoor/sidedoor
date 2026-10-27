@@ -707,6 +707,8 @@ def conform_value(value, question):
             return value
         if isinstance(value, str) and value.strip().casefold() in (BOOLEAN_AFFIRMATIVE | BOOLEAN_NEGATIVE):
             return value
+        if isinstance(value, str) and value in (question.get("choices") or []):
+            return value  # the employer's own option, e.g. a lone checkbox's label: tick it
         raise ValueError("VALUE_NOT_BOOLEAN")
     if kind == "multi_choice":
         choices = question.get("choices") if isinstance(question.get("choices"), list) else []
@@ -757,6 +759,11 @@ def _boolean_literal(question, truth):
     for choice in choices:
         if isinstance(choice, str) and applications.normalized(choice).rstrip(".!") in wanted:
             return choice
+    if (truth and len(choices) == 1 and isinstance(choices[0], str) and choices[0].strip()
+            and not applications.reads_as_negative(choices[0])):
+        # A lone checkbox whose only option is its own statement ("I confirm ..."): yes ticks it
+        # (Dedalus Labs, 2026-10-26: no Yes/Agree option, so every answer was refused).
+        return choices[0]
     if choices:
         return None
     if answer_type_of(question) in {"boolean", "choice"}:

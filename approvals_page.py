@@ -50,6 +50,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from starlette.concurrency import run_in_threadpool
 
+import applications
 import approvals
 import overview_page
 import paths
@@ -355,6 +356,8 @@ def questions(database, now, only=None, page=1):
                       "choices": [choice for choice in choices if isinstance(choice, str)] if isinstance(choices, list) else [],
                       "required": bool(required) and not operational, "hint": None if operational else hint,
                       "site_reason": None if operational else site_reason,
+                      # Sidedoor's own note (3 identical answering failures) is not a site refusal.
+                      "own_note": site_reason == applications.ANSWERING_CARD_REASON,
                       "expires": expires})
     return found
 

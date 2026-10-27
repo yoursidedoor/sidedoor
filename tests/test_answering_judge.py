@@ -135,6 +135,29 @@ class JudgeRoundTests(base.ResumeFixture):
         self.assertEqual(fit, {"fits": False, "value_entered": None, "problem": "MODEL_VALUE_NOT_BOOLEAN"})
         self.assertEqual((result["answers"], result["unknown"]), ({}, [self.key(OFFICE_ATTENDANCE)]))
 
+    def test_a_lone_confirmation_checkbox_is_ticked_by_yes_or_by_its_own_label(self):
+        # Dedalus Labs, 2026-10-26: the box's only option is its statement, so neither true nor the
+        # statement itself fitted and the job retried forever.
+        statement = "I chose this role and personally reviewed this application."
+        lone = {"id": "q-confirm", "required": True, "answer_type": "boolean", "control": "checkbox",
+                "choices": [statement], "semantic": "personal_review_attestation",
+                "label": "Please confirm before submitting."}
+        for value in (True, statement):
+            model = Scripted([lambda q, packet, v=value: entry(q, question_class="LEGAL_ASSERTION_OR_AGREEMENT",
+                                                               status="ANSWERED", value=v, unknown_reason=None,
+                                                               derivation="agree")], ["ACCEPT"])
+            result = self.run_answer([lone], model)
+            self.assertEqual(result["answers"][self.key(lone)]["value"], statement)
+            self.assertEqual(result["unknown"], [])
+
+    def test_a_lone_negative_option_is_never_ticked_by_yes(self):
+        lone = {"id": "q-share", "required": True, "answer_type": "boolean", "control": "checkbox",
+                "choices": ["Decline"], "semantic": "share_demographics", "label": "Share demographic data?"}
+        model = Scripted([lambda q, packet: entry(q, question_class="LEGAL_ASSERTION_OR_AGREEMENT", status="ANSWERED",
+                                                  value=True, unknown_reason=None, derivation="agree")], ["ACCEPT"])
+        result = self.run_answer([lone], model)
+        self.assertEqual((result["answers"], result["unknown"]), ({}, [self.key(lone)]))
+
     def test_no_askable_question_calls_nothing(self):
         model = Scripted([willing], ["ACCEPT"])
         result = self.run_answer([dict(OFFICE_ATTENDANCE, required=False)], model)

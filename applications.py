@@ -662,7 +662,10 @@ def log_stop(database, key, state, code, next_at):
         name = company + (", " + role if role else "")
         words = failures_page.cause_words(code)
         if gave_up:
-            last = applications_page.last_try_reason(applications_page.overview.Reader(database), key)
+            # An answering give-up's words already say why; its last try's "answers still need to be
+            # written" would read as work still pending on a closed job.
+            last = ("Apply by hand if you want this one." if str(code).split(":", 1)[0] == ANSWERING_GAVE_UP_CODE
+                    else applications_page.last_try_reason(applications_page.overview.Reader(database), key))
             LOG.info("%s: Sidedoor gave up on this application. %s%s", name, words, (" " + last) if last else "")
         else:
             try:
@@ -3925,6 +3928,59 @@ def ask_owner(database, job, asked, policy, now):
                      "field=? AND id<>?", (field, identifier))
 
 
+def hold_for_owner_cards(database, job, fields, cards, missing, policy, now):
+    """While any of this job's questions waits for the owner, the whole job is the owner's
+    hold (review round 1, Q1), even when the AI could retry other questions: no try is
+    spent, the read (saved complete) is not marked inconclusive, so nothing counts toward
+    the inspect cap, and the job is not picked up again until the owner answers
+    (`decision_transport._apply_answer` makes it due; the next pass answers the rest as
+    usual) or the questions expire, when the next pass reads, answers and asks again."""
+    blocker = "UNKNOWN_REQUIRED_ANSWERS:" + ",".join(field for field in fields if field in cards)
+    expires = dt.datetime.fromtimestamp(min(cards.values()) / 1000, dt.timezone.utc).isoformat()
+    with database:
+        hold(database, job, blocker, OWNER_QUESTION_ACTION, now, "BLOCKED", expires, route="OWNER")
+        database.execute("UPDATE notification_outbox SET state='SUPERSEDED_BY_FACT_REQUEST' WHERE event_key=? "
+                         "AND state IN ('PENDING','WAITING_TRANSPORT')", (job["job_key"] + ":" + blocker,))
+        event(database, job["job_key"], OWNER_QUESTION_EVENT,
+              {"questions": sorted(cards), "ai_retry": sorted(set(missing) - set(cards)), "expires_at": expires}, now)
+    # An answer kept on Approvals while this job was being answered (owner, 2026-10-24) was
+    # not in the packet: every open card it may cover (same semantic, the scope of a card's
+    # policy hash) is closed and its job made due again, so the answering AI runs with it
+    # (`decision_transport.refresh_stale`); if it still cannot answer, a card is raised anew.
+    latest = with_current_kept_answers(policy)
+    if kept_answers_of(latest) != kept_answers_of(policy):
+        decision_transport.refresh_stale(database, latest, now)
+
+
+# Owner, 2026-10-26: "After 3 identical failures, it should become a card for me. After 7 identical
+# failures, it should give up." An identical failure is an ANSWERING_RETRY for the same questions.
+ANSWERING_CARD_AFTER = 3
+ANSWERING_GIVE_UP_AFTER = 7
+ANSWERING_FAILED_EVENT = "ANSWERING_FAILED"
+ANSWERING_GAVE_UP_CODE = "ANSWERING_GAVE_UP"
+ANSWERING_GAVE_UP_ACTION = ("Sidedoor's AI could not fill in the same required answers in 7 tries, so nothing was "
+                            "submitted; apply by hand if you want this one")
+ANSWERING_CARD_REASON = ("Sidedoor's AI tried 3 times but couldn't enter an answer on the form. Pick the answer and "
+                         "Sidedoor will fill it in.")
+
+
+def answering_streak(database, job, blocker):
+    """How many identical answering failures (`blocker`, ANSWERING_RETRY:<fields>) this job had
+    before this one: a running total of its ANSWERING_FAILED events with that code (owner,
+    2026-10-26, "after 3 identical failures", not "in a row"), so no other stop, wait or card
+    resets it. A repeated hold writes no new BLOCKED event, so each failure records its own.
+    Python compares codes only."""
+    count = 0
+    for (detail,) in database.execute("SELECT detail FROM application_events WHERE job_key=? AND event=?",
+                                      (job["job_key"], ANSWERING_FAILED_EVENT)):
+        try:
+            code = (json.loads(detail) or {}).get("code")
+        except (TypeError, ValueError, AttributeError):
+            code = None
+        count += code == blocker
+    return count
+
+
 OWNER_ANSWER_REFUSED_EVENT = "OWNER_ANSWER_REFUSED_BY_SITE"
 REFUSED_TWICE_CODE = "ANSWER_REFUSED_TWICE"
 REFUSED_TWICE_EVENT = "ANSWER_REFUSED_TWICE"
@@ -4617,32 +4673,38 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
                 ask_owner(database, job, asked, policy, now)
             cards = open_cards(database, job, unanswered, now)
         if cards:
-            # While any of this job's questions waits for the owner, the whole job is the owner's
-            # hold (review round 1, Q1), even when the AI could retry other questions: no try is
-            # spent, the read (saved complete above) is not marked inconclusive, so nothing counts
-            # toward the inspect cap, and the job is not picked up again until the owner answers
-            # (`decision_transport._apply_answer` makes it due; the next pass answers the rest as
-            # usual) or the questions expire, when the next pass reads, answers and asks again.
-            blocker = "UNKNOWN_REQUIRED_ANSWERS:" + ",".join(field for field in unanswered if field in cards)
-            expires = dt.datetime.fromtimestamp(min(cards.values()) / 1000, dt.timezone.utc).isoformat()
-            with database:
-                hold(database, job, blocker, OWNER_QUESTION_ACTION, now, "BLOCKED", expires, route="OWNER")
-                database.execute("UPDATE notification_outbox SET state='SUPERSEDED_BY_FACT_REQUEST' WHERE event_key=? "
-                                 "AND state IN ('PENDING','WAITING_TRANSPORT')", (job["job_key"] + ":" + blocker,))
-                event(database, job["job_key"], OWNER_QUESTION_EVENT,
-                      {"questions": sorted(cards), "ai_retry": sorted(set(missing) - set(cards)), "expires_at": expires}, now)
-            # An answer kept on Approvals while this job was being answered (owner, 2026-10-24) was
-            # not in the packet: every open card it may cover (same semantic, the scope of a card's
-            # policy hash) is closed and its job made due again, so the answering AI runs with it
-            # (`decision_transport.refresh_stale`); if it still cannot answer, a card is raised anew.
-            latest = with_current_kept_answers(policy)
-            if kept_answers_of(latest) != kept_answers_of(policy):
-                decision_transport.refresh_stale(database, latest, now)
+            hold_for_owner_cards(database, job, unanswered, cards, missing, policy, now)
             return
     if missing:
         blocker = "ANSWERING_RETRY:" + ",".join(missing)
+        # Owner, 2026-10-26: the third identical failure becomes a card, the seventh gives up
+        # (`answering_streak`). Between them, and after an unanswered card expires, the AI retries.
+        streak = answering_streak(database, job, blocker) + 1
+        failed = {"code": blocker, "streak": streak}
+        if streak >= ANSWERING_GIVE_UP_AFTER:
+            with database:
+                event(database, job["job_key"], ANSWERING_FAILED_EVENT, failed, now)
+                hold(database, job, ANSWERING_GAVE_UP_CODE + ":" + ",".join(missing), ANSWERING_GAVE_UP_ACTION,
+                     now, "EXHAUSTED")
+            return
+        if streak == ANSWERING_CARD_AFTER:
+            by_field = {}
+            for question in questions:
+                if isinstance(question, dict):
+                    by_field.setdefault(question_field(question), question)
+            asked = {field: dict(by_field[field], site_reason=ANSWERING_CARD_REASON)
+                     for field in missing if field in by_field}
+            with database:
+                event(database, job["job_key"], ANSWERING_FAILED_EVENT, failed, now)
+                ask_owner(database, job, asked, policy, now)
+                cards = open_cards(database, job, missing, now)
+            if cards:
+                hold_for_owner_cards(database, job, missing, cards, missing, policy, now)
+                return
         retry_at = (dt.datetime.fromisoformat(now) + dt.timedelta(hours=1)).isoformat()
         with database:
+            if streak != ANSWERING_CARD_AFTER:
+                event(database, job["job_key"], ANSWERING_FAILED_EVENT, failed, now)
             hold(database, job, blocker, "Re-run the AI answering step on the next cycle; the owner is not asked",
                  now, "BLOCKED", retry_at)
             remember_read(database, job, review, blocker, now, extra_missing=["answers/" + field for field in missing])
