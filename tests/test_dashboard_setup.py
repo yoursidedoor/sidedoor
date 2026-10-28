@@ -180,6 +180,8 @@ class SetupPageTest(unittest.TestCase):
     def test_license_step_with_buy_link_and_guide(self):
         page = self.client.get("/setup").text
         self.assertIn('id="buy-license" href="https://yoursidedoor.com" target="_blank"', page)
+        step7 = page[page.index('id="step-7"'):page.index('id="step-8"')]   # locked until the license (step 5)
+        self.assertIn("sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.", step7)
         guide = self.client.get("/setup/guide/license", headers={"hx-request": "true"}).text
         self.assertIn("CLAIM_NOT_FOUND", guide)
         now = license_fixtures.dt.datetime.now(license_fixtures.dt.timezone.utc)
@@ -198,6 +200,7 @@ class SetupPageTest(unittest.TestCase):
                 mock.patch.object(setup_steps.unipile_port, "hosted_link", return_value="https://unipile.test/link") as link:
             status = self.client.get("/setup/linkedin/status", headers={"hx-request": "true"})
             self.assertIn("Connect LinkedIn</button>", status.text)
+            self.assertIn("sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.", status.text)  # owner, 2026-10-27
             response = self.client.post("/setup/linkedin/connect", headers=HTMX)
             self.assertEqual(link.call_args[0][2], "create")
             self.assertIn('href="https://unipile.test/link" target="_blank"', response.text)

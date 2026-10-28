@@ -450,20 +450,40 @@ def store_research(database, pipeline, result):
     # At most max_unique_contacts_per_company new people per company per research run, with no
     # lifetime limit (owner, 2026-09-28). People contacted before are refused above, per person.
     added = {}
+    def bad(entry, kind, reason):
+        """A dropped entry (owner, 2026-10-27: "One bad entry no longer rejects the whole set"):
+        kept out, the rest stored, and the reason recorded for the Failures and Logs pages."""
+        entry = entry if isinstance(entry, dict) else {}
+        text = lambda value: " ".join(value.split())[:200] if isinstance(value, str) and value.strip() else None
+        rejected.append({"dropped": True, "kind": kind, "company": text(entry.get("company")),
+                         "role": text(entry.get("role")), "recipient": text(entry.get("recipient")), "reason": reason,
+                         # which posting or person this is (never shown): two different ones stay apart
+                         "source": next((entry[key][:2048] for key in ("url", "source_url", "profile")
+                                         if isinstance(entry.get(key), str) and entry[key].strip()), None)})
     with research_workflow.transaction(database):
         for opportunity in result["opportunities"][:60]:
-            if not all(isinstance(opportunity.get(field), str) and opportunity[field].strip()
-                       for field in ("company", "role", "url", "rationale")):
-                raise ValueError("Invalid opportunity")
+            if not isinstance(opportunity, dict) or not all(
+                    isinstance(opportunity.get(field), str) and opportunity[field].strip()
+                    for field in ("company", "role", "url", "rationale")):
+                bad(opportunity, "opportunity", "the role was missing its company, title, link or reason")
+                continue
             if urllib.parse.urlsplit(opportunity["url"]).scheme != "https":
-                raise ValueError("Opportunity requires an HTTPS source")
-            database.execute("INSERT INTO opportunities VALUES (?,?,?) ON CONFLICT(url) DO UPDATE SET payload=excluded.payload,observed_at=excluded.observed_at",
-                             (opportunity["url"], json.dumps(opportunity), utcnow()))
-            applications.ingest(database, opportunity)
+                bad(opportunity, "opportunity", "the role's link was not a secure (https) web address")
+                continue
+            try:
+                with research_workflow.transaction(database):
+                    database.execute("INSERT INTO opportunities VALUES (?,?,?) ON CONFLICT(url) DO UPDATE SET payload=excluded.payload,observed_at=excluded.observed_at",
+                                     (opportunity["url"], json.dumps(opportunity), utcnow()))
+                    applications.ingest(database, opportunity)
+            except (KeyError, TypeError, ValueError) as error:
+                bad(opportunity, "opportunity", "the role could not be saved")
+                rejected[-1]["error_type"] = type(error).__name__   # internal only; never shown
         for draft in result["drafts"][:180]:
-            if not all(isinstance(draft.get(field), str) and draft[field].strip()
-                       for field in ("recipient", "company", "profile", "message", "source_url")):
-                raise ValueError("Invalid outreach draft")
+            if not isinstance(draft, dict) or not all(
+                    isinstance(draft.get(field), str) and draft[field].strip()
+                    for field in ("recipient", "company", "profile", "message", "source_url")):
+                bad(draft, "draft", "the note was missing its recipient, company, profile, message or source")
+                continue
             identity = profile_key(draft["profile"])
             recipient_key = "name:" + name_key(draft["recipient"])
             if engagement.closure_status(database, identity):
@@ -776,6 +796,9 @@ def new_contact_execution_cycle(root, database, config, port=None):
         port = unipile_ready(config, port)
         # Invitations sent in an earlier cycle are read before any new one is sent.
         invites = sequence.reconcile_invites(database, port, config=config)
+        # Not Premium (owner, 2026-10-27): a note held back from its invitation is queued as the
+        # first message once they accept; the FIRST_MESSAGE pass below judges, holds and sends it.
+        invites["deferred_notes"] = sequence.queue_deferred_notes(database, port)
     client = heyreach_for(config)
     adapter = outreach_agent.Adapter(root, database, config, client, port=port if unipile else None)
     executions = {purpose: outreach.cycle(database, config, adapter, purpose=purpose)
@@ -1188,15 +1211,17 @@ def prior_contacts(database):
 
 
 def research_inputs(root, config, database, pipeline, observation, output_path, *, companies=None, industry=None,
-                    discovery=None):
+                    discovery=None, done_companies=()):
     if companies is None:
         raise ValueError("Industry discovery must supply company assignments; tracker seeds are not supported")
     policy = user_profile.load()
     if discovery is not None:
         if industry not in policy["industries"]:
             raise ValueError("Discovery evidence requires a policy industry")
-        industry_discovery.validate(discovery, {**policy, "industries": [industry]}, utcnow(), 20)
-        if discovery["discovery_status"] != "COMPLETE":
+        # Only the well-formed companies are evidence (owner, 2026-10-27: one bad entry no longer
+        # rejects the whole set), and a PARTIAL discovery with at least one of them is kept.
+        discovery = industry_discovery.screen(discovery, {**policy, "industries": [industry]}, utcnow(), 20)
+        if discovery["discovery_status"] != "COMPLETE" and not discovery["companies"]:
             raise ValueError("Stage-2 evidence requires completed discovery")
     research_workflow.initialize(database)
     research_workflow.seed_history(database, pipeline, prior_contacts(database),
@@ -1211,6 +1236,12 @@ def research_inputs(root, config, database, pipeline, observation, output_path, 
     if existing_plan:
         research_workflow.hold_unreported_contact_slots(database, plan_id)
     plan = research_workflow.get_plan(database, plan_id) if existing_plan else research_workflow.plan_research(database, plan_id, companies, limit=60)
+    # A retry after a cut-off session covers only the companies not yet done (R1, owner 2026-10-27,
+    # "3: a"), including ones an earlier run of this plan finished (review S9); their stored roles stay.
+    done = set(done_companies) | set(research_workflow.saved_companies(database, plan_id))
+    if done:
+        plan = dict(plan, assignments=[item for item in plan["assignments"] if item["company_key"] not in done],
+                    assignments_already_saved=[item["company"] for item in plan["assignments"] if item["company_key"] in done])
     discovery_evidence = []
     if discovery is not None:
         by_company = {}
@@ -1263,34 +1294,45 @@ def research_inputs(root, config, database, pipeline, observation, output_path, 
 
 
 def research_command(root, config, output_path, schema):
-    return [config["codex"], "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
-               "--skip-git-repo-check", "--sandbox", "read-only", "--model", config["model"],
-               "-c", 'approval_policy="never"', "-c", 'web_search="live"',
-               "-c", "features.shell_tool=false", "-c", "features.apps=false",
-               "-c", "features.skills=false", "-c", "features.apply_patch_freeform=false",
-               "-c", 'model_reasoning_effort="medium"',
-               "--output-schema", str(resources.path(schema) if resources.declared(str(schema)) else root / schema),
-               "--output-last-message", str(output_path), "--color", "never", "-"]
+    import engines
+    return engines.engine(config).research_command(root, config, output_path, schema)
 
 
-def run_research_worker(root, command, prompt, log_path, timeout):
+def run_research_worker(root, command, prompt, log_path, timeout, on_start=None, stop=None):
+    """One research codex session. `on_start` (optional) is called with time.monotonic() at the moment the
+    session really starts, after its pacing slot was granted, so a caller can start its own clock then.
+    `stop` (optional callable): true once the caller's run has ended; a session still waiting for its slot
+    then stops waiting, and one granted a slot after that never starts (review R2, 2026-10-27)."""
+    ended = lambda: RESEARCH_STOP.is_set() or (stop is not None and bool(stop()))
     if timeout <= 0 or RESEARCH_STOP.is_set():
         raise TimeoutError("Research attempt time budget exhausted")
-    environment = {key: value for key, value in os.environ.items() if key not in {
-        "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID",
-        "OPENAI_ORGANIZATION", "OPENAI_PROJECT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"}}
-    # E0.T8: the shell's OpenAI variables are still stripped; with an API key chosen, the saved key
-    # goes in as CODEX_API_KEY (ChatGPT sign-in: this environment, untouched).
-    import openai_auth
-    environment = openai_auth.environment(command, environment)
-    with log_path.open("w") as log:
+    import engines
+    engine = engines.for_command(command)   # the engine that built the command (research_command)
+    # The shell's OpenAI variables stripped; the saved API key added in API-key mode (E0.T8).
+    environment = engine.research_environment(command)
+    claude = engine.judged_by_stream   # Claude, Antigravity (U1 4): judged from the stream by finish_run
+    import provider_pacing   # a slot for this provider; waiting for it never spends the session's timeout
+    import tempfile   # Claude runs in an empty folder of its own (no project files or CLAUDE.md to load; U1 3d)
+    with (tempfile.TemporaryDirectory(prefix="research-claude-") if claude else contextlib.nullcontext()) as working, \
+            provider_pacing.slot(command, timeout, ended), log_path.open("w") as log:
+        if ended():
+            raise InterruptedError("Research run ended before this session got its slot")
+        # <log>.engine.json: which engine wrote this log (U1 3a), with a Claude run's allowed tools (3c C3).
+        engines.record_run(log_path, engine, command=command)
         # Its own session (POSIX) or Job Object (Windows), so the kill below reaches its whole tree.
-        worker = subprocess.Popen(command, stdin=subprocess.PIPE, text=True, encoding="utf-8", cwd=root,
-                                  stdout=log, stderr=log, env=environment, **portable.worker_spawn_options(core=False))
+        try:
+            worker = subprocess.Popen(command, stdin=subprocess.PIPE, text=True, encoding="utf-8",
+                                      cwd=getattr(command, "cwd", None) or working or root,
+                                      stdout=log, stderr=log, env=environment, **portable.worker_spawn_options(core=False))
+        except BaseException:
+            engine.run_ended(command)   # U1 4 N3e: Antigravity's per-run MCP config goes when the start fails too
+            raise
         portable.contain(worker)
+        if on_start is not None:
+            on_start(time.monotonic())
 
         deadline = time.monotonic() + timeout
-        pending_input = prompt
+        pending_input = engine.prompt_input(prompt)
         try:
             while True:
                 if RESEARCH_STOP.is_set():
@@ -1306,23 +1348,36 @@ def run_research_worker(root, command, prompt, log_path, timeout):
         finally:
             portable.kill_tree(worker.pid)
             worker.wait()
+            engine.run_ended(command)   # U1 4: Antigravity's per-run MCP config goes
+    if claude:
+        # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the exit code; a clean
+        # run's answer is written to the command's output file, as Codex's --output-last-message does.
+        failure = engine.finish_run(worker.returncode, log_path.read_text(encoding="utf-8", errors="replace"),
+                                    command=command, worker="research")
+        if failure is not None:
+            words = (f"exited {worker.returncode}" if worker.returncode
+                     else "failed " + str(getattr(failure, "code", None) or getattr(failure, "kind", None)))
+            raise RuntimeError(f"Research worker {words}; see {log_path.name}") from failure
+        return
     if worker.returncode:
-        import provider_limits
-        raise RuntimeError(f"Research worker exited {worker.returncode}; see {log_path.name}") from provider_limits.check(
+        raise RuntimeError(f"Research worker exited {worker.returncode}; see {log_path.name}") from engine.limit(
             worker.returncode, log_path, command=command)
-    openai_auth.succeeded(command)   # E0.T8 AK5
+    engine.succeeded(command)   # E0.T8 AK5
 
 
 def research(root, config, database, pipeline, observation):
     if config.get("scope") == "monitor_existing_pipeline" or not config.get("research_enabled", True):
         return {"state": "DISABLED_BY_MONITOR_ONLY_SCOPE"}
     daily_schedule.initialize(database, config["timezone"])
-    import setup_steps
-    if setup_steps.codex_wait(config):
+    import engines
+    missing = engines.engine(config).wait(config)
+    if missing:
         # No usable Codex (2026-10-23): research never starts and claims no attempt of the day; the
         # day's turn is recorded (CODEX_WAIT) so other work does not yield all day, and research runs
-        # on the first check after Codex is found again.
-        return daily_schedule.codex_wait(database, config, dt.datetime.now(dt.timezone.utc))
+        # on the first check after Codex is found again. Claude (U1 3d) and Antigravity (U1 4): the same, in
+        # their own words.
+        return daily_schedule.codex_wait(database, config, dt.datetime.now(dt.timezone.utc),
+                                         kind=getattr(missing, "kind", None))
     claim = daily_schedule.claim(database, config, dt.datetime.now(dt.timezone.utc))
     if claim["state"] != "CLAIMED":
         return claim
@@ -1343,8 +1398,7 @@ def research(root, config, database, pipeline, observation):
             raise ValueError("INVALID_RESEARCH_SERVICE_RESERVE")
         research_config = dict(config, daily_compute_seconds=daily_limit - headroom)
         final = parallel_research.run(root, research_config, database, pipeline, observation, research_id,
-                                      runtime=sys.modules[__name__],
-                                      deadline=time.monotonic() + config["research_timeout_seconds"])
+                                      runtime=sys.modules[__name__])
         final["compute_allocation"] = {"daily_seconds": daily_limit,
                                        "research_admission_ceiling": daily_limit - headroom,
                                        "protected_service_seconds": headroom}
@@ -1600,6 +1654,11 @@ def main(argv=None):
         import reply_tools
         log.configure(job="reply-tools")  # the install's secrets redacted from its stderr; INFO never on stdout
         return reply_tools.main(argv[1:])
+    # `sidedoor research-tools serve --context F` (R1): a research session's save tools in a frozen build.
+    if argv[:1] == ["research-tools"]:
+        import research_tools
+        log.configure(job="research-tools")  # stderr only; stdout is the JSON-RPC channel
+        return research_tools.main(argv[1:])
     # `sidedoor browser-guard ...` (E7.T1, option A): the guarded browser MCP server Codex starts for
     # every browser job (browser_runtime.guard_command). Its stdout is the JSON-RPC channel, so it is
     # dispatched before anything else here can print.
@@ -1607,6 +1666,11 @@ def main(argv=None):
         import browser_guard
         log.configure(job="browser-guard")  # as reply-tools: stderr only, the install's secrets redacted
         return browser_guard.main(argv[1:])
+    # `sidedoor agy-hook --policy FILE` (U1 4): an Antigravity run's PreToolUse hook (engines.agy_hook). Its
+    # stdout is the decision.
+    if argv[:1] == ["agy-hook"]:
+        import engines
+        return engines.agy_hook_main(argv[1:])
     # `sidedoor doctor [--online] [--json]` (E4.T4): the dependency report (doctor.main).
     if argv[:1] == ["doctor"]:
         import doctor

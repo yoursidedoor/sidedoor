@@ -228,6 +228,43 @@ class ReplyThreadContextTests(unittest.TestCase):
             "SELECT * FROM reply_worker_inputs WHERE task_id=?", (task_id,)))
         self.provider.assert_not_called()
 
+    def test_a_codex_era_read_is_revised_when_its_context_changed(self):
+        # Review B1, 2026-10-27: a read saved under another route (here REPLY_MAX_TOKENS stands in for the
+        # codex executable) still gets its context revision; provenance compares without ASSET_PROVENANCE.
+        task_id = self.queue()
+        self.record(self.event())
+        with mock.patch.object(worker, "REPLY_MAX_TOKENS", 1):
+            self.cycle(effect=worker.Held("CLASSIFICATION_TIMEOUT", retry=True))
+        due = self.task(task_id)["next_at"]
+        self.record(self.event(text="New outbound before retry.", minute=55))
+        result, execute = self.cycle(due)
+        execute.assert_not_called()
+        self.assertIsNotNone(result["items"][0]["context_revision_task_id"])
+
+    def test_a_codex_era_decision_whose_context_changed_is_revised(self):
+        # Review B4: a complete, unapplied decision refused with REPLY_DECISION_CONTEXT_CHANGED.
+        task_id = self.queue()
+        self.record(self.event())
+        with mock.patch.object(worker, "REPLY_MAX_TOKENS", 1), \
+                mock.patch.object(routing, "apply_reply_decision", return_value={}):
+            self.cycle()
+        self.assertEqual("COMPLETE", self.task(task_id)["status"])
+        self.record(self.event(text="New outbound after the decision.", minute=55))
+        with mock.patch.object(routing, "apply_reply_decision", side_effect=ValueError("REPLY_DECISION_CONTEXT_CHANGED")):
+            result, unused = self.cycle()
+        self.assertIsNotNone(result["decisions"][0]["context_revision_task_id"])
+
+    def test_a_read_saved_under_another_prompt_is_not_revised_when_its_context_changed(self):
+        # Review B1 confirm round: only the route may differ; a prompt change still refuses the revision.
+        task_id = self.queue()
+        self.record(self.event())
+        with mock.patch.object(worker, "TOOLS_OUTPUT_INSTRUCTIONS", worker.TOOLS_OUTPUT_INSTRUCTIONS + " "):
+            self.cycle(effect=worker.Held("CLASSIFICATION_TIMEOUT", retry=True))
+        due = self.task(task_id)["next_at"]
+        self.record(self.event(text="New outbound before retry.", minute=55))
+        result, unused = self.cycle(due)
+        self.assertIsNone(result["items"][0].get("context_revision_task_id"))
+
     def test_older_cross_thread_invitation_is_pinned_beyond_latest_sixteen_in_executor(self):
         task_id = self.queue()
         source_ids = self.mixed_history()

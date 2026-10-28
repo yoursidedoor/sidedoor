@@ -12,6 +12,7 @@ import re
 import unittest
 from unittest import mock
 
+import engines
 import failures_page
 import linkedin_contacts
 import log
@@ -305,7 +306,7 @@ class Reasons(pages.GatherBase):
                                                       "aggregated_output": "Jane Doe resume"}},
                   {"type": "error", "message": "stream disconnected"},
                   {"type": "turn.failed", "error": {"message": "402 Payment Required"}}]
-        shown = failures_page.trace_errors("\n".join(json.dumps(event) for event in events))
+        shown = failures_page.trace_errors("\n".join(json.dumps(event) for event in events), engines.CODEX)
         self.assertEqual(shown.splitlines(), [failures_page.TRACE_NOTE, "item.completed command_execution: failed (command_execution)",
                                               "error: stream disconnected", "turn.failed: 402 Payment Required"])
         self.assertNotIn("Jane", shown)

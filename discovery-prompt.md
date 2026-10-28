@@ -69,6 +69,10 @@ chooses a supported alternative or abandonment; do not retry yourself, fabricate
 results, widen scope, bypass access controls, or claim abandonment as completion.
 An orchestrator recovery directive changes only the method within the same scope.
 
+Save as you go: the moment you have confirmed a company, call the save_company tool with that
+company entry (the same fields your final answer uses). If it answers with a problem, fix the entry and
+save it again. Your final answer still lists every company, including the ones you saved.
+
 Return only JSON matching discovery-schema.json: discovery_status, summary,
 companies, blockers, inability. COMPLETE means the assigned industry searched, only source-supported
 names returned (possibly zero), and no blockers. PARTIAL requires blockers and

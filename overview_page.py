@@ -838,20 +838,32 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
         items.append(_item("OpenRouter", "error", openrouter.get("message") or NOT_CHECKED,
                            fix={"label": "Replace key", "href": SETTINGS_CONNECTIONS}, checked=_utc(openrouter.get("at"))))
 
-    codex = steps.get("codex", {})
-    if waits["codex_missing"]:  # the same fix as the "can't find Codex" banner
-        items.append(_item("Codex", "error", waits["codex_missing"]["health"], fix=wait_fix(waits["codex_missing"]),
+    # U1 3g G1: the row names the chosen engine and shows its own status (waits already filtered, G2).
+    engine = setup_steps.chosen_engine(state)
+    label = setup_steps.ENGINE_LABELS[engine]
+    record = steps.get(engine if engine in ("claude", "antigravity") else "codex", {})
+    if waits.get("claude"):  # the same fix as the Claude banner
+        items.append(_item(label, "error", waits["claude"]["health"], fix=wait_fix(waits["claude"]),
+                           timed=False, banner=True))
+    elif waits.get("antigravity"):  # U1 4: the same fix as the Antigravity banner
+        items.append(_item(label, "error", waits["antigravity"]["health"], fix=wait_fix(waits["antigravity"]),
+                           timed=False, banner=True))
+    elif waits["codex_missing"]:  # the same fix as the "can't find Codex" banner
+        items.append(_item(label, "error", waits["codex_missing"]["health"], fix=wait_fix(waits["codex_missing"]),
                            timed=False, banner=True))
     elif progress["done"][6] and waits["usage_limit"]:  # the same link as the ChatGPT usage banner
-        items.append(_item("Codex", "warning", waits["usage_limit"]["health"], fix=wait_fix(waits["usage_limit"]),
+        items.append(_item(label, "warning", waits["usage_limit"]["health"], fix=wait_fix(waits["usage_limit"]),
                            timed=False, banner=True))
     elif progress["done"][6]:
-        items.append(_item("Codex", "success", "Signed in with ChatGPT", _good_at(codex)))
-    else:  # the same fix as the "Codex stopped working." banner
-        failed = codex.get("message") if codex.get("status") == "failed" else None
-        items.append(_item("Codex", "error", failed or "Codex stopped working",
-                           fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}, checked=_utc(codex.get("at")),
-                           banner=bool(progress.get("finished"))))   # dashboard.layout's "Codex stopped working."
+        good = ("Signed in with ChatGPT" if engine == "codex" else
+                "Signed in with your Google account" if engine == "antigravity" else
+                "Uses your Anthropic API key" if setup_steps.claude_api_key_mode(home) else "Signed in with your Claude subscription")
+        items.append(_item(label, "success", good, _good_at(record)))
+    else:  # the same fix as the "<engine> stopped working." banner
+        failed = record.get("message") if record.get("status") == "failed" else None
+        items.append(_item(label, "error", failed or "%s stopped working" % label,
+                           fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}, checked=_utc(record.get("at")),
+                           banner=bool(progress.get("finished"))))   # dashboard.layout's "<engine> stopped working."
 
     email = steps.get("email", {})
     browser = browser_unavailable() if setup_steps.chrome_path() else None

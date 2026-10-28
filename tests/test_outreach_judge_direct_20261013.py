@@ -19,7 +19,7 @@ class DirectOutreachJudgeTests(unittest.TestCase):
     setUp, read, send, judge, make_adapter = _fixture.setUp, _fixture.read, _fixture.send, _fixture.judge, _fixture.make_adapter
     del _fixture
 
-    def run_judge(self, status, answer=None, error=None):
+    def run_judge(self, status, answer=None, error=None, phase=None):
         self.config["text_model"] = {"model": "z-ai/glm-5.3"}
         self.executor = None  # no injected executor: the configured text model is called directly
         self.adapter = self.make_adapter(self.database)
@@ -36,6 +36,8 @@ class DirectOutreachJudgeTests(unittest.TestCase):
                                        "choices": [{"finish_reason": "stop", "message": {"content": content}}]}).encode()
 
         with mock.patch.object(text_model, "key", return_value=SECRET), mock.patch.object(text_model, "_post", transport):
+            if phase is not None:
+                return self.adapter._judge(self.action, phase, self.config)
             return self.adapter.inspect(self.action, self.config)
 
     def audit(self, kind):
@@ -74,6 +76,38 @@ class DirectOutreachJudgeTests(unittest.TestCase):
         self.assertIsNone(self.audit("DECISION"))
         saved = json.dumps([json.loads(row[0]) for row in self.database.execute("SELECT record FROM outreach_agent_audit")])
         self.assertNotIn(SECRET, saved)
+
+
+class LaterPhaseJudgeTests(DirectOutreachJudgeTests):
+    """Owner, 2026-10-27: the judge after the first note (other phases, repair turns) is a direct call too."""
+
+    test_first_note_judge_is_one_low_effort_call_with_usage_recorded = None
+    test_a_402_is_the_same_retryable_failure_with_its_status_and_never_the_key = None
+
+    def test_a_reconciliation_judgment_is_a_direct_call_not_codex(self):
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("no codex")):
+            self.run_judge(200, {"prompt_tokens": 10, "completion_tokens": 2}, phase="RECONCILIATION")
+        self.assertEqual(1, len(self.requests))
+        url, body, unused_timeout = self.requests[0]
+        self.assertEqual((body["reasoning"], body["response_format"]["json_schema"]["strict"]), ({"effort": "low"}, True))
+        provenance = self.audit("OBSERVATION")["provenance"]
+        self.assertEqual((provenance["executable"], provenance["route"]), (None, "openrouter_chat_completions"))
+        self.assertEqual("openrouter_chat_completions", self.audit("DECISION")["route"])
+
+    def test_a_repair_turn_is_a_direct_call_too(self):
+        self.decision_override["reason"] = "x" * 800   # over the bound: _validate refuses, one repair turn follows
+        answers = []
+        original = self.judge
+
+        def judge(config, prompt, schema, timeout):
+            answers.append(prompt)
+            if len(answers) > 1:
+                self.decision_override.pop("reason", None)
+            return original(config, prompt, schema, timeout)
+        self.judge = judge
+        self.run_judge(200, {"prompt_tokens": 10, "completion_tokens": 2}, phase="RECONCILIATION")
+        self.assertEqual(2, len(self.requests))
+        self.assertTrue(all(request[0].endswith("/chat/completions") for request in self.requests))
 
 
 if __name__ == "__main__":

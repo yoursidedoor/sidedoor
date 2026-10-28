@@ -9,23 +9,77 @@ research_company_limit defaults to 12 TOTAL across industries, not per industry.
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import datetime as dt
 import hashlib
+import inspect
 import json
+import queue
 import math
 from pathlib import Path
 import re
+import subprocess
 import threading
 import time
 
 import industry_discovery
+import log
 import provider_limits
 import research_workflow
 import research_recovery
+import research_tools
 import workflow_tasks
 import user_profile
 import paths
 
 
 TIMEZONE = "America/Los_Angeles"
+LOG = log.get(__name__)
+
+# Session time limits (owner, 2026-10-27, from his own data: discovery sessions took 19-46 s;
+# qualification about 67 s per company at the median, 100 s at the p90 "slow end", 135 at most).
+DISCOVERY_SECONDS = 300          # a discovery session, flat
+SESSION_CEILING_SECONDS = 3600   # the code's hard ceiling on any one session
+QUALIFICATION_BASE_SECONDS = 120
+QUALIFICATION_SLOW_FACTOR = 1.5
+DEFAULT_SLOW_END_SECONDS = 100   # seconds per company until the install has its own record
+SLOW_END_SESSIONS = 20           # the install's last 20 recorded qualification sessions...
+SLOW_END_MINIMUM = 5             # ...once at least 5 are recorded
+SESSIONS_KEPT = 100              # rw_qualification_sessions keeps its newest 100 rows
+RETRY_MARGIN_SECONDS = 300       # "plus 5 min" in the run deadline
+
+
+def slow_end_seconds(database):
+    """The install's own p90 seconds per company over its last 20 recorded qualification sessions
+    (nearest rank); DEFAULT_SLOW_END_SECONDS until at least 5 are recorded."""
+    try:
+        rows = database.execute("SELECT seconds,companies FROM rw_qualification_sessions WHERE companies>0 "
+                                "ORDER BY recorded_at DESC LIMIT ?", (SLOW_END_SESSIONS,)).fetchall()
+    except Exception as error:
+        LOG.warning("Could not read past research session times (%s); using %d seconds per company.",
+                    type(error).__name__, DEFAULT_SLOW_END_SECONDS)
+        rows = []
+    if len(rows) < SLOW_END_MINIMUM:
+        return DEFAULT_SLOW_END_SECONDS
+    per_company = sorted(row[0] / row[1] for row in rows)
+    return per_company[math.ceil(0.9 * len(per_company)) - 1]
+
+
+def record_session(database, identity, at, industry, companies, seconds):
+    """One qualification session's company count and wall seconds; the newest SESSIONS_KEPT are kept."""
+    with database:
+        database.execute("INSERT OR REPLACE INTO rw_qualification_sessions VALUES (?,?,?,?,?)",
+                         (identity, at, industry, companies, seconds))
+        database.execute("DELETE FROM rw_qualification_sessions WHERE id NOT IN (SELECT id FROM "
+                         "rw_qualification_sessions ORDER BY recorded_at DESC LIMIT ?)", (SESSIONS_KEPT,))
+
+
+def qualification_seconds(database, companies):
+    """120 s + 1.5 x slow end x the companies in that session, within the 3600 s ceiling."""
+    return min(SESSION_CEILING_SECONDS, math.ceil(QUALIFICATION_BASE_SECONDS + QUALIFICATION_SLOW_FACTOR
+                                                  * slow_end_seconds(database) * max(1, int(companies))))
+
+
+def initial_deadline_seconds():
+    """The run's starting deadline: a discovery session plus one retry plus 5 minutes."""
+    return 2 * DISCOVERY_SECONDS + RETRY_MARGIN_SECONDS
 
 
 class ComputeWait(RuntimeError):
@@ -238,7 +292,7 @@ def _prior_checkpoints(database, reports, day, industry, current):
     return audit
 
 
-def run(root, config, database, pipeline, observation, research_id, *, runtime, deadline):
+def run(root, config, database, pipeline, observation, research_id, *, runtime, deadline=None):
     """Return aggregate COMPLETE when every industry completed, or when every industry that did
     not was abandoned and at least one completed (owner, 2026-09-28).
 
@@ -261,7 +315,11 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
     scope = scope_id(policy)
     config = dict(config, _research_scope_id=scope)
     day = _day(runtime.utcnow())
-    deadline = min(deadline, time.monotonic() + config.get("research_timeout_seconds", 600))
+    # No fixed whole-run cap (owner, 2026-10-27; it was research_timeout_seconds, 2000 s). The run
+    # starts with a discovery session plus a retry plus 5 minutes, and each qualification launch
+    # extends it to cover that session, one retry and 5 minutes (extend_deadline). A caller's
+    # `deadline` replaces only the starting value.
+    deadline = time.monotonic() + initial_deadline_seconds() if deadline is None else deadline
     batch_limit = max(0, min(60, int(config.get("research_company_limit", 12))))
     compute_limit = min(21000, int(config.get("daily_compute_seconds", 10800)))
     reports = paths.reports(root)
@@ -277,10 +335,58 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
     pending = {}
     ready = []
     recovery_ready = []
+    sessions = {}   # industry -> (monotonic launch, companies, sequence, timeout) of its qualification session
+    started = queue.SimpleQueue()   # (token, limit, monotonic start) put by on_start from worker threads
+    queued = set()                  # tokens of sessions submitted but not yet started (waiting for a slot)
+    tokens = {}                     # future -> (industry, compute sequence)
+    run_over = threading.Event()    # set when this run ends: a session still waiting for a slot stops waiting
+    try:
+        worker_options = {"on_start", "stop"} <= set(inspect.signature(runtime.run_research_worker).parameters)
+    except (TypeError, ValueError):
+        worker_options = False
+
+    def session_done(industry, session, seconds):
+        started, companies, sequence, _ = session
+        record_session(database, research_id + ":" + _label(industry) + ":" + str(sequence), runtime.utcnow(),
+                       industry, companies, seconds)
+    wall = {"at": (dt.datetime.fromisoformat(runtime.utcnow())
+                   + dt.timedelta(seconds=max(0, deadline - time.monotonic()))).isoformat()}
 
     def deadline_at():
-        return (dt.datetime.fromisoformat(runtime.utcnow())
-                + dt.timedelta(seconds=max(0, deadline - time.monotonic()))).isoformat()
+        return wall["at"]
+
+    def extend_deadline(industry, seconds, at=None, span=None):
+        """At a qualification launch, and again when a session really starts (`at`, after its pacing
+        slot; review R2): the run lasts at least until then + 2 x that session's limit + 5 minutes (one
+        retry plus 5 min). Industries bound by this run's deadline move with it."""
+        nonlocal deadline
+        now = time.monotonic()
+        wanted = (now if at is None else at) + (2 * seconds + RETRY_MARGIN_SECONDS if span is None else span)
+        if wanted <= deadline:
+            return
+        previous = wall["at"]
+        deadline = wanted
+        wall["at"] = (dt.datetime.fromisoformat(runtime.utcnow()) + dt.timedelta(seconds=wanted - now)).isoformat()
+        for name, cache in caches.items():
+            if name == industry or cache.get("deadline_at") == previous:
+                cache["deadline_at"] = wall["at"]
+        states[industry]["deadline_extended_to"] = wall["at"]
+
+    def note_dropped(industry, stage, entries):
+        """Each entry left out on its own (owner, 2026-10-27): kept in the industry state for the
+        Failures page, and one plain line in the research log for the Logs page."""
+        for entry in entries:
+            # `source` (the posting or record's link) is part of what the entry IS, so two different
+            # postings with the same company, role and reason stay two entries; it is never shown.
+            record = {"stage": stage, "company": entry.get("company"), "role": entry.get("role"),
+                      "reason": entry.get("reason") or "it was malformed", "source": entry.get("source")}
+            listed = states[industry].setdefault("dropped_entries", [])
+            if record in listed:   # the same entry dropped again on a later try that day is listed once
+                continue
+            listed.append(record)
+            name = (record["company"] or "An entry") + (", " + record["role"] if record["role"] else "")
+            LOG.info("%s (%s research): skipped this entry because %s. The rest of the results were kept.",
+                     name, industry, record["reason"])
 
     def persist(industry):
         """Record an industry's state to disk. A write failure is noted, never raised.
@@ -318,7 +424,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
         caches[industry]["terminal"] = True
         persist(industry)
 
-    def defer(industry, error, resume, refused=None):
+    def defer(industry, error, resume, refused=None, shown=None):
         """Record a compute WAIT: retryable, with a next retry, and no failed-attempt charge.
 
         `resume` says what the next attempt must do once allowance exists: RESEARCH
@@ -346,18 +452,20 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             wait["refused_recovery_decision"] = refused
         cache["compute_waits"].append(wait)
         state.update(state="COMPUTE_WAIT", compute_wait=wait, next_retry_at=wait["next_retry_at"],
-                     error=str(error), error_type=type(error).__name__)
+                     error=shown or str(error), error_type=type(error).__name__)
         persist(industry)
 
-    def fail(industry, error):
+    def fail(industry, error, shown=None):
+        """`shown` (optional): the plain words the user sees for this failure; the raw error stays
+        in the failure record's diagnostic and the log (review R1 S6)."""
         if isinstance(error, ComputeWait):
-            defer(industry, error, "RESEARCH")
+            defer(industry, error, "RESEARCH", shown=shown)
             return
         if provider_limits.wait_of(error):
             # The provider refused the turn before any work: return the measured unused tail of
             # the reservation and wait; nothing is recorded as a failed attempt.
             completed_cleanly(industry, provider_limits.CODE)
-            defer(industry, error, "RESEARCH")
+            defer(industry, error, "RESEARCH", shown=shown)
             return
         state = states[industry]
         cache = caches[industry]
@@ -370,7 +478,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                    "report": state.get("report") if state.get("phase") == "qualification" else state.get("discovery_report"),
                    "log": state.get("log"), "plan_id": cache.get("plan_id"), "prior_result": _diagnostic(state)}
         cache["failures"].append(failure)
-        state.update(state="RECOVERY_PENDING", error=str(error), error_type=type(error).__name__)
+        state.update(state="RECOVERY_PENDING", error=shown or str(error), error_type=type(error).__name__)
         persist(industry)
         if len(cache.get("recovery_decisions", [])) >= 2:
             abandon(industry, "RECOVERY_DECISIONS_EXHAUSTED")
@@ -442,15 +550,15 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                 states[industry]["compute_refunded_seconds"] = states[industry].get("compute_refunded_seconds", 0) + credited
                 persist(industry)
 
-    def submit(executor, industry, phase, command, prompt, output):
-        # The ceiling was a hard `min(120, ...)`, so a worker got 120 seconds however the config
-        # was set (owner, 2026-09-23). Qualification opens a dozen live pages per company, and
-        # every industry but one died on TimeoutExpired mid-search, every day: on 2026-09-23 the
-        # AI worker had already found Polybius's senior cloud infrastructure role and was checking
-        # its founder when it was killed. `research_timeout_seconds` bounds the WHOLE RUN, not a
-        # worker, so raising it could never have helped. The per-industry allowance in reserve()
-        # and the research compute ceiling still bound what is actually spent.
-        seconds = reserve(industry, phase, min(1800, max(1, int(config.get("research_phase_timeout_seconds", 120)))))
+    def submit(executor, industry, phase, command, prompt, output, companies=0):
+        # A whole-run cap never bounds one worker (the old research_timeout_seconds); the
+        # per-industry allowance in reserve() and the research compute ceiling still bound spend.
+        # Session limits by formula (owner, 2026-10-27): discovery 300 s flat; qualification
+        # 120 s + 1.5 x the install's slow end x its companies, set here from the actual count.
+        maximum = DISCOVERY_SECONDS if phase == "discovery" else qualification_seconds(database, companies)
+        if phase == "qualification":
+            extend_deadline(industry, maximum)
+        seconds = reserve(industry, phase, min(SESSION_CEILING_SECONDS, maximum))
         cache = caches[industry]
         directive = cache.pop("retry_directive", None)
         if directive:
@@ -464,11 +572,46 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                              "instructions": "WITHHELD: DISCOVERY_REMAINS_SEED_FREE_USE_THE_METHOD_WITHIN_THE_ASSIGNED_INDUSTRY"}
             prompt = "ORCHESTRATOR RECOVERY DIRECTIVE (original scope and constraints still apply):\n" + json.dumps(directive) + "\n\n" + prompt
         log = logs / (research_id + "." + _label(industry) + "." + str(cache["compute_sequence"]) + "." + phase + ".log")
+        if phase in ("discovery", "qualification"):
+            # Save as it goes (R1, owner 2026-10-27): the session's own save tool and journal.
+            limit = min(20, cache.get("discovery_limit") or 0) if phase == "discovery" else 0
+            command = research_tools.attach(command, research_tools.prepare(output, phase, industry, limit, policy, config))
         states[industry].update(state="RUNNING", phase=phase, log=str(log))
         persist(industry)
         seconds = min(seconds, remaining(industry))
-        future = executor.submit(runtime.run_research_worker, root, command, prompt, log, seconds)
+        token = (industry, cache["compute_sequence"])
+        extra = {}
+        if worker_options:
+            # Under provider pacing a session may first wait for a slot (review R2, 2026-10-27): its own
+            # clock and the run deadline count from when it really starts, and a wait still going when
+            # the run ends stops there instead of starting a session whose result would be discarded.
+            # A discovery's run time counts from its real start like the run's start did (discovery plus
+            # a retry plus 5 minutes); a qualification's is its limit twice plus 5 minutes.
+            span = initial_deadline_seconds() if phase == "discovery" else 2 * maximum + RETRY_MARGIN_SECONDS
+            extra = {"on_start": lambda at, token=token, span=span: started.put((token, span, at)),
+                     "stop": run_over.is_set}
+            queued.add(token)
+        future = executor.submit(runtime.run_research_worker, root, command, prompt, log, seconds, **extra)
         pending[future] = (industry, phase, output)
+        tokens[future] = token
+        if phase == "qualification":
+            sessions[industry] = (time.monotonic(), companies, cache["compute_sequence"], seconds)
+
+    def apply_starts():
+        """Sessions that really started since the last look: extend the deadline from that start."""
+        while True:
+            try:
+                (industry, sequence), span, at = started.get_nowait()
+            except queue.Empty:
+                return
+            queued.discard((industry, sequence))
+            extend_deadline(industry, None, at, span)
+            session = sessions.get(industry)
+            if session and session[2] == sequence:
+                sessions[industry] = (at,) + session[1:]
+
+    def waiting_for_slot():
+        return any(tokens.get(future) in queued for future in pending)
 
     def discover(executor, industry):
         cache = caches[industry]
@@ -554,11 +697,16 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             raise RuntimeError("Daily company research allowance exhausted before planning")
         output = reports / (research_id + "." + _label(industry) + "." + str(cache.get("compute_sequence", 0)) + ".qualification.json")
         remaining()
+        # After a cut-off session the retry covers only the companies not yet done (owner, 2026-10-27, "3: a").
+        done = {"done_companies": list(cache["saved_done"])} if cache.get("saved_done") else {}
         plan, plan_id, prompt, command = runtime.research_inputs(
             root, config, database, pipeline, observation, output, companies=own_names, industry=industry,
-            discovery=cache["discovery"])
+            discovery=cache["discovery"], **done)
         if not plan_id.endswith(":scope:" + scope):
             raise ValueError("RESEARCH_PRODUCER_SCOPED_PLAN_REQUIRED")
+        saved_today = research_workflow.saved_companies(database, plan_id)   # an earlier run's cut-offs (S9)
+        if saved_today:
+            cache["saved_done"] = list(dict.fromkeys(list(cache.get("saved_done") or []) + saved_today))
         # "Industry plan exceeds its validated discovery scope" is DELETED (owner, 2026-09-23:
         # "Remove this ... Im sure this is a python comparison that happens and blocks"). It was:
         # the plan day (already enforced by get_plan's "Expired assignment"), an assignment-count
@@ -578,7 +726,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                      assignments_without_discovery_evidence=plan.get("assignments_without_discovery_evidence", []))
         if database.in_transaction:
             raise RuntimeError("Industry reservations must be committed before launching qualification")
-        submit(executor, industry, "qualification", command, prompt, output)
+        submit(executor, industry, "qualification", command, prompt, output, len(plan["assignments"]))
 
     def release_dead_shared_owners(industry):
         """Hand a waiting industry the companies its FAILED owners claimed. True if any moved.
@@ -757,6 +905,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                                 # "UNIQUE constraint failed: rw_slots.plan_id, rw_slots.company"
                                 # (attempt 9, Healthcare and Telecom). Release all three together.
                                 database.execute("DELETE FROM rw_slots WHERE plan_id=?", (plan_id,))
+                                database.execute("DELETE FROM rw_saved_companies WHERE plan_id=?", (plan_id,))   # review T5
                                 database.execute("DELETE FROM rw_plans WHERE id=?", (plan_id,))
                                 dropped_plans.append(plan_id)
                 states[industry]["reopened"] = True
@@ -800,7 +949,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                 continue
             names = industry_discovery.validate(cached["discovery"], {**policy, "industries": [industry]},
                                                 runtime.utcnow(), cached["discovery_limit"])
-            if cached["discovery"]["discovery_status"] != "COMPLETE":
+            if cached["discovery"]["discovery_status"] != "COMPLETE" and not names:
                 raise ValueError("Only successful discovery can be reused")
             prior = cached.get("result", {})
             if cached.get("plan_id"):
@@ -838,6 +987,26 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             fail(industry, error)
             abandon(industry, "CHECKPOINT_RECONCILIATION_REQUIRED")
 
+    # The day's skipped entries carry across its attempts (review R6, 2026-10-27): a later try that
+    # finishes the day still lists what an earlier try skipped, each entry once.
+    for industry in industries:
+        saved = caches[industry].get("result")
+        earlier = saved.get("dropped_entries") if isinstance(saved, dict) else None
+        listed = states[industry].setdefault("dropped_entries", [])
+        for entry in earlier if isinstance(earlier, list) else []:
+            if isinstance(entry, dict) and entry not in listed:
+                listed.append(entry)
+        if not listed:
+            states[industry].pop("dropped_entries")
+        # The same for the day's cut-off sessions (review T3): each listed once across tries.
+        earlier = saved.get("session_cut_offs") if isinstance(saved, dict) else None
+        cut_offs = states[industry].setdefault("session_cut_offs", [])
+        for entry in earlier if isinstance(earlier, list) else []:
+            if isinstance(entry, dict) and not any(same_cut_off(entry, listed) for listed in cut_offs):
+                cut_offs.append(entry)
+        if not cut_offs:
+            states[industry].pop("session_cut_offs")
+
     allocated = sum(cache.get("discovery_limit", 0) for cache in caches.values() if "discovery" in cache)
     fresh = [industry for industry in industries
              if states[industry]["state"] == "PENDING" and "discovery" not in caches[industry]]
@@ -846,7 +1015,168 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
     for position, industry in enumerate(fresh):
         caches[industry]["discovery_limit"] = min(20, share + (position < extra))
 
-    executor = ThreadPoolExecutor(max_workers=min(8, len(industries)), thread_name_prefix="industry-research")
+    def saved_entries(output, phase):
+        """What the session saved as it went (R1): one entry per identity, read after it ended."""
+        return research_tools.read_journal(research_tools.journal_path(output), phase) if output else []
+
+    def same_cut_off(one, other):
+        """Two cut-off notes are one when they came from the same session (review U1); a note without a
+        session (older) falls back to the whole entry."""
+        if one.get("session") or other.get("session"):
+            return one.get("session") == other.get("session")
+        return one == other
+
+    def note_cut_off(industry, stage, note, output):
+        # `session` says which session it was (never shown): two cut-offs with the same words stay two.
+        entry = {"stage": stage, "note": note, "session": Path(output).name if output else None}
+        listed = states[industry].setdefault("session_cut_offs", [])
+        if not any(same_cut_off(entry, other) for other in listed):
+            listed.append(entry)
+
+    def accept_discovery(industry, result, cut_off=None, note=None, output=None):
+        """`cut_off`: the error that ended the session early, when it did (R1). A provider wait (429)
+        is still waited out before qualification launches (review R1 S3)."""
+        cache, state = caches[industry], states[industry]
+        dropped = []
+        result = industry_discovery.screen(result, {**policy, "industries": [industry]},
+                                           runtime.utcnow(), cache["discovery_limit"], dropped)
+        note_dropped(industry, "discovery", dropped)
+        persist(industry)
+        # A PARTIAL discovery with at least one valid company goes on to
+        # qualification with those companies (owner, 2026-10-27: Airia and
+        # WitnessAI were discarded when CB Insights returned 403); its blockers are
+        # kept as a noted problem. A FAILED or empty one is retried as before.
+        if not result["companies"]:
+            raise RuntimeError("Industry discovery incomplete; raw output retained for bounded retry")
+        if result["discovery_status"] != "COMPLETE":
+            state["discovery_blockers"] = list(result["blockers"])
+        cache["discovery"] = result
+        if cut_off is None:   # a cut-off session keeps its whole charge, like any session that did not finish
+            completed_cleanly(industry, "RESEARCH_DISCOVERY_COMPLETE")
+        else:
+            note_cut_off(industry, "discovery", note, output)
+        persist(industry)
+        if cut_off is not None and provider_limits.wait_of(cut_off):
+            fail(industry, cut_off, shown=note)   # the short provider wait; it resumes at qualification
+            return
+        ready.append(industry)
+
+    def accept_research(industry, result, output, session, finished_at, final_used, cut_off=None, note=None):
+        cache, state = caches[industry], states[industry]
+        done = list(cache.get("saved_done") or [])
+        processed = research_workflow.process_research(database, result, plan_id=cache["plan_id"],
+                                                       policy=policy, now=runtime.utcnow(),
+                                                       **({"done": done} if done else {}))
+        cache.setdefault("progress_evidence", {})["company_coverage"] = processed.get("company_coverage", {})
+        processed_path = output.with_suffix(".processed.json")
+        runtime.write_json(processed_path, processed)
+        note_dropped(industry, "qualification", processed.get("dropped_entries", []))
+        final_used.append(True)
+        stored = runtime.store_research(database, pipeline, processed)
+        rejected = [entry for entry in stored if not entry.get("dropped")]
+        note_dropped(industry, "saving", [entry for entry in stored if entry.get("dropped")])
+        state["completed_at"] = runtime.utcnow()
+        coverage = processed.get("company_coverage", {})
+        if cut_off is not None:
+            # A cut-off session is a PARTIAL result that keeps what it saved (owner, 2026-10-27, "3: a");
+            # the companies it covered are done, and only the rest go to the retry.
+            cache["saved_done"] = list(dict.fromkeys(done + list(coverage.get("covered", []))))
+            # Kept for the day, so a later run of the same plan skips them too (review R1 S9).
+            research_workflow.record_saved_companies(database, cache["plan_id"], coverage.get("covered", []),
+                                                     runtime.utcnow())
+            note_cut_off(industry, "qualification", note, output)
+        left = cut_off is not None and bool(coverage.get("uncovered"))
+        if not left:
+            research_workflow.release_unused_slots(database, cache["plan_id"], completed_read_only=True)
+        # The industry completes whenever its research ran (owner, 2026-09-28);
+        # unresolved companies are recorded individually with their diagnostics
+        # instead of failing the whole industry.
+        industry_status = processed.get("industry_status", "FAILED")
+        if session and industry_status == "COMPLETE" and cut_off is None:
+            # Only a session that actually checked its companies is a timing sample; a
+            # fast empty exit would drag the slow end down (review R1, 2026-10-27).
+            session_done(industry, session, finished_at - session[0])
+        resolution = processed.get("company_resolution", {})
+        state.update(state="COMPLETE" if industry_status == "COMPLETE" else "FAILED",
+                     industry_status=industry_status,
+                     worker_status=processed["research_status"], summary=processed["summary"],
+                     result_id=processed["result_id"], processed_report=str(processed_path),
+                     rejected_drafts=rejected,
+                     blockers=["DISCOVERY_PARTIAL: " + blocker for blocker in (cache["discovery"].get("blockers") or [])]
+                     + processed["blockers"],
+                     # Companies an earlier cut-off session of this plan already finished stay resolved.
+                     resolved_companies=list(dict.fromkeys(
+                         (cache.get("saved_done") or []) + [entry["company"] for entry in resolution.get("resolved", [])])),
+                     unresolved_companies=resolution.get("unresolved", []),
+                     rejected_opportunities=processed.get("rejected_opportunities", []))
+        if state["state"] == "COMPLETE" and cache.get("shared_owners"):
+            state["state"] = "WAITING_SHARED_RESEARCH"
+        if industry_status == "COMPLETE" and not left:
+            state.pop("error", None)
+            state.pop("error_type", None)
+            if cut_off is None:
+                completed_cleanly(industry, "RESEARCH_QUALIFICATION_COMPLETE")
+        persist(industry)
+        if left:
+            fail(industry, cut_off, shown=note)
+        elif industry_status != "COMPLETE":
+            fail(industry, RuntimeError("Research incomplete: nothing was researched or the result is invalid: "
+                                        + "; ".join(processed["blockers"])))
+
+    def take_final(industry, phase, output, session, finished_at, final_used):
+        """A finished session's final output, merged with what it saved (R1), through the normal path."""
+        result = json.loads(output.read_text())
+        cache = caches[industry]
+        state = states[industry]
+        state["worker_inability"] = research_recovery.worker_inability(result.get("inability"))
+        cache["progress_evidence"] = {"summary": result.get("summary"), "blockers": result.get("blockers"),
+                                      "status": result.get("discovery_status", result.get("research_status"))}
+        if phase == "discovery":
+            result = {key: value for key, value in result.items() if key != "inability"}
+            # The final output wins; a saved company is added only when it has no valid copy there (R1, S4).
+            result = research_tools.merge_discovery(result, saved_entries(output, phase), cache["discovery_limit"],
+                                                    industries=[industry], now=runtime.utcnow())
+            accept_discovery(industry, result)
+            return
+        if (not isinstance(result, dict) or not isinstance(result.get("summary"), str)
+                or not result["summary"].strip()
+                or any(not isinstance(result.get(field), list) for field in ("opportunities", "drafts", "blockers"))
+                or result.get("research_status") not in {"COMPLETE", "PARTIAL", "FAILED"}):
+            raise ValueError("Research output is missing its substantive result envelope")
+        # The final output wins; saved roles are added only for companies it does not cover (R1, S4).
+        result = research_tools.merge_research(result, saved_entries(output, phase), now=runtime.utcnow(), policy=policy)
+        accept_research(industry, result, output, session, finished_at, final_used)
+
+    def salvage(industry, phase, output, session, error):
+        """A session that ended without a usable final answer: keep what it saved (R1). True when it
+        saved something and that was taken in; False leaves the failure to fail() exactly as before."""
+        if phase not in ("discovery", "qualification"):
+            return False
+        saved = saved_entries(output, phase)
+        if not saved:
+            return False
+        cache, state = caches[industry], states[industry]
+        note = research_tools.cut_off_note(error, saved, phase, answered=bool(output) and Path(output).is_file())
+        cache["progress_evidence"] = {"summary": note, "blockers": [note], "status": "PARTIAL"}
+        if phase == "discovery":
+            try:
+                accept_discovery(industry, research_tools.merge_discovery(
+                    None, saved, cache["discovery_limit"], note), cut_off=error, note=note, output=output)
+            except (ValueError, RuntimeError):
+                return False
+            return True
+        state.pop("worker_inability", None)
+        try:
+            accept_research(industry, research_tools.merge_research(None, saved, note), output, session, None,
+                            [], cut_off=error, note=note)
+        except Exception as problem:   # the session's own failure is then recorded by fail() as before
+            LOG.warning("%s research: could not keep the roles its cut-off session saved (%s: %s)",
+                        industry, type(problem).__name__, problem)
+            return False
+        return True
+
+    # Every industry runs at once (owner, 2026-10-27: "Remove the parallel cap"; it was 8).
+    executor = ThreadPoolExecutor(max_workers=max(1, len(industries)), thread_name_prefix="industry-research")
     try:
         for industry in industries:
             if runtime.RESEARCH_STOP.is_set():
@@ -868,15 +1198,28 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
 
         while pending or ready or recovery_ready or any(
                 state["state"] == "WAITING_SHARED_RESEARCH" for state in states.values()):
-            if runtime.RESEARCH_STOP.is_set() or time.monotonic() >= deadline:
+            apply_starts()
+            # A session still waiting for its pacing slot is not out of time: its clock has not started.
+            if runtime.RESEARCH_STOP.is_set() or time.monotonic() >= deadline and not waiting_for_slot():
                 break
-            finished, _ = wait(pending, timeout=0 if ready or recovery_ready else min(1, deadline - time.monotonic()),
+            finished, _ = wait(pending, timeout=0 if ready or recovery_ready else min(1, max(0.05, deadline - time.monotonic())),
                                return_when=FIRST_COMPLETED)
             finished.update(future for future in pending if future.done())
+            apply_starts()   # a session that started and finished since the last look extends first
             for future in sorted(finished, key=lambda item: pending[item][1] != "qualification"):
                 industry, phase, output = pending.pop(future)
+                session = sessions.pop(industry, None) if phase == "qualification" else None
+                final_used = []   # set once the final output reaches the store: no salvage after that
                 try:
-                    returned = future.result()
+                    try:
+                        returned = future.result()
+                    except subprocess.TimeoutExpired:
+                        # Cut off at its limit: recorded as having taken at least that limit, so the
+                        # slow end can grow back after a run of fast sessions (review R1, 2026-10-27).
+                        if session:
+                            session_done(industry, session, max(time.monotonic() - session[0], session[3]))
+                        raise
+                    finished_at = time.monotonic()
                     remaining(industry)
                     if phase == "recovery":
                         cache = caches[industry]
@@ -904,59 +1247,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                             else:
                                 discover(executor, industry)
                         continue
-                    result = json.loads(output.read_text())
-                    cache = caches[industry]
-                    state = states[industry]
-                    state["worker_inability"] = research_recovery.worker_inability(result.get("inability"))
-                    cache["progress_evidence"] = {"summary": result.get("summary"), "blockers": result.get("blockers"),
-                                                  "status": result.get("discovery_status", result.get("research_status"))}
-                    if phase == "discovery":
-                        result = {key: value for key, value in result.items() if key != "inability"}
-                        industry_discovery.validate(result, {**policy, "industries": [industry]},
-                                                    runtime.utcnow(), cache["discovery_limit"])
-                        if result["discovery_status"] != "COMPLETE":
-                            raise RuntimeError("Industry discovery incomplete; raw output retained for bounded retry")
-                        cache["discovery"] = result
-                        completed_cleanly(industry, "RESEARCH_DISCOVERY_COMPLETE")
-                        persist(industry)
-                        ready.append(industry)
-                        continue
-                    if (not isinstance(result, dict) or not isinstance(result.get("summary"), str)
-                            or not result["summary"].strip()
-                            or any(not isinstance(result.get(field), list) for field in ("opportunities", "drafts", "blockers"))
-                            or result.get("research_status") not in {"COMPLETE", "PARTIAL", "FAILED"}):
-                        raise ValueError("Research output is missing its substantive result envelope")
-                    processed = research_workflow.process_research(database, result, plan_id=cache["plan_id"],
-                                                                   policy=policy, now=runtime.utcnow())
-                    cache["progress_evidence"]["company_coverage"] = processed.get("company_coverage", {})
-                    processed_path = output.with_suffix(".processed.json")
-                    runtime.write_json(processed_path, processed)
-                    rejected = runtime.store_research(database, pipeline, processed)
-                    state["completed_at"] = runtime.utcnow()
-                    research_workflow.release_unused_slots(database, cache["plan_id"], completed_read_only=True)
-                    # The industry completes whenever its research ran (owner, 2026-09-28);
-                    # unresolved companies are recorded individually with their diagnostics
-                    # instead of failing the whole industry.
-                    industry_status = processed.get("industry_status", "FAILED")
-                    resolution = processed.get("company_resolution", {})
-                    state.update(state="COMPLETE" if industry_status == "COMPLETE" else "FAILED",
-                                 industry_status=industry_status,
-                                 worker_status=processed["research_status"], summary=processed["summary"],
-                                 result_id=processed["result_id"], processed_report=str(processed_path),
-                                 rejected_drafts=rejected, blockers=processed["blockers"],
-                                 resolved_companies=[entry["company"] for entry in resolution.get("resolved", [])],
-                                 unresolved_companies=resolution.get("unresolved", []),
-                                 rejected_opportunities=processed.get("rejected_opportunities", []))
-                    if state["state"] == "COMPLETE" and cache.get("shared_owners"):
-                        state["state"] = "WAITING_SHARED_RESEARCH"
-                    if industry_status == "COMPLETE":
-                        state.pop("error", None)
-                        state.pop("error_type", None)
-                        completed_cleanly(industry, "RESEARCH_QUALIFICATION_COMPLETE")
-                    persist(industry)
-                    if industry_status != "COMPLETE":
-                        fail(industry, RuntimeError("Research incomplete: nothing was researched or the result is invalid: "
-                                                    + "; ".join(processed["blockers"])))
+                    take_final(industry, phase, output, session, finished_at, final_used)
                 except Exception as error:
                     if phase == "recovery" and provider_limits.wait_of(error):
                         # No decision was made: the pending entry is not a spent recovery
@@ -969,6 +1260,8 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                         entry = caches[industry]["recovery_decisions"][-1]
                         entry.update(state="FAILED", error_type=type(error).__name__, error=str(error))
                         abandon(industry, "RECOVERY_DECISION_FAILED")
+                    elif not final_used and salvage(industry, phase, output, session, error):
+                        pass   # the saved entries were kept (R1); salvage queued any retry
                     else:
                         fail(industry, error)
             if ready:
@@ -993,9 +1286,27 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
         runtime.RESEARCH_STOP.set()
         raise
     finally:
+        run_over.set()
         for future in pending:
             future.cancel()
         executor.shutdown(wait=True, cancel_futures=True)
+
+    # Sessions still going when the run ended were stopped with it; what they saved is kept (R1).
+    for future, (industry, phase, output) in list(pending.items()):
+        if phase in ("discovery", "qualification") and future.done() and not future.cancelled():
+            error = future.exception()
+            if error is None:
+                # It finished but was not taken in before the run ended: its final output goes through
+                # the normal path; only when that is unusable are its saves kept as a cut-off (review R1 S8).
+                used = []
+                try:
+                    take_final(industry, phase, output, sessions.get(industry), time.monotonic(), used)
+                    continue
+                except Exception as problem:
+                    if used:
+                        continue
+                    error = problem
+            salvage(industry, phase, output, sessions.get(industry), error)
 
     for industry in industries:
         if states[industry]["state"] in {"PENDING", "RUNNING", "RECOVERING", "RECOVERY_PENDING"}:
@@ -1031,7 +1342,15 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
     # next day. Only a wait on OUR allowance moves; a provider limit keeps its stated reset.
     # The retry is taken only when a phase reservation fits right now, measured with the same
     # arithmetic reserve_compute admits against, so it cannot turn into a same-day wait loop.
-    phase_seconds = min(1800, max(1, int(config.get("research_phase_timeout_seconds", 120))))
+    # The size of the session each waiting industry resumes with (the limits submit() reserves).
+    def resume_seconds(industry):
+        try:
+            return qualification_seconds(database, len(industry_discovery.validate(
+                caches[industry]["discovery"], {**policy, "industries": [industry]}, runtime.utcnow(),
+                caches[industry].get("discovery_limit", 20))))
+        except (KeyError, TypeError, ValueError):
+            return DISCOVERY_SECONDS
+    phase_seconds = max([resume_seconds(industry) for industry in waiting] or [DISCOVERY_SECONDS])
     if (compute_wait and all(states[industry]["compute_wait"]["reason"] == "DAILY_COMPUTE_ALLOWANCE_EXHAUSTED"
                              for industry in waiting)
             and compute_limit - workflow_tasks.compute_used(database, workflow_tasks.budget_day(runtime.utcnow(), TIMEZONE)) >= phase_seconds):

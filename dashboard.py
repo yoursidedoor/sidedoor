@@ -209,7 +209,7 @@ STATUS = {"reading": ("Checking", "info"), "done": ("Done", "success"), "failed"
           "not_started": ("Not started", "muted")}
 STEP_KEYS = {number: key for number, key, _ in setup_steps.STEPS}
 STEP_TITLES = {number: title for number, _, title in setup_steps.STEPS}
-GUIDES = ("openrouter", "codex", "linkedin", "browser", "chrome", "license")
+GUIDES = ("openrouter", "codex", "claude", "antigravity", "linkedin", "browser", "chrome", "license")
 
 
 def create_app(secret, port, home=None, root=None, config=None, browser=None, relay_url=setup_steps.RELAY_URL):
@@ -345,8 +345,11 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             # that breaks later shows banner 6 pointing to Settings (Settings > Connections is E6.T8).
             broken = []
             import provider_limits
-            if not progress["done"][6] and not provider_limits.codex_missing(home):
-                broken.append("Codex")   # while Codex can't be found, its own banner says so (one banner)
+            # U1 3g G1: the chosen engine; while its own wait banner shows, that banner says so (one banner)
+            engine_waits = provider_limits.waits(home, finished=True)
+            if (not progress["done"][6] and not engine_waits["codex_missing"] and not engine_waits["claude"]
+                    and not engine_waits.get("antigravity")):
+                broken.append(setup_steps.ENGINE_LABELS[setup_steps.chosen_engine(state)])
             if not setup_steps.chrome_path():
                 broken.append("Google Chrome")
             for name in broken:
@@ -364,7 +367,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             banners.append({"tone": "warning", "text": notice,
                             "action_label": "Start at login", "action_href": "/settings#login"})
         import openai_auth  # E0.T8: "Your OpenAI API key is out of credit" (and rate limit, refused key)
-        api_banner = openai_auth.banner(home)
+        # U1 3g G2: the OpenAI key's banners are Codex's: hidden (kept) while another engine is chosen
+        api_banner = openai_auth.banner(home) if setup_steps.chosen_engine(state) == "codex" else None
         if api_banner:
             if not progress["finished"]:
                 api_banner = dict(api_banner, action_href="/setup#step-6")
@@ -578,7 +582,9 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     def step_view(number, progress, extra=None):
         state = progress["state"]
         key = STEP_KEYS[number]
-        saved = state["steps"].get(key, {})
+        engine = setup_steps.chosen_engine(state)
+        # U1 3g: step 6 is the chosen engine's (its record is kept under the engine's own name)
+        saved = state["steps"].get(engine if number == 6 and engine in ("claude", "antigravity") else key, {})
         status = saved.get("status", "not_started")
         message = saved.get("message")
         if number == 4:
@@ -590,7 +596,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             import license_clock  # LA4: a saved message with a raw UTC time shows it in local time
             message = license_clock.local_message(saved, config).get("message")
         elif number == 6 and status == "done" and not progress["done"][6]:
-            status, message = "failed", "Codex is not installed."
+            status, message = "failed", "%s is not installed." % setup_steps.ENGINE_LABELS[engine]
         elif number == 8:
             status = "done" if progress["done"][8] else ("failed" if status == "failed" else status)
             if status == "done" and not state.get("webmail"):
@@ -607,7 +613,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         locked = progress["locked"].get(number)
         if locked:
             label, tone = "Needs step %d first" % locked, "muted"
-        view = {"number": number, "key": key, "title": STEP_TITLES[number], "status": status, "label": label,
+        title = setup_steps.ENGINE_TITLES[engine] if number == 6 else STEP_TITLES[number]
+        view = {"number": number, "key": key, "title": title, "status": status, "label": label,
                 "tone": tone, "message": message, "locked": locked, "saved": saved, "state": state,
                 "progress": progress, "oob": False, "email_locked": setup_steps.email_locked(state),
                 "locked_line": setup_steps.LOCKED_LINE, "support": setup_steps.SUPPORT_EMAIL,
@@ -624,6 +631,15 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             stored = setup_steps.saved_openrouter_key(home)
             if stored and not setup_steps.openrouter_tested(home):
                 view["saved_key"] = settings_page.masked(stored)
+        if number == 6:  # U1 3g: the engine choice, and Claude's sign-in choice (its key only ever masked)
+            view.update(engine=engine, engine_options=setup_steps.engine_options(),
+                        antigravity_risk=setup_steps.ANTIGRAVITY_RISK,
+                        claude_auth_view=setup_steps.claude_auth_view(state),
+                        claude_key=settings_page.masked(setup_steps.shown_claude_key(home)) if engine == "claude" else None,
+                        claude_path=state.get("claude_path"), antigravity_path=state.get("antigravity_path"))
+            models, main_model, read_model, gone = setup_steps.antigravity_model_view(state)   # M2, P3
+            view.update(antigravity_models=models, antigravity_model=main_model, antigravity_read_model=read_model,
+                        antigravity_model_note=setup_steps.ANTIGRAVITY_MODEL_NOTE, antigravity_model_gone=gone)
         if number == 6:  # E0.T8: the sign-in choice; a saved key only ever masked here
             import openai_auth
             stored = openai_auth.shown_key(home)   # None while the keychain waits (the waiting line shows)
@@ -808,6 +824,55 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         if setup_steps.license_done(home):  # a newly active key: read LinkedIn again at once
             await run_in_threadpool(setup_steps.linkedin_status, home, relay_url)
         return setup_response(request, 5)
+
+    # U1 3g: step 6 starts with the engine choice; Claude's sign-in mirrors Codex's.
+    @app.post("/setup/engine")
+    async def engine_choice(request: Request):
+        form = await form_of(request)
+        state = await run_in_threadpool(setup_steps.choose_engine, form.get("engine"), home)
+        if setup_steps.chosen_engine(state) == "claude":
+            await run_in_threadpool(setup_steps.check_claude, home)
+        elif setup_steps.chosen_engine(state) == "antigravity":   # U1 4: also adds the A1 allow rules
+            await run_in_threadpool(setup_steps.check_antigravity, home)
+        return setup_response(request, 6)
+
+    @app.post("/setup/antigravity")
+    def antigravity_check(request: Request):
+        setup_steps.check_antigravity(home)
+        return setup_response(request, 6)
+
+    @app.post("/setup/antigravity/models")
+    async def antigravity_models(request: Request):   # M2: the user's own models
+        form = await form_of(request)
+        await run_in_threadpool(setup_steps.choose_antigravity_models, form.get("main"), form.get("read"), home)
+        return setup_response(request, 6)
+
+    @app.post("/setup/claude")
+    def claude_check(request: Request):
+        setup_steps.check_claude(home)
+        return setup_response(request, 6)
+
+    @app.post("/setup/claude/auth")
+    async def claude_auth(request: Request):
+        form = await form_of(request)
+        await run_in_threadpool(setup_steps.choose_claude_auth, form.get("choice"), home)
+        return setup_response(request, 6)
+
+    @app.post("/setup/claude/key")
+    async def claude_key(request: Request):
+        form = await form_of(request)
+        typed = form.get("key") if isinstance(form.get("key"), str) else ""
+        state = await run_in_threadpool(setup_steps.save_claude_key, typed, home, form.get("to_file") == "1")
+        if state.get("keychain_refused"):
+            return setup_response(request, 6, {"keychain_notice": state["keychain_refused"]})
+        return setup_response(request, 6)
+
+    @app.post("/setup/claude/key/remove")
+    async def claude_key_remove(request: Request):
+        state = await run_in_threadpool(setup_steps.remove_claude_key, home)
+        if state.get("keychain_refused"):
+            return setup_response(request, 6, {"keychain_notice": state["keychain_refused"]})
+        return setup_response(request, 6)
 
     @app.post("/setup/codex")
     def codex(request: Request):

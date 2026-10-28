@@ -5,7 +5,6 @@ from pathlib import Path
 import signal
 import sqlite3
 import subprocess
-import sys
 import os
 import unittest
 from unittest import mock
@@ -19,7 +18,6 @@ import referrals
 import research_workflow as research
 import reply_worker as worker
 import workflow_tasks
-import posix_process_mocks
 from test_pipeline_routing import message as inbound_message, opportunity
 from backlog_fixture import setUpModule, tearDownModule  # noqa: F401 (fixture messages predate the reply cutoff)
 
@@ -211,115 +209,6 @@ class ReplyWorkerValidationReview(unittest.TestCase):
         self.assertEqual("CLASSIFICATION_FIELD_TOO_LONG", raised.exception.code)
 
 
-class ReplyWorkerSubprocessReview(unittest.TestCase):
-    def setUp(self):
-        posix_process_mocks.simulate(self)
-
-    def fake_spawn(self, output=b"{}", returncode=0, error=None):
-        def spawn(command, **kwargs):
-            self.command = command
-            self.options = kwargs
-            Path(command[command.index("--output-last-message") + 1]).write_bytes(output)
-            process = mock.Mock(pid=987654321, returncode=returncode)
-            process.communicate.side_effect = error
-            process.poll.return_value = None if error else returncode
-            self.process = process
-            return process
-        return spawn
-
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_actual_execute_path_uses_bounded_stdin_and_isolated_environment(self):
-        environment = {"HOME": "/fixture", "PATH": "/usr/bin", "LANG": "en_US.UTF-8",
-                       "OPENAI_API_KEY": "fixture-secret", "CODEX_API_KEY": "fixture-secret",
-                       "OPENAI_BASE_URL": "https://invalid.example", "ANTHROPIC_API_KEY": "fixture-secret",
-                       "AZURE_OPENAI_API_KEY": "fixture-secret", "HTTP_PROXY": "https://invalid.example"}
-        with mock.patch.dict(worker.os.environ, environment, clear=True), \
-                mock.patch.object(worker.subprocess, "Popen", side_effect=self.fake_spawn()) as spawn:
-            self.assertEqual("{}", worker._execute(configuration(), "UNTRUSTED fixture", "{}", 7))
-        spawn.assert_called_once()
-        self.process.communicate.assert_called_once_with("UNTRUSTED fixture", timeout=7)
-        self.assertEqual({"HOME", "PATH", "LANG"}, set(self.options["env"]))
-        self.assertTrue(self.options["start_new_session"])
-        self.assertEqual(subprocess.DEVNULL, self.options["stdout"])
-        self.assertEqual(subprocess.PIPE, self.options["stderr"])  # in memory only (BE)
-        self.assertIs(self.options["preexec_fn"], worker._limits)
-        self.assertNotIn("UNTRUSTED fixture", self.command)
-        self.assertFalse(Path(self.options["cwd"]).exists())
-
-    def test_command_disables_tools_approvals_and_paid_api_auth(self):
-        command = worker._command(configuration(), Path("schema"), Path("output"))
-        for setting in ('approval_policy="never"', 'forced_login_method="chatgpt"',
-                        'model_provider="openai"', 'web_search="disabled"', "features.shell_tool=false",
-                        "features.apps=false", "features.skills=false", "features.apply_patch_freeform=false",
-                        "features.multi_agent=false", "mcp_servers={}"):
-            self.assertIn(setting, command)
-        self.assertIn("--ignore-user-config", command)
-        self.assertEqual("read-only", command[command.index("--sandbox") + 1])
-
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_timeout_kills_process_group_and_has_bounded_reap(self):
-        error = subprocess.TimeoutExpired("fixture", 1)
-        with mock.patch.object(worker.subprocess, "Popen", side_effect=self.fake_spawn(error=error)), \
-                mock.patch.object(worker.os, "killpg") as kill:
-            with self.assertRaises(worker.Held) as raised:
-                worker._execute(configuration(), "fixture", "{}", 1)
-        self.assertTrue(raised.exception.retry)
-        kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
-        self.process.wait.assert_called_once_with(timeout=5)
-
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_exited_parent_does_not_leave_descendants_outside_timeout(self):
-        with mock.patch.object(worker.subprocess, "Popen", side_effect=self.fake_spawn()), \
-                mock.patch.object(worker.os, "killpg") as kill:
-            worker._execute(configuration(), "fixture", "{}", 1)
-        kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
-
-    def test_service_sigterm_installs_cleanup_handler_and_restores_it(self):
-        with mock.patch.object(worker.subprocess, "Popen", side_effect=self.fake_spawn()), \
-                mock.patch.object(worker.signal, "signal") as handler:
-            worker._execute(configuration(), "fixture", "{}", 1)
-        term_calls = [call for call in handler.call_args_list if call.args[0] == signal.SIGTERM]
-        self.assertGreaterEqual(len(term_calls), 2, "SIGTERM needs temporary cleanup handling and restoration")
-
-    def test_bad_output_is_permanent_and_spawn_failure_has_no_fallback(self):
-        # An oversize output is retried with size feedback (owner, 2026-10-01); bad encoding is not.
-        for content, retry in ((b"x" * (worker.MAX_OUTPUT_BYTES + 1), True), (b"\xff", False)):
-            with self.subTest(length=len(content)), \
-                    mock.patch.object(worker.subprocess, "Popen", side_effect=self.fake_spawn(output=content)):
-                with self.assertRaises(worker.Held) as raised:
-                    worker._execute(configuration(), "fixture", "{}", 1)
-                self.assertEqual(retry, raised.exception.retry)
-        with mock.patch.object(worker.subprocess, "Popen", side_effect=OSError("fixture")) as spawn:
-            with self.assertRaises(worker.Held) as raised:
-                worker._execute(configuration(), "fixture", "{}", 1)
-            self.assertFalse(raised.exception.retry)
-            spawn.assert_called_once()
-
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_only_core_limit_is_installed_without_file_size_cap(self):
-        with mock.patch.object(worker.resource, "setrlimit") as limit:
-            worker._limits()
-        limit.assert_called_once_with(worker.resource.RLIMIT_CORE, (0, 0))
-        self.assertNotIn(worker.resource.RLIMIT_FSIZE, [call.args[0] for call in limit.call_args_list])
-
-    def test_real_local_fixture_process_writes_output_without_model_or_network(self):
-        program = "import pathlib,sys; data=sys.stdin.read(); pathlib.Path(sys.argv[1]).write_text(data)"
-
-        def command(config, schema, output):
-            return [sys.executable, "-I", "-c", program, str(output)]
-
-        with mock.patch.object(worker, "_command", side_effect=command):
-            self.assertEqual('{"fixture":true}', worker._execute(configuration(), '{"fixture":true}', "{}", 2))
-
-    def test_real_local_fixture_process_is_terminated_at_timeout(self):
-        command = [sys.executable, "-I", "-c", "import time; time.sleep(30)"]
-        with mock.patch.object(worker, "_command", return_value=command):
-            with self.assertRaises(worker.Held) as raised:
-                worker._execute(configuration(), "fixture", "{}", 1)
-        self.assertEqual("CLASSIFICATION_TIMEOUT", raised.exception.code)
-        self.assertTrue(raised.exception.retry)
-
-
 class ReplyWorkerCycleReview(unittest.TestCase):
     def setUp(self):
         self.database = sqlite3.connect(":memory:")
@@ -339,7 +228,8 @@ class ReplyWorkerCycleReview(unittest.TestCase):
                                                  "opportunities": [role], "drafts": []}, now=NOW)
         self.database.commit()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.object(worker.subprocess, "Popen", side_effect=AssertionError("Real subprocess forbidden in review")).start()
+        mock.patch("subprocess.Popen", side_effect=AssertionError("Real subprocess forbidden in review")).start()
+        mock.patch.object(worker.text_model, "complete", side_effect=AssertionError("Real model call forbidden in review")).start()
 
     def queue(self, source_id="review-message", reason=None, quoted=False, forwarded=False, message=MESSAGE, profile=PROFILE,
               occurred_at=NOW, observed_at=NOW, authentication_at=NOW, conversation_id="fixture-thread", raw_paths=None):
@@ -392,7 +282,7 @@ class ReplyWorkerCycleReview(unittest.TestCase):
         return json.dumps(output)
 
     def cycle(self, now=NOW, effect=None):
-        with mock.patch.object(worker, "_execute", side_effect=effect or self.execute) as execute:
+        with mock.patch.object(worker, "execute_text", side_effect=effect or self.execute) as execute:
             result = worker.cycle(ROOT, self.database, self.config, now)
         return result, execute
 

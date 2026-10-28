@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import failures_page
 import orchestrator
+import engines
 import provider_limits
 import reply_worker
 import setup_steps
@@ -47,13 +48,14 @@ class CodexNotFound(unittest.TestCase):
         config = missing_config()
         self.assertEqual((config["codex"], config[setup_steps.CODEX_MISSING]), (MISSING, True))   # provenance unchanged
 
-    def test_a_reply_worker_call_never_launches_and_spends_no_try(self):
-        config = missing_config()
-        with patch.object(subprocess, "Popen", side_effect=AssertionError("launched a missing Codex")):
-            with self.assertRaises(reply_worker.Held) as raised:
-                reply_worker._execute(config, "prompt", "{}", 30)
-        self.assertEqual(raised.exception.code, "CODEX_NOT_FOUND")
-        wait = provider_limits.wait_of(raised.exception)
+    def test_text_workers_need_no_codex_and_a_codex_wait_spends_no_try(self):
+        # The text workers are direct OpenRouter calls (2026-10-27): a missing Codex does not stop them.
+        config = dict(missing_config(), text_model={"model": "z-ai/glm-5.3"})
+        answer = {"content": "{}", "usage": {}, "finish_reason": "stop", "model": "z-ai/glm-5.3"}
+        with patch.object(subprocess, "Popen", side_effect=AssertionError("launched a missing Codex")), \
+                patch.object(reply_worker.text_model, "complete", return_value=answer):
+            self.assertEqual("{}", reply_worker.execute_text(config, "prompt", "{}", 30))
+        wait = engines.engine(config).wait(config)   # what every Codex session still raises
         self.assertEqual(wait.kind, provider_limits.CODEX_NOT_FOUND)
         db = database()
         workflow_tasks.initialize(db)

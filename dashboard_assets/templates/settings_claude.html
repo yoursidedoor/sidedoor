@@ -1,0 +1,7 @@
+{# Settings > Connections > Claude (U1 3g); the Claude banners link here (R4). Swapped on its own. #}
+{% from "engine_macros.html" import claude_signin %}
+<div class="connection" id="connection-claude"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <h3>Claude</h3>
+  {% if x.claude.message %}<p class="note note-{{ 'success' if x.claude_done else 'error' }}" role="status">{{ x.say(x.claude.message) }}</p>{% endif %}
+  {{ claude_signin("/settings/claude", "#connection-claude", x, "s-claude-key") }}
+</div>

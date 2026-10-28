@@ -7,8 +7,9 @@ us an application link, the reply agent could queue the job so the application a
 it up." A job it queues is applied to automatically (owner, 2026-10-06: "it should be applied to
 automatically").
 
-A stdio MCP server, the same shape as application_browser's human-check server, that codex
-starts for one reply run. Read tools open the database read-only. The write tools never write
+Since 2026-10-27 the reply AI is a direct OpenRouter call and these tools run in its process
+(reply_worker._tool_loop calls `Session.call`). The stdio MCP server below (`serve`, `sidedoor
+reply-tools`), which codex started for one reply run, is kept for the build smoke checks. Read tools open the database read-only. The write tools never write
 during the run: the reply worker re-reads its source after the model finishes and refuses a
 decision whose inputs changed, and a job queued mid-run would change them. They record an
 intent in the run's directory instead; `apply_intents` carries it out in the same transaction
@@ -403,20 +404,6 @@ def server_argv(directory, executable=None):
         return [scheduler_loop.program(), "reply-tools"] + tail
     import portable
     return [executable or sys.executable, *portable.UTF8_FLAGS, str(Path(__file__).resolve())] + tail
-
-
-def options(directory, executable=None):
-    """codex -c settings that attach this server to one run."""
-    argv = server_argv(directory, executable)
-    command = json.dumps(argv[0])
-    arguments = json.dumps(argv[1:])
-    result = ["mcp_servers." + SERVER + ".command=" + command,
-              "mcp_servers." + SERVER + ".args=" + arguments,
-              "mcp_servers." + SERVER + ".enabled=true",
-              "mcp_servers." + SERVER + ".startup_timeout_sec=20",
-              "mcp_servers." + SERVER + ".tool_timeout_sec=" + str(READ_TIMEOUT_SECONDS + 20)]
-    result.extend("mcp_servers." + SERVER + ".tools." + tool["name"] + '.approval_mode="approve"' for tool in TOOLS)
-    return result
 
 
 def prepare(directory, root, task_id):

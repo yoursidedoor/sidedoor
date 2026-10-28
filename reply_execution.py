@@ -1036,7 +1036,10 @@ def repair_rejected(root, database, config, adapter, action, proof, now=None):
             if not workflow_tasks.reserve_compute(database, reference, current.isoformat(), timeout,
                     config.get("timezone", "America/Los_Angeles"), config.get("daily_compute_seconds", 10800)):
                 return None
-        execute = getattr(adapter, "execute", None) or reply_worker._execute
+        # The reply repair is a direct OpenRouter call (owner, 2026-10-27), unless an executor is injected.
+        execute = ((adapter.text_execute("reply_decision", max_tokens=reply_worker.REPLY_MAX_TOKENS)
+                    if hasattr(adapter, "text_execute") else getattr(adapter, "execute", None))
+                   or reply_worker.text_executor("reply_decision", max_tokens=reply_worker.REPLY_MAX_TOKENS))
         try:
             raw = execute(config, prompt, schema, timeout)
         finally:

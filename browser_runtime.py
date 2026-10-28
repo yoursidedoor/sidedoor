@@ -722,13 +722,32 @@ def window_words(config=None, binary=None):
     return HEADLESS_WORDS if operations == set(HEADLESS_OPERATIONS) else MIXED_WORDS
 
 
+# Test sessions only (review E1): an isolated session (the in-memory profile every real-browser test and
+# manual fake-site harness uses: tests/browser_fixtures.real_runtime) reaches no host but this computer's,
+# and its Chrome uses the mock keychain, never the user's login keychain. A user's session is never
+# isolated (it runs on Sidedoor's profile), so its launch is unchanged. Under SIDEDOOR_NO_REAL_BROWSER
+# no real Chrome starts at all (real_runtime is None).
+TEST_SWITCHES = ("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
+                 "--use-mock-keychain", "--password-store=basic")
+
+
+def test_session(config=None):
+    """True for a test session: isolated (the in-memory profile tests use)."""
+    return bool(settings(config).get("isolated"))
+
+
 def launch_config(config=None, operation=None):
     """@playwright/mcp's --config: LAUNCH_CONFIG, plus the off-screen window for its fallback launch. The
     fallback is headed and minimized for every operation (H2): the guard reaches it only when its own
-    launch failed, and then runs the session by the --offscreen rules (browser_guard)."""
+    launch failed, and then runs the session by the --offscreen rules (browser_guard). A test session
+    (`test_session`) gets TEST_SWITCHES and keeps Playwright's own mock keychain."""
     value = json.loads(json.dumps(LAUNCH_CONFIG))
     if offscreen(config) and operation not in SHOWN_OPERATIONS:
         value["browser"]["launchOptions"]["args"] = list(WINDOW_SWITCHES)
+    if test_session(config):
+        options = value["browser"]["launchOptions"]
+        options["ignoreDefaultArgs"] = [arg for arg in options["ignoreDefaultArgs"] if arg != "--use-mock-keychain"]
+        options["args"] = list(options.get("args") or []) + list(TEST_SWITCHES)
     return value
 
 

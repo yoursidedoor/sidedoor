@@ -15,7 +15,7 @@ Spawn sites (what each runs from source / frozen):
   sidedoor reply-tools serve ...
 - login_item.command / windowed_program (start at login, the Windows supervisor's child):
   python orchestrator.py serve ... / sidedoor serve ...
-- codex itself (agent_worker, reply_worker, application_browser, outreach_history_browser, research,
+- codex itself (agent_worker, application_browser, outreach_history_browser, research,
   followup, outreach agents) is config["codex"], an outside program in both modes.
 """
 
@@ -37,6 +37,7 @@ import browser_runtime
 import login_item
 import orchestrator
 import reply_tools
+import research_tools
 import reply_worker
 import scheduler_loop
 
@@ -48,9 +49,11 @@ SITES = {
     ("scheduler_loop.py", "program"): 1,       # __compiled__.process_exe under Nuitka, checked to exist
     ("scheduler_loop.py", "job_command"): 1,   # source branch only; frozen: [program(), "job", name]
     ("browser_runtime.py", "sidedoor_command"): 1,  # source branch only; frozen: [program()]
+    ("engines.py", "hook_command"): 1,         # source branch only; frozen: sidedoor_command() + ["agy-hook"]
     ("login_item.py", "_program"): 1,          # source branch only; frozen: [program()]
     ("login_item.py", "windowed_program"): 2,  # source branch only (pythonw.exe); frozen: program()
     ("reply_tools.py", "server_argv"): 1,      # source branch only; frozen: [program(), "reply-tools"]
+    ("research_tools.py", "server_argv"): 1,   # source branch only; frozen: [program(), "research-tools"]
     ("tools/build_macos.py", "nuitka_command"): 1,  # the build venv's python runs Nuitka (not shipped)
     ("tools/build_windows.py", "nuitka_command"): 1,  # the same, on Windows (not shipped)
     ("tools/build_windows.py", "zig_command"): 1,     # the build venv's ziglang makes sidedoor-cli.exe
@@ -96,13 +99,7 @@ class FrozenSpawnTests(unittest.TestCase):
     def test_reply_tools_server(self):
         with frozen():
             argv = reply_tools.server_argv(self.directory)
-            config = {"codex": "/bin/codex", "model": "m", "_reply_tools": {}}
-            with mock.patch.object(reply_worker.text_model, "command", side_effect=lambda config, command: command):
-                command = reply_worker._command(config, self.directory / "schema.json", self.directory / "out.json")
         self.assertEqual(argv, [sys.executable, "reply-tools", "serve", "--directory", str(self.directory)])
-        server = codex_server(command, reply_tools.SERVER)
-        self.assertEqual([server["command"]] + server["args"], argv)
-        self.assertEqual(command[0], "/bin/codex")
         with frozen(False):
             source = [sys.executable, *portable.UTF8_FLAGS, str(Path(reply_tools.__file__).resolve())]
             self.assertEqual(reply_tools.server_argv(self.directory)[:len(source)], source)
@@ -138,6 +135,7 @@ class NuitkaProgramTests(unittest.TestCase):
             self.assertEqual(scheduler_loop.job_command("applications"), [binary, "job", "applications"])
             self.assertEqual(browser_runtime.guard_command({}, directory, "inspect")[:2], [binary, "browser-guard"])
             self.assertEqual(reply_tools.server_argv(directory)[:2], [binary, "reply-tools"])
+            self.assertEqual(research_tools.server_argv(directory / "c.json")[:2], [binary, "research-tools"])
             self.assertEqual(login_item.command(home=directory)[:2], [binary, "serve"])
             self.assertEqual(login_item.windowed_program(), binary)
             with mock.patch.dict("os.environ", {browser_runtime.RUNTIME_VARIABLE: ""}):

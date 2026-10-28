@@ -168,19 +168,32 @@ class OrchestratorTests(unittest.TestCase):
         worker = unittest.mock.Mock(pid=123456)
         worker.poll.return_value = None
         worker.communicate.side_effect = runner.subprocess.TimeoutExpired("codex", 1)
-        with patch.object(runner.subprocess, "Popen", return_value=worker) as launch, patch.object(runner.os, "killpg") as terminate:
+        # A one-second starting run deadline (it is 900 s), so the run ends with this one session.
+        with patch.object(runner.subprocess, "Popen", return_value=worker) as launch, patch.object(runner.os, "killpg") as terminate, \
+                patch("parallel_research.initial_deadline_seconds", return_value=1):
             result = runner.research(self.root, config, self.database, self.pipeline, {})
             self.assertEqual(result["state"], "FAILED")
-            terminate.assert_called_once_with(worker.pid, runner.signal.SIGKILL)
-            worker.wait.assert_called_once()
-            command = launch.call_args.args[0]
+            # One research session: the discovery that timed out, never retried and never followed by a
+            # qualification. When the timed-out discovery ends a moment before the one-second run deadline,
+            # the recovery coordinator may still make its (tools-disabled) decision call, a session of its
+            # own with its own process (2026-10-27: that timing race made this test fail alone ~1 in 6).
+            # Every session started is killed once, by its own group, and reaped.
+            commands = [call.args[0] for call in launch.call_args_list]
+            research = [command for command in commands if not any("recovery-schema.json" in part for part in command)]
+            self.assertEqual(len(research), 1)
+            self.assertTrue(any("discovery-schema.json" in part for part in research[0]))
+            self.assertLessEqual(len(commands), 2)
+            self.assertEqual(terminate.call_args_list,
+                             [unittest.mock.call(worker.pid, runner.signal.SIGKILL)] * len(commands))
+            self.assertEqual(worker.wait.call_count, len(commands))
+            command = research[0]
             self.assertIn("--ignore-user-config", command)
             self.assertIn("features.shell_tool=false", command)
-            self.assertTrue(launch.call_args.kwargs["start_new_session"])
+            self.assertTrue(all(call.kwargs["start_new_session"] for call in launch.call_args_list))
             self.assertEqual(runner.research(self.root, config, self.database, self.pipeline, {})["state"], "EXHAUSTED")
             self.assertIsNone(self.database.execute("SELECT completed_at FROM research_days").fetchone()[0])
             self.assertFalse(result["retryable"])
-            launch.assert_called_once()
+            self.assertEqual(launch.call_count, len(commands))   # the EXHAUSTED day started nothing
 
     def test_missing_profile_never_triggers_unfiltered_inbox_read(self):
         self.database.execute("UPDATE history SET profile=NULL WHERE recipient='Remy'")

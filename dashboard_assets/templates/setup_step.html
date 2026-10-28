@@ -9,6 +9,7 @@
   {% if step.locked %}
   {% if step.number == 2 %}<p class="muted">Needs OpenRouter first (<a href="#step-1">step 1</a>): reading your résumé uses the AI.</p>
   {% else %}<p class="muted">Needs <a href="#step-{{ step.locked }}">step {{ step.locked }}</a> first.</p>{% endif %}
+  {% if step.number == 7 %}<p class="note note-info">If your LinkedIn account isn't Premium, Sidedoor sends your first outreach without a note, and sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.</p>{% endif %}
   {% else %}
   {% if step.message %}<p class="note note-{{ step.tone }}" role="status">{{ step.message }}</p>{% endif %}
 
@@ -148,6 +149,13 @@
   <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
 
   {% elif step.number == 6 %}
+  {% from "engine_macros.html" import engine_choice, claude_signin, antigravity_signin %}
+  {{ engine_choice("/setup/engine", "#step-6", step.engine, step.engine_options, step.antigravity_risk) }}
+  {% if step.engine == "claude" %}
+  {{ claude_signin("/setup/claude", "#step-6", dict(step, claude_done=step.status == "done"), "claude-key") }}
+  {% elif step.engine == "antigravity" %}
+  {{ antigravity_signin("/setup/antigravity", "#step-6", dict(step, antigravity_done=step.status == "done")) }}
+  {% elif step.engine == "codex" %}
   {% if step.codex_auth_view == "api_key" %}
   <p class="why">Sidedoor's research and browser work run through Codex, using your OpenAI API key. OpenAI bills that key for what Sidedoor uses. The key is kept on this computer.</p>
   {% else %}
@@ -188,9 +196,11 @@
     <span class="htmx-indicator muted">Checking...</span>
   </form>
   <a class="guide-link" href="/setup/guide/codex" hx-get="/setup/guide/codex" hx-target="#guide-panel">Show me how</a>
+  {% endif %}
 
   {% elif step.number == 7 %}
   <p class="why">Sidedoor sends your LinkedIn invitations and messages through Unipile, linked to your license.</p>
+  <p class="note note-info">If your LinkedIn account isn't Premium, Sidedoor sends your first outreach without a note, and sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.</p>
   {% if not s.offer %}
   <div hx-get="/setup/linkedin/status" hx-trigger="load" hx-target="#step-7" hx-swap="outerHTML"><span class="muted">Checking LinkedIn...</span></div>
   {% elif s.offer == "waiting" %}

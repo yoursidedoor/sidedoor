@@ -245,31 +245,47 @@ def reusable_judgment(database, key, now, config):
 
 
 def _direct_execute(config, prompt, schema, timeout, calls, *, name="outreach_decision", effort=DIRECT_EFFORT,
-                    max_tokens=DIRECT_MAX_TOKENS):
-    """reply_worker._execute's contract (text of the model's JSON answer, or a Held) over text_model.complete.
+                    max_tokens=DIRECT_MAX_TOKENS, worker=None):
+    """The text workers' contract (text of the model's JSON answer, or a Held) over text_model.complete.
 
-    `name`, `effort` and `max_tokens` let note composition (C2, 2026-10-22) use the same call."""
+    `name`, `effort` and `max_tokens` let note composition (C2, 2026-10-22) use the same call;
+    since 2026-10-27 every text worker does (reply_worker.execute_text). `worker` names the
+    model_calls row (default: this call's caller)."""
     system = "Return only one JSON object, with no other text, that matches this JSON Schema:\n" + schema
+    # The strict schema codex sent with --output-schema: without it GLM's reason and
+    # next_action run past their 700 characters (a third of the codex answers were cut at
+    # exactly 700) and _validate refuses the answer.
+    answer = _direct_call(config, calls, prompt=prompt, system=system, effort=effort, max_tokens=max_tokens,
+                          timeout=timeout, response_format=strict_format(name, schema),
+                          worker=worker or model_calls.caller())
+    return json_text(answer["content"])
+
+
+def strict_format(name, schema):
+    return {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": json.loads(schema)}}
+
+
+def _direct_call(config, calls, *, prompt=None, timeout, **named):
+    """One text_model.complete call (price routing among providers that honour every parameter); a
+    failure is the retryable Held a codex run raised, carrying the HTTP status (never the key) as its
+    executor record, chained to the error so a provider wait (402 out of credit, 429) stays a wait."""
     started = dt.datetime.now(dt.timezone.utc)
 
     def failed(code, error, retry=True):
         held = reply_worker.Held(code, retry=retry)
         held.executor = {"route": DIRECT_ROUTE, "http_status": getattr(error, "status", None),
                          "duration_seconds": round((dt.datetime.now(dt.timezone.utc) - started).total_seconds(), 1),
+                         # A TextModelError's record is key-free; any other error is named only (its
+                         # text may hold a path or URL).
                          "error": error.record() if isinstance(error, text_model.TextModelError)
-                         else type(error).__name__ + ": " + str(error)[:300]}
+                         else type(error).__name__}
         calls.append({"failure": held.executor})
         return held
 
+    if text_model.settings(config) is None:   # no text model configured: nothing to call (no Codex fallback)
+        raise failed("SUBSCRIPTION_EXECUTOR_UNAVAILABLE", ValueError("TEXT_MODEL_NOT_CONFIGURED"), retry=False)
     try:
-        # The strict schema codex sent with --output-schema: without it GLM's reason and
-        # next_action run past their 700 characters (a third of the codex answers were cut at
-        # exactly 700) and _validate refuses the answer.
-        answer = text_model.complete(config, prompt, system=system, effort=effort,
-                                     max_tokens=max_tokens, timeout=timeout,
-                                     response_format={"type": "json_schema", "json_schema": {
-                                         "name": name, "strict": True, "schema": json.loads(schema)}},
-                                     provider=DIRECT_PROVIDER)
+        answer = text_model.complete(config, prompt, timeout=timeout, provider=DIRECT_PROVIDER, **named)
     except TimeoutError as error:
         raise failed("CLASSIFICATION_TIMEOUT", error) from error
     except text_model.TextModelError as error:
@@ -277,7 +293,12 @@ def _direct_execute(config, prompt, schema, timeout, calls, *, name="outreach_de
     except OSError as error:  # the key file could not be read
         raise failed("SUBSCRIPTION_EXECUTOR_UNAVAILABLE", error, retry=False) from None
     calls.append({"usage": answer["usage"], "finish_reason": answer["finish_reason"], "model": answer["model"]})
-    content = answer["content"]
+    return answer
+
+
+def json_text(content):
+    """The model's JSON answer as text: as given when it parses, else the JSON object inside it, else
+    the text itself (_validate refuses it and a repair turn shows the model its answer)."""
     try:
         json.loads(content)
         return content
@@ -286,7 +307,7 @@ def _direct_execute(config, prompt, schema, timeout, calls, *, name="outreach_de
     try:
         return json.dumps(text_model.json_object(content))
     except ValueError:
-        return content  # _validate refuses it and the repair turn shows the model its answer
+        return content
 
 
 class Adapter(outreach.HeyReachActionAdapter):
@@ -296,7 +317,9 @@ class Adapter(outreach.HeyReachActionAdapter):
         self.database = database
         self.config = config
         self.provider = outreach_provider.Provider(database, config, client)
-        self.execute = execute or reply_worker._execute
+        # Every text call is a direct OpenRouter call (owner, 2026-10-27); `execute` is injected by tests
+        # and manual tools only.
+        self.execute = execute or reply_worker.text_executor("outreach_decision")
         self.injected_execute = execute is not None
         self.history_collector = history_collector
         self.active_action = None
@@ -306,6 +329,10 @@ class Adapter(outreach.HeyReachActionAdapter):
         initialize(database)
         database.commit()
         super().__init__(self._transport, self.inspect, self.reconcile, port=port)
+
+    def text_execute(self, name, calls=None, **named):
+        """The injected executor, else a direct OpenRouter call named `name` (owner, 2026-10-27)."""
+        return self.execute if self.injected_execute else reply_worker.text_executor(name, calls, **named)
 
     # --- the Unipile path (E3.T3): the same judgment, proof and final checks over the LinkedInPort ---
     def _port_read(self, action):
@@ -421,12 +448,11 @@ class Adapter(outreach.HeyReachActionAdapter):
         prompt = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + encoded({"source_sha256": source_hash, **packet})
         provenance = {"model": text_model.model(config), "executable": config["codex"], "auth": text_model.auth(config),
                       "prompt_sha256": reply_worker.sha(template), "schema_sha256": reply_worker.sha(schema)}
-        # The pre-send judge of a first note is a direct low-reasoning call (owner, 2026-10-13).
-        direct = (initial and phase == "INSPECTION" and not self.injected_execute
-                  and text_model.settings(config) is not None)
+        # The pre-send judge of a first note is a direct low-reasoning call (owner, 2026-10-13), and so is
+        # every other phase and repair turn (owner, 2026-10-27: no Codex for text work).
+        direct = not self.injected_execute
         calls = []
-        execute = (lambda config, prompt, schema, timeout: _direct_execute(config, prompt, schema, timeout, calls)
-                   ) if direct else self.execute
+        execute = reply_worker.text_executor("outreach_decision", calls) if direct else self.execute
         execute = model_calls.bound(execute, "outreach-send-judge" if initial and phase == "INSPECTION"
                                     else "outreach-judge", profile_key(action["profile"]))
         if direct:
@@ -1191,14 +1217,12 @@ def compose_draft(root, database, config, row, execute=None, now=None, *, repair
     """
     now = engagement.timestamp(now or dt.datetime.now(dt.timezone.utc))
     # Note composition is a direct low-reasoning call too (cost cut C2, 2026-10-22), in the send
-    # judge's shape, when a text model is configured and no executor is injected; otherwise codex.
-    direct = execute is None and text_model.settings(config) is not None
+    # judge's shape, unless an executor is injected (tests, manual tools); no Codex (2026-10-27).
+    direct = execute is None
     calls = []
     if direct:
-        execute = (lambda config, prompt, schema, timeout: _direct_execute(
-            config, prompt, schema, timeout, calls, name="outreach_composition", effort=COMPOSE_EFFORT,
-            max_tokens=COMPOSE_MAX_TOKENS))
-    execute = execute or reply_worker._execute
+        execute = reply_worker.text_executor("outreach_composition", calls, effort=COMPOSE_EFFORT,
+                                             max_tokens=COMPOSE_MAX_TOKENS)
     initialize(database)
     database.commit()
     draft, identity, unused = outreach_promotion._validate(database, row, now)

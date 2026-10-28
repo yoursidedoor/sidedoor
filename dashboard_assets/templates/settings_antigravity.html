@@ -1,0 +1,7 @@
+{# Settings > Connections > Antigravity (U1 4); the Antigravity banners link here. Swapped on its own. #}
+{% from "engine_macros.html" import antigravity_signin %}
+<div class="connection" id="connection-antigravity"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <h3>Antigravity</h3>
+  {% if x.antigravity.message %}<p class="note note-{{ 'success' if x.antigravity_done else 'error' }}" role="status">{{ x.say(x.antigravity.message) }}</p>{% endif %}
+  {{ antigravity_signin("/settings/antigravity", "#connection-antigravity", x) }}
+</div>

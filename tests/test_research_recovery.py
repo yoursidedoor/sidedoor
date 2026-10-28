@@ -5,9 +5,10 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import manual_research_recovery
+import parallel_research
 import research_recovery
 import workflow_tasks
 import orchestrator
@@ -177,6 +178,12 @@ class ResearchRecoveryTests(unittest.TestCase):
         self.assertEqual(self.fixture.states(result)["Defense"]["abandonment_reason"], "INTERRUPTED_RECOVERY_DECISION_NOT_REPLAYED")
 
     def test_each_phase_reserves_compute_and_respects_reduced_cap(self):
+        # Compute arithmetic below is written in 120-second sessions; the session sizes themselves
+        # (300 s discovery, 120 + 1.5 x slow end x companies) are tested in test_parallel_research.
+        for name, value in (("DISCOVERY_SECONDS", 120), ("qualification_seconds", lambda database, companies: 120)):
+            sizes = patch.object(parallel_research, name, value)
+            sizes.start()
+            self.addCleanup(sizes.stop)
         self.fixture.config.update(research_timeout_seconds=600, daily_compute_seconds=9000)
         with self.fixture.database:
             workflow_tasks.reserve_compute(self.fixture.database, "service", self.fixture.utcnow(), 8700)

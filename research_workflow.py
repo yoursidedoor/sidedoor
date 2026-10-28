@@ -19,6 +19,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 import applications
+import engines
 import owner_seed
 import strategy_execution
 import user_profile
@@ -162,6 +163,13 @@ def transaction(database):
 def initialize(database):
     statements = (
         "CREATE TABLE IF NOT EXISTS rw_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        # One row per finished qualification session (owner, 2026-10-27): its company count and
+        # wall seconds, read by parallel_research.slow_end_seconds for the session time limit.
+        "CREATE TABLE IF NOT EXISTS rw_qualification_sessions (id TEXT PRIMARY KEY, recorded_at TEXT NOT NULL, "
+        "industry TEXT NOT NULL, companies INTEGER NOT NULL, seconds REAL NOT NULL)",
+        # Companies a cut-off research session of a plan already finished (R1, review S9): a later run
+        # of the same plan (same day, industry and scope) researches only the rest.
+        "CREATE TABLE IF NOT EXISTS rw_saved_companies (plan_id TEXT, company TEXT, saved_at TEXT NOT NULL, PRIMARY KEY(plan_id,company))",
         "CREATE TABLE IF NOT EXISTS rw_aliases (kind TEXT, alias TEXT, canonical TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(kind,alias))",
         "CREATE TABLE IF NOT EXISTS rw_baselines (company TEXT PRIMARY KEY, count INTEGER NOT NULL)",
         "CREATE TABLE IF NOT EXISTS rw_contacts (company TEXT, identity TEXT, name TEXT, historical INTEGER NOT NULL, plan_id TEXT, PRIMARY KEY(company,identity))",
@@ -178,6 +186,24 @@ def initialize(database):
     with transaction(database):
         for statement in statements:
             database.execute(statement)
+
+
+def record_saved_companies(database, plan_id, companies, now):
+    """Record company keys a cut-off session of `plan_id` finished (R1, review S9)."""
+    with transaction(database):
+        # Kept a week, then cleaned (review T5): only the same day's plan ever reads them.
+        database.execute("DELETE FROM rw_saved_companies WHERE saved_at < ?",
+                         ((timestamp(now) - dt.timedelta(days=7)).isoformat(),))
+        for company in companies:
+            database.execute("INSERT OR IGNORE INTO rw_saved_companies VALUES (?,?,?)", (plan_id, company, now))
+
+
+def saved_companies(database, plan_id):
+    """Company keys an earlier cut-off session of `plan_id` already finished, in the order saved."""
+    if not plan_id:
+        return []
+    return [row[0] for row in database.execute(
+        "SELECT company FROM rw_saved_companies WHERE plan_id=? ORDER BY saved_at, rowid", (plan_id,))]
 
 
 def canonical(database, kind, value):
@@ -369,9 +395,6 @@ def company_usage(database, day):
 
 
 PLAN_ID_PATTERN = re.compile(r"industry-research-plan:(\d{4}-\d{2}-\d{2}):[0-9a-f]{12}(?::scope:[0-9a-f]+)?")
-# Lines codex writes into a worker log only once the model is actually running a turn.
-MODEL_ACTIVITY_LINES = ("codex", "thinking", "exec")
-MODEL_ACTIVITY_PREFIXES = ("web search:", "tokens used")
 # Provider request rejections that happen before any model turn (the request itself is refused).
 PRE_MODEL_REJECTIONS = {("invalid_request_error", "invalid_json_schema", 400)}
 
@@ -384,7 +407,7 @@ def worker_never_reached_model(log_path, output_path):
     """Structural proof that a worker process never reached a model, else None.
 
     Proof needs all of: no output file (or an empty one), a readable log holding the
-    provider's pre-model request-rejection error object, and none of the lines codex
+    provider's pre-model request-rejection error object, and none of the lines the engine
     writes once a model turn runs. Anything missing or unreadable is not proof.
     """
     try:
@@ -397,21 +420,16 @@ def worker_never_reached_model(log_path, output_path):
         return None
     if output_state == "PRESENT":
         return None
-    for line in text.splitlines():
-        if line.strip() in MODEL_ACTIVITY_LINES or line.startswith(MODEL_ACTIVITY_PREFIXES):
-            return None
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"(?m)^ERROR: (?=\{)", text):
-        try:
-            value, _ = decoder.raw_decode(text, match.end())
-        except ValueError:
-            continue
-        error = value.get("error") if isinstance(value, dict) else None
-        if (isinstance(error, dict) and value.get("type") == "error"
-                and (error.get("type"), error.get("code"), value.get("status")) in PRE_MODEL_REJECTIONS):
-            return {"log": str(log), "log_sha256": _sha256_file(log), "log_bytes": log.stat().st_size,
-                    "output": str(output) if output else None, "output_state": output_state,
-                    "error_type": error["type"], "error_code": error["code"], "error_status": value["status"]}
+    try:   # the engine that wrote the log (<log>.engine.json; none: Codex), which knows its model-turn lines
+        engine = engines.for_run(log)
+    except engines.EngineRecordError:
+        return None
+    found = engine.pre_model_rejection(text, PRE_MODEL_REJECTIONS)
+    if found:
+        error, value = found
+        return {"log": str(log), "log_sha256": _sha256_file(log), "log_bytes": log.stat().st_size,
+                "output": str(output) if output else None, "output_state": output_state,
+                "error_type": error["type"], "error_code": error["code"], "error_status": value["status"]}
     return None
 
 
@@ -1162,7 +1180,75 @@ def normalize_company_finding(finding, *, now=None):
     return dict(finding)
 
 
-def process_research(database, result, *, plan_id=None, now=None, policy=None):
+def _dropped(entry, reason):
+    entry = entry if isinstance(entry, dict) else {}
+    text = lambda value: " ".join(value.split())[:200] if isinstance(value, str) and value.strip() else None
+    source = next((entry[key] for key in ("url", "source") if isinstance(entry.get(key), str) and entry[key].strip()), None)
+    # `source` says which posting or record this is (never shown): two different ones stay apart.
+    return {"company": text(entry.get("company")), "role": text(entry.get("role")), "reason": reason,
+            "source": source[:2048] if source else None}
+
+
+def check_role(role, *, now=None, policy=None):
+    """One role's own checks (its opportunity and its people), with no database: the same code runs
+    when the AI saves the role as it goes (research_tools.save_role) and here in process_research.
+    Raises KeyError, TypeError or ValueError for an entry that cannot be kept."""
+    opportunity = normalize_opportunity(role, now=now, policy=policy)
+    people = map_people(role.get("people", []), role["company"], now=now)
+    return opportunity, people
+
+
+def role_fit_of(role):
+    """The worker's role_fit as process_research keeps it: {fit, reason}, or fit None when not assessed."""
+    fit = role.get("role_fit")
+    if isinstance(fit, dict) and fit.get("fit") in ROLE_FITS and isinstance(fit.get("reason"), str):
+        return {"fit": fit["fit"], "reason": fit["reason"]}
+    return {"fit": None, "reason": "ROLE_FIT_NOT_ASSESSED"}
+
+
+def role_sourced(role):
+    """A researched role (a normalized opportunity): employer and title evidenced, open proven by an
+    official or employer-posted mirror source. An unresolved destination does not prevent it."""
+    return (role["review"]["verified"]
+            and name_key(str(role["review"]["fact_evidence"].get("company", {}).get("value", ""))) == name_key(role["company"])
+            and role["review"]["fact_evidence"].get("role_title", {}).get("value") == role["role"]
+            and not role["review"]["open_basis"].startswith("NOT_PROVEN"))
+
+
+def finding_conflicts(finding, opportunities, key):
+    """A verified company finding contradicted by a kept role at the same company (`key`: company -> key)."""
+    company = key(finding["company"])
+    return any(key(role["company"]) == company
+               and ((finding["status"] == "NO_OPEN_ROLES" and role["review"]["facts"].get("open") is True)
+                    or (finding["status"] == "NO_ELIGIBLE_ROLES" and role["assessment"] is None))
+               for role in opportunities)
+
+
+def covered_companies(result, *, now=None, policy=None):
+    """Company name keys a research result covers by the store path's own rule (process_research): a
+    sourced role (fit or not) or a verified, uncontradicted company finding. No database (R1 review T1)."""
+    current = timestamp(now).isoformat()
+    roles, kept = [], []
+    for role in result.get("opportunities") or []:
+        try:
+            opportunity, _ = check_role(role, now=current, policy=policy)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        roles.append(opportunity)
+        if role_fit_of(role)["fit"] != "NONE":   # the store path's own test (review U4)
+            kept.append(opportunity)
+    covered = {name_key(role["company"]) for role in roles if role_sourced(role)}
+    for finding in result.get("company_findings") or []:
+        try:
+            finding = normalize_company_finding(finding, now=current)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        if not finding_conflicts(finding, kept, name_key):
+            covered.add(name_key(finding["company"]))
+    return covered
+
+
+def process_research(database, result, *, plan_id=None, now=None, policy=None, done=()):
     """Store raw evidence and return safe records for main's store_research.
 
     No applications/outreach tables are changed. Main ingests opportunities and
@@ -1171,7 +1257,10 @@ def process_research(database, result, *, plan_id=None, now=None, policy=None):
     or fully eligible reviews. All external execution remains separately gated.
     """
     current = timestamp(now).isoformat()
-    result_id = digest([PROCESSOR_VERSION, plan_id, result])
+    # `done`: company keys an earlier, cut-off session of this plan already stored (R1, owner
+    # 2026-10-27, "3: a"); a retry's coverage is judged over the companies not yet done.
+    done = set(done or ())
+    result_id = digest([PROCESSOR_VERSION, plan_id, result] + ([sorted(done)] if done else []))
     with transaction(database):
         prior = database.execute("SELECT processed FROM rw_results WHERE id=?", (result_id,)).fetchone()
         if prior:
@@ -1217,14 +1306,18 @@ def process_research(database, result, *, plan_id=None, now=None, policy=None):
         diagnostics = {}
         unfit_roles = []
         output["rejected_opportunities"] = []
+        # One bad entry is dropped on its own, the rest kept (owner, 2026-10-27); each drop is
+        # listed with its company, role and a plain reason for the Failures and Logs pages.
+        output["dropped_entries"] = []
         for finding in findings:
             try:
                 if not isinstance(finding, dict) or not isinstance(finding.get("company"), str):
                     raise ValueError("Company finding identity required")
                 company = canonical(database, "company", finding["company"])
                 if company not in permitted:
+                    # Only this entry is dropped (owner, 2026-10-27, review R4); it is never stored.
                     output["blockers"].append("OUTSIDE_RESERVED_FINDING_SCOPE: " + finding["company"])
-                    whole_result_invalid = True
+                    output["dropped_entries"].append(_dropped(finding, "it was outside today's planned companies"))
                     record_unplanned_attempt(database, result_id + ":finding:" + company, [finding["company"]], now=current)
                     continue
                 if finding.get("status") == "UNRESOLVED":
@@ -1240,85 +1333,87 @@ def process_research(database, result, *, plan_id=None, now=None, policy=None):
                 output["company_findings"].append(normalized)
             except (KeyError, TypeError, ValueError):
                 output["blockers"].append("INVALID_COMPANY_FINDING: dated official negative evidence required")
+                output["dropped_entries"].append(_dropped(finding, "the company finding did not have a dated official source"))
         for role in result.get("opportunities", []):
+            # One role is one unit (review R3, 2026-10-27): its opportunity, people, drafts and contact
+            # reservations are kept together or undone together when the role is dropped.
+            marks = {key: len(output[key]) for key in ("opportunities", "drafts", "people", "action_blockers",
+                                                       "blockers", "rejected_opportunities")}
+            unfit_mark = len(unfit_roles)
             try:
-                company = canonical(database, "company", role["company"])
-                if plan and company not in permitted:
-                    output["blockers"].append("OUTSIDE_RESERVED_SCOPE: " + role["company"])
-                    whole_result_invalid = True
-                    record_unplanned_attempt(database, result_id + ":" + company, [role["company"]], now=current)
-                    continue
-                opportunity = normalize_opportunity(role, now=current, policy=policy)
-                if not plan:
-                    opportunity["review"]["verified"] = False
-                    opportunity["eligibility"] = "BLOCKED"
-                    opportunity["assessment"] = ["BLOCKED", "RESEARCH_PLAN_MISSING", "Reserve before researching"]
-                # Owner decision D-3: the worker judges fit against the candidate profile;
-                # Python enforces it. NONE is never stored; STRONG/PARTIAL are.
-                fit = role.get("role_fit")
-                if isinstance(fit, dict) and fit.get("fit") in ROLE_FITS and isinstance(fit.get("reason"), str):
-                    opportunity["role_fit"] = {"fit": fit["fit"], "reason": fit["reason"]}
-                else:
-                    opportunity["role_fit"] = {"fit": None, "reason": "ROLE_FIT_NOT_ASSESSED"}
-                people = map_people(role.get("people", []), role["company"], now=current)
-                output["people"].extend(people)
-                if opportunity["role_fit"]["fit"] == "NONE":
-                    output["rejected_opportunities"].append({
-                        "company": role["company"], "role": role["role"], "url": role["url"],
-                        "reason": "ROLE_FIT_NONE", "role_fit": opportunity["role_fit"],
-                        "open_basis": opportunity["review"]["open_basis"], "job_key": opportunity["job_key"]})
-                    unfit_roles.append(opportunity)
-                    if plan:
-                        # Inspected people still occupy their lifetime ledger slots.
+                with transaction(database):
+                    company = canonical(database, "company", role["company"])
+                    if plan and company not in permitted:
+                        output["blockers"].append("OUTSIDE_RESERVED_SCOPE: " + role["company"])
+                        output["dropped_entries"].append(_dropped(role, "it was outside today's planned companies"))
+                        record_unplanned_attempt(database, result_id + ":" + company, [role["company"]], now=current)
+                        continue
+                    opportunity, people = check_role(role, now=current, policy=policy)
+                    if not plan:
+                        opportunity["review"]["verified"] = False
+                        opportunity["eligibility"] = "BLOCKED"
+                        opportunity["assessment"] = ["BLOCKED", "RESEARCH_PLAN_MISSING", "Reserve before researching"]
+                    # Owner decision D-3: the worker judges fit against the candidate profile;
+                    # Python enforces it. NONE is never stored; STRONG/PARTIAL are.
+                    opportunity["role_fit"] = role_fit_of(role)
+                    output["people"].extend(people)
+                    if opportunity["role_fit"]["fit"] == "NONE":
+                        output["rejected_opportunities"].append({
+                            "company": role["company"], "role": role["role"], "url": role["url"],
+                            "reason": "ROLE_FIT_NONE", "role_fit": opportunity["role_fit"],
+                            "open_basis": opportunity["review"]["open_basis"], "job_key": opportunity["job_key"]})
+                        unfit_roles.append(opportunity)
+                        if plan:
+                            # Inspected people still occupy their lifetime ledger slots.
+                            for person in people:
+                                if person.get("identity") and person.get("recipient"):
+                                    reserve_contact(database, plan_id, role["company"], person["profile"], person["recipient"], now=current)
+                        continue
+                    output["opportunities"].append(opportunity)
+                    # Research's own ineligibility verdict on the role (owner, 2026-10-01: "or if
+                    # research says the company is not eligible. e.g outside my preferred location,
+                    # or funding stage, etc..."): its people are not drafted. Not a new check:
+                    # `applications.assess` already returned INELIGIBLE for it in
+                    # normalize_opportunity (out of scope, location, funding stage, clearance, salary).
+                    if plan and not research_eligible(opportunity):
                         for person in people:
-                            if person.get("identity") and person.get("recipient"):
-                                reserve_contact(database, plan_id, role["company"], person["profile"], person["recipient"], now=current)
-                    continue
-                output["opportunities"].append(opportunity)
-                # Research's own ineligibility verdict on the role (owner, 2026-10-01: "or if
-                # research says the company is not eligible. e.g outside my preferred location,
-                # or funding stage, etc..."): its people are not drafted. Not a new check:
-                # `applications.assess` already returned INELIGIBLE for it in
-                # normalize_opportunity (out of scope, location, funding stage, clearance, salary).
-                if plan and not research_eligible(opportunity):
-                    for person in people:
-                        output["action_blockers"].append(role["company"] + " / " + str(person.get("recipient") or "unknown contact")
-                                                         + ": RESEARCH_INELIGIBLE_ROLE: " + str((opportunity.get("assessment") or [None, None])[1]))
-                    continue
-                if plan:
-                    for person in people:
-                        if not person["mapping_verified"]:
-                            # No /in/ profile, no name, or research says they work elsewhere:
-                            # skipped before a reservation, so no slot is spent on them.
                             output["action_blockers"].append(role["company"] + " / " + str(person.get("recipient") or "unknown contact")
-                                                             + ": PERSON_NOT_DRAFTABLE: " + "; ".join(person["blocking_unknowns"]))
-                            continue
-                        if person.get("identity") and person.get("recipient"):
-                            reservation = reserve_contact(database, plan_id, role["company"], person["profile"], person["recipient"], now=current)
-                            if reservation["state"] != "RESERVED":
-                                ordinary_hold = reservation["reason"] in {"HISTORICAL_OR_DUPLICATE_CONTACT", "EXCLUDED_OR_UNKNOWN_IDENTITY", "HISTORICAL_BASELINE_EXCEEDS_BUDGET",
-                                                                          LOCAL_HISTORY_UNREADABLE}
-                                output["action_blockers" if ordinary_hold else "blockers"].append(
-                                    role["company"] + " / " + person["recipient"] + ": " + reservation["reason"])
+                                                             + ": RESEARCH_INELIGIBLE_ROLE: " + str((opportunity.get("assessment") or [None, None])[1]))
+                        continue
+                    if plan:
+                        for person in people:
+                            if not person["mapping_verified"]:
+                                # No /in/ profile, no name, or research says they work elsewhere:
+                                # skipped before a reservation, so no slot is spent on them.
+                                output["action_blockers"].append(role["company"] + " / " + str(person.get("recipient") or "unknown contact")
+                                                                 + ": PERSON_NOT_DRAFTABLE: " + "; ".join(person["blocking_unknowns"]))
                                 continue
-                        draft = create_draft(database, person, opportunity, plan_id=plan_id, now=current)
-                        if draft["state"] == "HELD_VERIFICATION":
-                            output["drafts"].append(draft)
-                        else:
-                            output["action_blockers"].append(role["company"] + " / " + person.get("recipient", "unknown contact") + ": " + draft["reason"])
+                            if person.get("identity") and person.get("recipient"):
+                                reservation = reserve_contact(database, plan_id, role["company"], person["profile"], person["recipient"], now=current)
+                                if reservation["state"] != "RESERVED":
+                                    ordinary_hold = reservation["reason"] in {"HISTORICAL_OR_DUPLICATE_CONTACT", "EXCLUDED_OR_UNKNOWN_IDENTITY", "HISTORICAL_BASELINE_EXCEEDS_BUDGET",
+                                                                              LOCAL_HISTORY_UNREADABLE}
+                                    output["action_blockers" if ordinary_hold else "blockers"].append(
+                                        role["company"] + " / " + person["recipient"] + ": " + reservation["reason"])
+                                    continue
+                            draft = create_draft(database, person, opportunity, plan_id=plan_id, now=current)
+                            if draft["state"] == "HELD_VERIFICATION":
+                                output["drafts"].append(draft)
+                            else:
+                                output["action_blockers"].append(role["company"] + " / " + person.get("recipient", "unknown contact") + ": " + draft["reason"])
             except (KeyError, TypeError, ValueError) as error:
+                for key, mark in marks.items():
+                    del output[key][mark:]
+                del unfit_roles[unfit_mark:]
                 output["blockers"].append("INVALID_RESEARCH_ITEM: " + type(error).__name__)
+                output["dropped_entries"].append(_dropped(role, "the role entry was incomplete or malformed"))
                 if isinstance(role, dict) and isinstance(role.get("company"), str):
                     diagnostics.setdefault(canonical(database, "company", role["company"]), []).append(
                         {"type": "INVALID_RESEARCH_ITEM", "role": role.get("role"), "error": type(error).__name__})
         conflicted = set()
         for finding in output["company_findings"]:
             company = canonical(database, "company", finding["company"])
-            contradictory = any(canonical(database, "company", role["company"]) == company
-                                and ((finding["status"] == "NO_OPEN_ROLES" and role["review"]["facts"].get("open") is True)
-                                     or (finding["status"] == "NO_ELIGIBLE_ROLES" and role["assessment"] is None))
-                                for role in output["opportunities"])
-            if contradictory:
+            if finding_conflicts(finding, output["opportunities"], lambda value: canonical(database, "company", value)):
                 output["blockers"].append("CONFLICTING_COMPANY_FINDING: " + finding["company"])
                 conflicted.add(company)
                 diagnostics.setdefault(company, []).append({"type": "CONFLICTING_COMPANY_FINDING", "finding": finding})
@@ -1327,13 +1422,7 @@ def process_research(database, result, *, plan_id=None, now=None, policy=None):
         if result.get("drafts"):
             output["blockers"].append("UNVERIFIED_WORKER_DRAFTS_HELD: regenerate from designated claims and person evidence")
         output["opportunities"].sort(key=lambda role: (not role["ranking"]["upcoming_interview"], role["ranking"]["interview_at"] or "", role["ranking"]["location_priority"], role["job_key"]))
-        def sourced(role):
-            """A researched role: employer and title evidenced, open proven by an official or
-            employer-posted mirror source. An unresolved destination does not prevent it."""
-            return (role["review"]["verified"]
-                    and name_key(str(role["review"]["fact_evidence"].get("company", {}).get("value", ""))) == name_key(role["company"])
-                    and role["review"]["fact_evidence"].get("role_title", {}).get("value") == role["role"]
-                    and not role["review"]["open_basis"].startswith("NOT_PROVEN"))
+        sourced = role_sourced
         sourced_roles = [role for role in output["opportunities"] + unfit_roles if sourced(role)]
         for role in output["opportunities"] + unfit_roles:
             if not sourced(role):
@@ -1342,6 +1431,7 @@ def process_research(database, result, *, plan_id=None, now=None, policy=None):
                      "open_basis": role["review"]["open_basis"]})
         coverage = {canonical(database, "company", item["company"])
                     for item in sourced_roles + output["verified_company_findings"]} - conflicted
+        permitted = permitted - done
         output["company_coverage"] = {"covered": sorted(coverage & permitted), "uncovered": sorted(permitted - coverage)}
         output["company_resolution"] = {
             "resolved": [{"company": company, "status": "RESOLVED",

@@ -42,7 +42,7 @@ def track(database, profile):
 
 class ColdStrangersAreSkipped(unittest.TestCase):
     def assert_cold_skipped(self, fixture):
-        with fixture.clock(), patch.object(reply_worker, "_execute") as execute:
+        with fixture.clock(), patch.object(reply_worker, "execute_text") as execute:
             result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
         execute.assert_not_called()
         self.assertEqual([("COLD_INBOUND_SKIPPED", reply_worker.COLD_BLOCKER)],
@@ -96,7 +96,7 @@ class TrackedPeopleTheOwnerAnsweredGetReplies(unittest.TestCase):
             track(fixture.database, TRACKED)
             fixture.seed(profile=TRACKED, thread="thread-tracked")
             self.assertIsNone(outreach.reply_conversation(fixture.database, TRACKED))
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute:
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute:
                 result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             execute.assert_not_called()
             self.assertEqual([("NO_REPLY_BASIS_SKIPPED", reply_worker.NO_BASIS_BLOCKER)],
@@ -171,7 +171,7 @@ class MemberIdSpellings(unittest.TestCase):
         with manual.isolated_boundaries(), manual.Fixture() as fixture:
             with with_lead("555"):
                 fixture.seed(profile=MEMBER_ID, thread="thread-member")
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute:
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute:
                 result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             execute.assert_not_called()
             self.assertEqual([("SENDER_IDENTITY_UNRESOLVED", reply_worker.UNRESOLVED_BLOCKER)],
@@ -187,7 +187,7 @@ class MemberIdSpellings(unittest.TestCase):
         with manual.isolated_boundaries(), manual.Fixture() as fixture:
             with with_lead("555"):
                 fixture.seed(profile=MEMBER_ID, thread="thread-member")
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute:
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute:
                 orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
                 held = routing.one(fixture.database, "SELECT * FROM workflow_tasks WHERE worker='pipeline_routing_review'")
                 self.assertEqual([MEMBER_ID.split("://www.")[1].casefold()],
@@ -209,7 +209,7 @@ class MemberIdSpellings(unittest.TestCase):
     def test_unreadable_sender_record_is_held(self):
         with manual.isolated_boundaries(), manual.Fixture() as fixture:
             fixture.seed(profile=STRANGER, thread="thread-cold")
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute, \
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute, \
                     patch.object(reply_worker, "_sender", side_effect=ValueError("unreadable")):
                 result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             execute.assert_not_called()
@@ -218,7 +218,7 @@ class MemberIdSpellings(unittest.TestCase):
     def test_database_error_in_the_skip_check_is_reported_per_task(self):
         with manual.isolated_boundaries(), manual.Fixture() as fixture:
             fixture.seed(profile=STRANGER, thread="thread-cold")
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute, \
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute, \
                     patch.object(reply_worker, "_skip_kind", side_effect=sqlite3.OperationalError("locked")):
                 result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             execute.assert_not_called()
@@ -436,7 +436,7 @@ class AlreadyAnsweredAndNewerActivity(unittest.TestCase):
                        "2026-09-17T16:01:00+00:00",
                        {"conversation_id": "thread-1", "message": {"sender": "ME", "body": "Answered by hand",
                                                                    "createdAt": "2026-09-17T16:01:00+00:00"}})
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute:
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute:
                 result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             execute.assert_not_called()
             self.assertEqual([("ALREADY_ANSWERED_SKIPPED", reply_worker.ANSWERED_BLOCKER)],

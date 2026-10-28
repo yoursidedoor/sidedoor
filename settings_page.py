@@ -46,7 +46,7 @@ SECTIONS = ("profile", "answers", "resume", "mode", "connections", "license", "l
 BUSY = "Sidedoor is busy with another task. Try again in a moment."
 PORTAL_LINE = "Sign in with the email you subscribed with to update your card, see invoices or cancel."
 NO_PORTAL = "To update your card, see invoices or cancel, email"
-BLOCKS = ("linkedin", "openrouter", "codex", "browser", "webmail")  # Connections parts, swapped on their own
+BLOCKS = ("linkedin", "openrouter", "codex", "engine", "claude", "antigravity", "browser", "webmail")  # Connections parts, swapped on their own
 # Setup messages that name Setup's buttons, said with the buttons Settings has (T7). Setup keeps its wording.
 SETTINGS_WORDING = (
     ("Sign in there, then click I'm done.", "Sign in there, then click Run email check (or I'm done to just close it)."),
@@ -58,7 +58,7 @@ SETTINGS_WORDING = (
     ("or change your application email in step 3.", "or change your application email in Profile and search."),
 )
 # Setup's prerequisites of the email check (setup_steps.NEEDS[9]): step -> (what to finish, where).
-EMAIL_NEEDS = {3: ("your profile", "#profile"), 6: ("Codex", "#connection-codex"),
+EMAIL_NEEDS = {3: ("your profile", "#profile"),   # 6: the chosen engine (email_needs)
                "webmail": ("Your webmail", "#connection-webmail"),
                8: ("signing in to Sidedoor's browser (Open, then I'm done)", "#connection-browser")}
 KEY_KEPT = "Your previous key is still in use."
@@ -218,6 +218,23 @@ def license_times(view, config, now=None):
             for name in ("trial_end", "valid_until", "last_check", "last_attempt")}
 
 
+def premium_view(state, config, now=None):
+    """Settings > LinkedIn's account mode (owner, 2026-10-27): {"premium": bool, "checked": local time}
+    from the last Premium read saved in setup state, or None when it was never read."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    import overview_page
+    saved = state.get(setup_steps.PREMIUM_KEY) if isinstance(state, dict) else None
+    if not isinstance(saved, dict) or type(saved.get("premium")) is not bool:
+        return None
+    try:
+        zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+    except (ValueError, KeyError, OSError):
+        zone = ZoneInfo("America/Los_Angeles")
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return {"premium": saved["premium"], "checked": overview_page.when(overview_page._utc(saved.get("checked_at")), now, zone)}
+
+
 def _sync_license_pause(root, home):
     """E8.T3: the license pause follows a new key or an activation at once (`dashboard.sync_license_pause`)."""
     import dashboard
@@ -273,7 +290,7 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           claims=current_claims(root),
                           removed=removed_count(root, raw.get("sha256") if raw else None))
         elif name in ("connections",) + BLOCKS:
-            result.update(linkedin=steps.get("linkedin", {}), openrouter=steps.get("openrouter", {}),
+            result.update(linkedin=steps.get("linkedin", {}), linkedin_premium=premium_view(state, config), openrouter=steps.get("openrouter", {}),
                           openrouter_key=masked(_openrouter_key(home)), openrouter_box=_openrouter_key(home) or "",
                           openrouter_untested=bool(_openrouter_key(home)) and not setup_steps.openrouter_tested(home),
                           codex=steps.get("codex", {}),
@@ -282,6 +299,19 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           openai_key=masked(_openai_key(home)), openai_box=_openai_key(home) or "",
                           openai_untested=bool(_openai_key(home)) and not _openai_tested(home),
                           openai_test_state=_openai_test_state(home),
+                          # U1 3g: the engine choice and Claude's sign-in (its key only ever masked)
+                          engine=setup_steps.chosen_engine(state), engine_options=setup_steps.engine_options(),
+                          antigravity_risk=setup_steps.ANTIGRAVITY_RISK, claude=steps.get("claude", {}),
+                          claude_done=setup_steps.claude_done(state), claude_path=state.get("claude_path"),
+                          claude_auth_view=setup_steps.claude_auth_view(state),
+                          claude_key=masked(setup_steps.shown_claude_key(home)),
+                          antigravity=steps.get("antigravity", {}), antigravity_done=setup_steps.antigravity_done(state),
+                          antigravity_path=state.get("antigravity_path"),
+                          antigravity_models=setup_steps.antigravity_model_view(state)[0],
+                          antigravity_model=setup_steps.antigravity_model_view(state)[1],
+                          antigravity_read_model=setup_steps.antigravity_model_view(state)[2],
+                          antigravity_model_note=setup_steps.ANTIGRAVITY_MODEL_NOTE,
+                          antigravity_model_gone=setup_steps.antigravity_model_view(state)[3],
                           browser=steps.get("browser", {}), email=steps.get("email", {}),
                           chrome=setup_steps.chrome_path(), browser_open=browser.is_open(),
                           webmail=state.get("webmail"), webmail_record=steps.get("webmail", {}),
@@ -623,6 +653,51 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
             await run_in_threadpool(setup_steps.save_and_test_openrouter, stored, config, home)
         return respond(request, "openrouter", also=resume_unlocked_changed(locked))
 
+    # U1 3g: the engine choice (a switch swaps the whole AI part) and Claude's sign-in.
+    @app.post("/settings/engine")
+    async def engine_choice(request: Request):
+        form = await request.form()
+        state = await run_in_threadpool(setup_steps.choose_engine, form.get("engine"), home)
+        if setup_steps.chosen_engine(state) == "claude":
+            await run_in_threadpool(setup_steps.check_claude, home)
+        elif setup_steps.chosen_engine(state) == "antigravity":   # U1 4: also adds the A1 allow rules
+            await run_in_threadpool(setup_steps.check_antigravity, home)
+        return respond(request, "engine")
+
+    @app.post("/settings/antigravity")
+    def antigravity_check(request: Request):
+        setup_steps.check_antigravity(home)
+        return respond(request, "antigravity")
+
+    @app.post("/settings/antigravity/models")
+    async def antigravity_models(request: Request):   # M2: the user's own models
+        form = await request.form()
+        await run_in_threadpool(setup_steps.choose_antigravity_models, form.get("main"), form.get("read"), home)
+        return respond(request, "antigravity")
+
+    @app.post("/settings/claude")
+    def claude_check(request: Request):
+        setup_steps.check_claude(home)
+        return respond(request, "claude")
+
+    @app.post("/settings/claude/auth")
+    async def claude_auth(request: Request):
+        form = await request.form()
+        await run_in_threadpool(setup_steps.choose_claude_auth, form.get("choice"), home)
+        return respond(request, "claude")
+
+    @app.post("/settings/claude/key")
+    async def claude_key(request: Request):
+        form = await request.form()
+        typed = form.get("key") if isinstance(form.get("key"), str) else ""
+        state = await run_in_threadpool(setup_steps.save_claude_key, typed, home, form.get("to_file") == "1")
+        return respond(request, "claude", {"keychain_notice": state["keychain_refused"]} if state.get("keychain_refused") else None)
+
+    @app.post("/settings/claude/key/remove")
+    async def claude_key_remove(request: Request):
+        state = await run_in_threadpool(setup_steps.remove_claude_key, home)
+        return respond(request, "claude", {"keychain_notice": state["keychain_refused"]} if state.get("keychain_refused") else None)
+
     @app.post("/settings/codex")
     def codex(request: Request):
         setup_steps.check_codex(home)
@@ -717,7 +792,12 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         being open is not missing: the check closes it first and runs under its hold."""
         progress = setup_steps.progress(home)
         state, done = progress["state"], progress["done"]
-        needs = [EMAIL_NEEDS[number] for number in (3, 6) if not done[number]]
+        needs = [EMAIL_NEEDS[3]] if not done[3] else []
+        if not done[6]:   # U1 3g G6: the chosen engine
+            engine = setup_steps.chosen_engine(state)
+            needs.append((setup_steps.ENGINE_LABELS[engine],
+                          {"codex": "#connection-codex", "claude": "#connection-claude",
+                           "antigravity": "#connection-antigravity"}.get(engine, "#connection-engine")))
         if not state.get("webmail"):
             needs.append(EMAIL_NEEDS["webmail"])
         if state["steps"].get("browser", {}).get("status") != "done" and not browser.is_open():

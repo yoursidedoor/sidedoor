@@ -74,8 +74,19 @@ def inputs(root, policy, now, limit):
     return resources.read_text("discovery-prompt.md") + "\n\n" + json.dumps(scope)
 
 
-def validate(result, policy, now, limit):
-    """Return list[str] or raise ValueError; retain discovery sources in result."""
+def validate(result, policy, now, limit, dropped=None):
+    """Return the names of the companies kept, or raise ValueError for a malformed envelope.
+
+    One bad company no longer rejects the whole discovery (owner, 2026-10-27: "One bad entry no
+    longer rejects the whole set"): a company whose record fails a check below is left out, and
+    `dropped` (a list, when given) gets {"company", "reason"} for it in plain words. Only the
+    envelope (its fields, status, summary, blockers, allowance) still fails the whole result."""
+    return [record["company"].strip() for record in screen(result, policy, now, limit, dropped)["companies"]]
+
+
+def screen(result, policy, now, limit, dropped=None):
+    """The discovery result with only its well-formed companies (same schema fields), or raise
+    ValueError for a malformed envelope. Each left-out company is appended to `dropped`."""
     industries, current, maximum = _scope(policy, now, limit)
     required = {"discovery_status", "summary", "companies", "blockers"}
     if not isinstance(result, dict) or set(result) != required:
@@ -88,38 +99,65 @@ def validate(result, policy, now, limit):
     if (status == "COMPLETE" and blockers or status != "COMPLETE" and not blockers
             or status == "FAILED" and companies):
         raise ValueError("Status must agree with blockers and discovered companies")
-    names, seen = [], set()
-    fields = {"company", "industry", "source", "observed_at", "excerpt", "excerpt_names_company"}
+    kept, seen = [], set()
+    dropped = [] if dropped is None else dropped
     for company in companies:
-        if (not isinstance(company, dict) or set(company) != fields
-                or any(not _text(company[field], size) for field, size in
-                       (("company", 200), ("industry", 120), ("source", 2048),
-                        ("observed_at", 64), ("excerpt", 4000)))):
-            raise ValueError("Company discovery evidence does not match schema")
-        name = _key(company["company"])
-        # The model attests that the excerpt names the company (owner, 2026-09-23). This used to
-        # require the name, space-padded, to appear VERBATIM inside the excerpt - literal prose
-        # matching of the kind the owner has banned. "Sprocket AI" fails it when the page says
-        # "Sprocket's platform", "Sprocket, Inc." or just "Sprocket", and Defense abandoned a
-        # whole industry on exactly that. Whether a piece of text names a company is a judgement
-        # about language, so the read makes it. The source URL, the industry allowlist and
-        # uniqueness are all still checked here, so an invented company still cannot enter.
-        # The attestation is required, so every record judges; a read that cannot find an
-        # excerpt naming the company sets it false and picks a different excerpt.
-        named = company["excerpt_names_company"] is True
-        if not name or name in seen or company["industry"] not in industries or not named:
-            raise ValueError("Unique company, target industry, and an excerpt naming it required")
-        _public_url(company["source"])
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", company["observed_at"]):
-            raise ValueError("observed_at must be an ISO date-time with timezone")
-        # No 24-hour expiry (owner, 2026-09-23). A page read yesterday was rejected today, and
-        # nothing re-reads it, so a real observation became a permanent refusal. The date is
-        # still required, still parsed, and still may not be in the future; whether the role is
-        # actually open is re-checked by the application read, which is what caught litware's
-        # dead requisition.
-        age = current - _timestamp(company["observed_at"])
-        if age < dt.timedelta(0):
-            raise ValueError("Discovery source observation is future-dated")
+        try:
+            name = check_company(company, industries, current, seen)
+        except ValueError as error:
+            label = company.get("company") if isinstance(company, dict) else None
+            dropped.append({"company": " ".join(label.split())[:200] if isinstance(label, str) and label.strip() else None,
+                            "reason": str(error),
+                            # What the entry is (never shown): keeps two different records apart.
+                            "source": company.get("source") if isinstance(company, dict) and isinstance(company.get("source"), str) else None})
+            continue
         seen.add(name)
-        names.append(company["company"].strip())
-    return names
+        kept.append(company)
+    return dict(result, companies=kept)
+
+
+def check_company(company, industries, current, seen):
+    """One discovered company's checks; returns its key or raises ValueError with a plain reason.
+    The same checks run when the AI saves the company as it goes (research_tools.save_company)."""
+    fields = {"company", "industry", "source", "observed_at", "excerpt", "excerpt_names_company"}
+    if (not isinstance(company, dict) or set(company) != fields
+            or any(not _text(company[field], size) for field, size in
+                   (("company", 200), ("industry", 120), ("source", 2048),
+                    ("observed_at", 64), ("excerpt", 4000)))):
+        raise ValueError("its record did not have the expected fields")
+    name = _key(company["company"])
+    # The model attests that the excerpt names the company (owner, 2026-09-23). This used to
+    # require the name, space-padded, to appear VERBATIM inside the excerpt - literal prose
+    # matching of the kind the owner has banned. "Sprocket AI" fails it when the page says
+    # "Sprocket's platform", "Sprocket, Inc." or just "Sprocket", and Defense abandoned a
+    # whole industry on exactly that. Whether a piece of text names a company is a judgement
+    # about language, so the read makes it. The source URL, the industry allowlist and
+    # uniqueness are all still checked here, so an invented company still cannot enter.
+    # The attestation is required, so every record judges; a read that cannot find an
+    # excerpt naming the company sets it false and picks a different excerpt.
+    if not name:
+        raise ValueError("it had no company name")
+    if name in seen:
+        raise ValueError("it was listed twice")
+    if company["industry"] not in industries:
+        raise ValueError("it was found for a different industry")
+    if company["excerpt_names_company"] is not True:
+        raise ValueError("its quoted source did not name the company")
+    try:
+        _public_url(company["source"])
+    except ValueError:
+        raise ValueError("its source link was not a public web address") from None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", company["observed_at"]):
+        raise ValueError("the time its source was read was not a valid date")
+    # No 24-hour expiry (owner, 2026-09-23). A page read yesterday was rejected today, and
+    # nothing re-reads it, so a real observation became a permanent refusal. The date is
+    # still required, still parsed, and still may not be in the future; whether the role is
+    # actually open is re-checked by the application read, which is what caught litware's
+    # dead requisition.
+    try:
+        observed = _timestamp(company["observed_at"])
+    except ValueError:
+        raise ValueError("the time its source was read was not a valid date") from None
+    if current - observed < dt.timedelta(0):
+        raise ValueError("the time its source was read was in the future")
+    return name

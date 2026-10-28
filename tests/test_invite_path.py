@@ -175,7 +175,7 @@ class InvitePathTests(unittest.TestCase):
 
         config = dict(self.config, model="synthetic", codex="NEVER", timezone="UTC", daily_compute_seconds=10800)
         self.port.own_profile = config["sender_profile"]
-        with patch("reply_worker._execute", side_effect=judge), patch.object(orchestrator, "HeyReach", return_value=self.client):
+        with patch("reply_worker.execute_text", side_effect=judge), patch.object(orchestrator, "HeyReach", return_value=self.client):
             self.assertEqual(orchestrator.draft_promotion_cycle(self.database, config, port=self.port)["queued"], 1)
             orchestrator.new_contact_execution_cycle(ROOT, self.database, config, port=self.port)
         self.assertEqual([observation["route"] for observation in observations], ["unipile", "unipile"])
@@ -201,7 +201,7 @@ class InvitePathTests(unittest.TestCase):
 
         config = dict(self.config, model="synthetic", codex="NEVER", timezone="UTC", daily_compute_seconds=10800)
         self.port.own_profile = config["sender_profile"]
-        with patch("reply_worker._execute", side_effect=judge), patch.object(orchestrator, "HeyReach", return_value=self.client):
+        with patch("reply_worker.execute_text", side_effect=judge), patch.object(orchestrator, "HeyReach", return_value=self.client):
             self.assertEqual(orchestrator.draft_promotion_cycle(self.database, config, port=self.port)["queued"], 1)
             row, action = self.invite()
             self.assertEqual((action["purpose"], action["provider"], action["conversation_id"]), ("INITIAL", "unipile", chat))

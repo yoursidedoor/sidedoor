@@ -65,7 +65,6 @@ class Home(unittest.TestCase):
         directory = Path(directory)
         return {
             "agent_worker": agent_worker._command(CONFIG, directory),
-            "reply_worker": reply_worker._command(CONFIG, directory / "schema.json", directory / "out.json"),
             "browser": outreach_history_browser.command(CONFIG, directory),
         }
 
@@ -101,7 +100,10 @@ class ChatGPTModeUnchanged(Home):
 
     def test_api_billing_lines_are_not_waits_with_chatgpt(self):
         line = "ERROR: unexpected status 429 Too Many Requests: insufficient_quota\n"
-        self.assertIsNone(provider_limits.check_output(1, line, command=["codex", "exec"]))
+        # A 429 is the short "too many requests" wait in every mode (owner, 2026-10-27), never an API billing wait.
+        self.assertEqual(provider_limits.check_output(1, line, command=["codex", "exec"]).kind, provider_limits.RATE_LIMITED)
+        self.assertIsNone(provider_limits.check_output(1, "ERROR: Quota exceeded. Check your plan and billing details.\n",
+                                                       command=["codex", "exec"]))
         plan = "ERROR: You've hit your usage limit. Upgrade to Pro, or try again at Sep 24th, 2026 3:23 PM.\n"
         limit = provider_limits.check_output(1, plan)
         self.assertIsNone(limit.kind)
@@ -150,9 +152,8 @@ class ApiKeyMode(Home):
         # Codex starts MCP servers with a filtered environment plus each server's own env; no server
         # config here passes CODEX_API_KEY or asks for inherited variables (env_vars).
         import browser_runtime
-        import reply_tools
         with tempfile.TemporaryDirectory() as directory:
-            options = reply_tools.options(Path(directory)) + browser_runtime.codex_options(
+            options = browser_runtime.codex_options(
                 {}, Path(directory), "inspect", human_check="/h.json")
         text = "\n".join(options)
         self.assertNotIn(openai_auth.ENV_VARIABLE, text)
@@ -218,9 +219,21 @@ class BillingWaits(Home):
     def check(self, text, command=OPENAI_COMMAND, now=None):
         return provider_limits.check_output(1, text, now=now or self.NOW, command=command)
 
+    def test_an_api_key_429_is_the_short_wait_without_an_api_streak(self):
+        self.api_mode()
+        line = self.CASES[openai_auth.RATE_LIMIT]
+        delays = []
+        for limit in (self.check("WARN: retrying\n" + line + "\n"),
+                      self.check(json.dumps({"type": "turn.failed", "error": {"message": line[7:]}}))):
+            self.assertEqual((limit.kind, limit.detail()["counts_as_attempt"]), (provider_limits.RATE_LIMITED, False))
+            delays.append((limit.resume_at - self.NOW).total_seconds())
+        self.assertEqual(delays, [30, 60])   # not BACKOFF_SECONDS (owner, 2026-10-27)
+        self.assertIsNone(openai_auth.last_wait(self.home, self.NOW))   # no API wait streak, so no day-long hold
+        self.assertIsNone(openai_auth.hold(self.home))
+
     def test_credit_and_rate_limit_are_the_plan_limits_wait(self):
         self.api_mode()
-        for kind in (openai_auth.OUT_OF_CREDIT, openai_auth.RATE_LIMIT):
+        for kind in (openai_auth.OUT_OF_CREDIT,):
             line = self.CASES[kind]
             with self.subTest(kind=kind):
                 for limit in (self.check("WARN: retrying\n" + line + "\n"),
@@ -342,7 +355,11 @@ class BillingWaits(Home):
 
     def test_openrouter_errors_are_never_openai_waits(self):
         self.api_mode()
-        for line in self.CASES.values():
+        for kind, line in self.CASES.items():
+            if kind == openai_auth.RATE_LIMIT:   # a 429: the short "too many requests" wait (owner, 2026-10-27)
+                self.assertEqual(self.check(line, command=OPENROUTER_COMMAND).kind, provider_limits.RATE_LIMITED)
+                self.assertEqual(self.check(line, command=None).kind, provider_limits.RATE_LIMITED)
+                continue
             self.assertIsNone(self.check(line, command=OPENROUTER_COMMAND))
             self.assertIsNone(self.check(line, command=None))
         self.assertIsNone(openai_auth.hold(self.home))

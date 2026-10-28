@@ -269,7 +269,13 @@ def _sources(database, config, profile, now):
                         "occurred_at": event["occurred_at"], "quoted": quoted, "forwarded": forwarded})
         if campaign_source:
             sources[-1].update(campaign_source)
-    _require(sum(item["kind"] == "initial_sent" for item in sources) == 1, "FOLLOWUP_INITIAL_HISTORY_UNRESOLVED")
+        if _unipile_invite(event) and sequence.deferred_invite(event):
+            sources[-1]["note_deferred"] = True   # its note went later, as the FIRST_MESSAGE (owner, 2026-10-27)
+    # A not-Premium invitation and the note sent after acceptance are one first contact: the follow-up
+    # clock starts at the note (engagement.next_action).
+    initials = [item for item in sources if item["kind"] == "initial_sent"]
+    _require(sum(not item.get("note_deferred") for item in initials) == 1 or len(initials) == 1,
+             "FOLLOWUP_INITIAL_HISTORY_UNRESOLVED")
     if any(_unipile_initial(event) for event in events):
         for item in sources:
             item["route"] = UNIPILE
@@ -551,6 +557,12 @@ def judgment_context(database, action):
     _require(source is not None, "FOLLOWUP_INPUT_MISSING")
     packet = json.loads(source[0])["packet"]
     decision = _validate(output["raw"], packet)
+    # The judge sees the dash-free text that is queued and sent, as replies do. A follow-up queued
+    # before dashes were removed (2026-10-27) holds the raw text, which is the same proposal.
+    raw_message = decision["message"]
+    decision["message"] = reply_execution.without_dashes(raw_message)
+    if action["message"] == raw_message:
+        decision["message"] = raw_message
     _require(decision["message"] == action["message"], "FOLLOWUP_PROPOSAL_CHANGED")
     return {"followup_context": packet, "followup_decision": decision}
 
@@ -677,7 +689,13 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
     outreach.initialize_actions(database)
     outreach_agent.initialize(database)
     database.commit()
-    execute = execute or getattr(adapter, "execute", None) or reply_worker._execute
+    # The follow-up writer is a direct OpenRouter call (owner, 2026-10-27), unless an executor is injected.
+    if execute is None:
+        execute = (adapter.text_execute("followup", effort=outreach_agent.COMPOSE_EFFORT,
+                                        max_tokens=outreach_agent.COMPOSE_MAX_TOKENS)
+                   if hasattr(adapter, "text_execute") else getattr(adapter, "execute", None)
+                   ) or reply_worker.text_executor("followup", effort=outreach_agent.COMPOSE_EFFORT,
+                                                   max_tokens=outreach_agent.COMPOSE_MAX_TOKENS)
     root = Path(root)
     template = resources.read_text("followup-prompt.md").split("\nFOLLOWUP_SEND_JUDGE:\n", 1)[0]
     schema = resources.read_text("followup-schema.json")
@@ -686,7 +704,7 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
         if started >= limit:
             break
         current = _now(now)
-        task_id, claim = None, None
+        task_id, claim, followup_reservation = None, None, None
         item = {"state": "HELD"}
         try:
             candidate = {field: original[field] for field in ("profile", "recipient", "company", "verification")}
@@ -791,7 +809,14 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
                  "schema_sha256": reply_worker.sha(schema), "attempt": task["attempts"] + 1})
             raw = execute(config, prompt, schema, timeout)
             output_ref = outreach_agent.audit(database, action_id, PHASE, "OUTPUT", current.isoformat(), {"input_ref": reference, "raw": raw})
-            decision = _validate(raw, packet)
+            try:
+                decision = _validate(raw, packet)
+            except ValueError as error:
+                # An answer that breaks the schema's rule (e.g. COMPOSE with no message) gets the
+                # task's ordinary retry, within its attempt limit, instead of ending BLOCKED.
+                raise reply_worker.Held(str(error) if error.args and isinstance(error.args[0], str)
+                                        and error.args[0].startswith("FOLLOWUP_") else "FOLLOWUP_OUTPUT_INVALID",
+                                        retry=True) from None
             with database:
                 workflow_tasks.settle_compute(database, followup_reservation, followup_reserved_at,
                                               _now(None).isoformat(), "followup judgment completed; shared daily pool: unused tail of a cleanly completed reservation")
@@ -801,7 +826,9 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
             action = None
             if decision["decision"] == "COMPOSE":
                 action = dict(candidate, action_id=action_id, purpose="FOLLOWUP", ordinal=ordinal, sender_id=config["sender_id"],
-                    provider="unipile" if _unipile_route(adapter, database, candidate["profile"]) else "heyreach", channel="linkedin", subject="", message=decision["message"],
+                    provider="unipile" if _unipile_route(adapter, database, candidate["profile"]) else "heyreach", channel="linkedin", subject="",
+                    # No em or en dash goes out (owner style rule), normalised as replies are.
+                    message=reply_execution.without_dashes(decision["message"]),
                     verification=dict(verification, content_verified=True, content_sources=["outreach_agent_audit:" + output_ref]),
                     followup_task_id=task_id, followup_due_at=planned["due_at"],
                     followup_sources_sha256=routing.digest(sources), followup_thread_sha256=packet["thread_sha256"])
@@ -828,6 +855,12 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
         except (ValueError, KeyError, TypeError, IndexError, OSError, TimeoutError, reply_worker.Held) as error:
             if item not in items:
                 items.append(item)
+            if followup_reservation:
+                # The unused tail of a failed attempt is refunded too (owner, 2026-09-29); an
+                # already settled reservation credits 0.
+                with database:
+                    workflow_tasks.settle_compute(database, followup_reservation, followup_reserved_at,
+                                                  _now(None).isoformat(), "followup judgment failed; shared daily pool: unused tail of a failed attempt")
             item.update(state="HELD", blocker=error.code if isinstance(error, reply_worker.Held) else
                         str(error) if isinstance(error, ValueError) else type(error).__name__)
             provider = provider_limits.wait_of(error)
@@ -949,16 +982,20 @@ class FollowupAdapter(reply_execution.Adapter):
             {"source_sha256": outreach_agent.digest(packet), **packet})
         timeout = config.get("outreach_agent", {}).get("timeout_seconds", 60)
         _require(type(timeout) is int and 1 <= timeout <= 600 and len(prompt.encode()) <= outreach_agent.prompt_limit(config), "FOLLOWUP_JUDGE_BOUND_INVALID")
+        provenance = {"model": text_model.model(config), "executable": config["codex"], "auth": text_model.auth(config),
+                      "prompt_sha256": reply_worker.sha(template), "schema_sha256": reply_worker.sha(schema)}
+        if not self.injected_execute:   # the follow-up send judge is a direct call (owner, 2026-10-27)
+            provenance.update(executable=None, route=outreach_agent.DIRECT_ROUTE,
+                              reasoning_effort=reply_worker.DIRECT_EFFORT, max_tokens=reply_worker.DIRECT_MAX_TOKENS)
         reference = outreach_agent.audit(self.database, action["action_id"], phase, "OBSERVATION", now.isoformat(),
             {"packet": packet, "original_observation": original, "source_sha256": outreach_agent.digest(packet),
-             "provenance": {"model": text_model.model(config), "executable": config["codex"], "auth": text_model.auth(config),
-                            "prompt_sha256": reply_worker.sha(template), "schema_sha256": reply_worker.sha(schema)}})
+             "provenance": provenance})
         try:
             with self.database:
                 if not workflow_tasks.reserve_compute(self.database, "outreach-ai:" + reference, now.isoformat(), timeout,
                         config.get("timezone", "America/Los_Angeles"), config.get("daily_compute_seconds", 10800)):
                     raise outreach_agent.SharedBudgetExhausted(config, now)
-            raw = self.execute(config, prompt, schema, timeout)
+            raw = self.text_execute("followup_send_judge")(config, prompt, schema, timeout)
             output_ref = outreach_agent.audit(self.database, action["action_id"], phase, "RAW_OUTPUT", now.isoformat(),
                                                {"observation_id": reference, "output": raw})
             decision = outreach_agent._validate(raw, packet)

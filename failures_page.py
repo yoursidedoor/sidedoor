@@ -73,6 +73,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import applications_page
+import engines
 import overview_page as overview
 import workflow_tasks
 import paths
@@ -189,9 +190,10 @@ def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=Non
     short program code for the Report a problem summary (report_problem); it is never shown here.
     `reasons` (a Causes, 2026-10-23) are the recorded causes shown under the headline: at most
     REASON_LIMIT distinct ones, newest first, each {"words", "code", "count", "at", "where", "error",
-    "log_href"}, plus `reasons_more` and `reasons_href` (the Logs view of that component). `calm` ("question"
-    or "waiting") marks an item that is not a failure: a question waiting on Approvals, or a job whose
-    answers are in and that waits for its next run (shown under Needs you, never red, never counted).
+    "log_href"}, plus `reasons_more` and `reasons_href` (the Logs view of that component). `calm` ("question",
+    "waiting" or "info") marks an item that is not a failure: a question waiting on Approvals, a job whose
+    answers are in and that waits for its next run, or information such as a finished research day's
+    skipped entries (questions and waits under Needs you, info in its own section; never red, never counted).
     A cause whose words or place the headline already says shows without them. `refs` are
     the item's own ids (task, research run, finder run, job key, round slot) and `log_href` opens that
     run's own records and files (`run_view`)."""
@@ -218,7 +220,7 @@ ERROR_CHARACTERS = 300
 CAUSE_WORDS = {
     "WORKER_EXCEPTION": "The step stopped with an error in Sidedoor's code.",
     "SUBSCRIPTION_EXECUTOR_FAILED": "The AI call failed.",
-    "SUBSCRIPTION_EXECUTOR_UNAVAILABLE": "The AI program could not be started.",
+    "SUBSCRIPTION_EXECUTOR_UNAVAILABLE": "Sidedoor couldn't read your OpenRouter key.",
     "CLASSIFICATION_TIMEOUT": "The AI took too long to answer.",
     "CLASSIFICATION_INTERRUPTED": "The AI call was interrupted (Sidedoor was closed or restarted).",
     "CLASSIFICATION_OUTPUT_MISSING": "The AI gave no answer.",
@@ -226,6 +228,11 @@ CAUSE_WORDS = {
     "CLASSIFICATION_FIELD_TOO_LONG": "Part of the AI's answer was too long.",
     "CLASSIFICATION_LOCAL_VALIDATION_FAILED": "The AI's answer did not pass Sidedoor's checks.",
     "OUTREACH_AI_TRANSIENT_FAILURE": "The AI check could not finish.",
+    "FOLLOWUP_MESSAGE_INVALID": "The AI's follow-up answer did not pass Sidedoor's checks.",
+    "FOLLOWUP_DECISION_BINDING_INVALID": "The AI's follow-up answer did not match what was asked.",
+    "FOLLOWUP_REASON_REQUIRED": "The AI's follow-up answer gave no reason.",
+    "FOLLOWUP_OUTPUT_TOO_LARGE": "The AI's follow-up answer was too long.",
+    "FOLLOWUP_OUTPUT_INVALID": "The AI's follow-up answer could not be read.",
     "LINKEDIN_CONTACTS_INTERRUPTED": "The search was interrupted (Sidedoor was closed or restarted).",
     "LINKEDIN_CONTACTS_RESULT_BINDING_INVALID": "The search's answer did not match what was asked.",
     "LINKEDIN_CONTACTS_LIMITS_INVALID": "The search went past its limits.",
@@ -571,7 +578,7 @@ CYCLE_SPAN = dt.timedelta(hours=6)       # an unfinished round's longest possibl
 JOB_SLACK = dt.timedelta(minutes=5)
 # How long before an applications or research child's exit the failure that made it exit can have
 # happened: an applications step's crash is recorded just before its child exits; a research
-# attempt starts up to research_timeout before it.
+# attempt starts well before it (a run has no fixed length; 12 hours covers it).
 JOB_REACH = {"applications": dt.timedelta(minutes=10), "research": dt.timedelta(hours=12)}
 
 
@@ -717,6 +724,44 @@ def research_causes(result, attempt_id, at, secrets=()):
     return causes
 
 
+def _research_dropped(result):
+    """Entries research left out on their own (owner, 2026-10-27: "Hope the dropped ones will be shown
+    on failures and logs page"): each industry's `dropped_entries` ({company, role, reason})."""
+    industries = (result or {}).get("industries") if isinstance(result, dict) else None
+    found = []
+    for industry in industries if isinstance(industries, list) else []:
+        entries = industry.get("dropped_entries") if isinstance(industry, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict):
+                found.append(entry)
+    return found
+
+
+def _research_cut_offs(result):
+    """Plain notes of research sessions that ended early but kept what they saved (R1, review S11)."""
+    industries = (result or {}).get("industries") if isinstance(result, dict) else None
+    notes = []
+    for industry in industries if isinstance(industries, list) else []:
+        entries = industry.get("session_cut_offs") if isinstance(industry, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and isinstance(entry.get("note"), str) and entry["note"].strip():
+                notes.append(entry["note"].strip())
+    return notes
+
+
+def _dropped_text(entries):
+    """ "2 entries were skipped: Airia: its source link was not a public web address; ..." """
+    if not entries:
+        return ""
+    parts = []
+    for entry in entries[:6]:
+        name = str(entry.get("company") or "An entry") + (", " + str(entry["role"]) if entry.get("role") else "")
+        parts.append("%s: %s" % (name, entry.get("reason") or "it was malformed"))
+    more = " (and %d more)" % (len(entries) - 6) if len(entries) > 6 else ""
+    return " %d %s skipped: %s%s." % (len(entries), "entry was" if len(entries) == 1 else "entries were",
+                                      "; ".join(parts), more)
+
+
 def research_failures(reader, config, now, fmt, secrets=()):
     """A research day that did not finish, with its causes (owner 2026-10-24). Not failures: a day whose
     last try was interrupted (Sidedoor was quit or restarted), a day with no cause (only waiting), and an
@@ -730,6 +775,25 @@ def research_failures(reader, config, now, fmt, secrets=()):
     completed = reader.rows("SELECT MAX(day) AS day FROM research_days WHERE state='COMPLETE'", (), "research_days")
     resolved = (completed[0]["day"] if completed else None) or ""
     found = []
+    # A finished day whose research skipped single bad entries shows them too, as information: the
+    # rest of its results were kept, so there is nothing to do. A calm "info" item (owner 2026-10-27,
+    # "3:a"): shown, never counted as a failure.
+    for day in reader.rows("SELECT day,attempt_id FROM research_days WHERE day>=? AND state='COMPLETE' "
+                           "ORDER BY day DESC", (first,), "research_days"):
+        attempt = reader.rows("SELECT started_at,result FROM research WHERE id=?", (day["attempt_id"],), "research")
+        finished = overview._json(attempt[0]["result"]) if attempt else None
+        dropped = _research_dropped(finished)
+        # A session that ended early but kept what it saved is information too (review R1 S11).
+        cut_offs = _research_cut_offs(finished)
+        if dropped or cut_offs:
+            label = "today" if day["day"] == today else "on " + _day_label(day["day"])
+            found.append(_item("research", "Research finished %s.%s%s" % (
+                                   label, _dropped_text(dropped), "".join(" " + note for note in cut_offs)),
+                               "Nothing you need to do. The rest of that day's results were kept.",
+                               overview._utc(attempt[0]["started_at"]), job="research",
+                               refs={"research_id": day["attempt_id"], "day": day["day"]},
+                               log_href=run_href("research", day["attempt_id"]) if day["attempt_id"] else None,
+                               calm="info"))
     for day in days:
         if day["day"] != today and day["day"] <= resolved:
             continue
@@ -742,6 +806,7 @@ def research_failures(reader, config, now, fmt, secrets=()):
         tries = max(1, (day["attempts"] or 0) - (day["compute_wait_attempts"] or 0))
         at = overview._utc(attempt[0]["started_at"]) if attempt else None
         reason = _research_reason(result)
+        skipped = _dropped_text(_research_dropped(result))
         causes = research_causes(result, day["attempt_id"], at, secrets)
         if not causes.found:
             continue
@@ -761,9 +826,9 @@ def research_failures(reader, config, now, fmt, secrets=()):
                 retry = None
                 todo = ("It used all of today's tries. Nothing you need to do: research runs again %s."
                         % _at(fmt, workflow_tasks.next_day_start(now, zone, hour)))
-            found.append(_item("research", text, todo, at, tries, retry, job="research", **extra))
+            found.append(_item("research", text + skipped, todo, at, tries, retry, job="research", **extra))
         else:
-            found.append(_item("research", "Research didn't finish on %s: %s." % (_day_label(day["day"]), reason),
+            found.append(_item("research", "Research didn't finish on %s: %s.%s" % (_day_label(day["day"]), reason, skipped),
                                "Nothing you need to do. Research hasn't finished a day since; it runs again every day.",
                                at, tries, job="research", **extra))
     return found
@@ -1362,10 +1427,11 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=Non
             section["unavailable"] = section["key"] != "scheduler"
     oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     newest_first = lambda entries: sorted(entries, key=lambda entry: entry["at"] or oldest, reverse=True)
-    # Not failures (owner 2026-10-24): questions waiting on Approvals and answered jobs waiting for their
-    # next run show calmly under Needs you, apart from `needs_you` and the sections (so Report a problem
+    # Not failures (owner 2026-10-24): questions waiting on Approvals, answered jobs waiting for their
+    # next run show calmly under Needs you (information items, calm "info", show in their section instead), apart from `needs_you` and the sections (so Report a problem
     # and doctor never count them).
-    calm = newest_first(entry for section in sections.values() for entry in section["entries"] if entry["calm"])
+    calm = newest_first(entry for section in sections.values() for entry in section["entries"]
+                        if entry["calm"] and entry["calm"] != "info")
     calm = [entry for entry in calm if entry["calm"] == "question"] + [entry for entry in calm if entry["calm"] != "question"]
     calm_more, calm = max(0, len(calm) - LIST_LIMIT), calm[:LIST_LIMIT]
     # What needs the user is listed once, under Needs you (Overview's needs-you link lands there).
@@ -1374,6 +1440,7 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=Non
     focus = section
     earlier_than = now - EARLIER_AFTER
     for section in sections.values():
+        section["all_entries"] = section["entries"]
         listed = newest_first(entry for entry in section["entries"] if not entry["you"] and not entry["calm"])
         # Owner 2026-10-24: items last seen over a day ago fold into a collapsed "Earlier" per group; the split
         # is made on the whole list (recent first), then paged, so "Earlier (N)" counts all of them.
@@ -1384,13 +1451,18 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=Non
         section["entries"], section["paging"] = page_of(section["entries"], page if section["key"] == focus else 1)
         section["more"] = 0 if section["key"] == focus else max(0, section["total"] - LIST_LIMIT)
         section["paging"] = section["paging"] if section["key"] == focus else None
+        # Information items (calm "info", review R5 2026-10-27) show in their own section, after its
+        # failures, and are never counted: not in `total`, `more`, `entries` or `nothing`.
+        section["info"] = newest_first(entry for entry in section.pop("all_entries")
+                                       if entry["calm"] == "info")[:LIST_LIMIT]
         section["recent"] = [entry for entry in section["entries"] if entry["at"] is None or entry["at"] >= earlier_than]
         section["earlier"] = [entry for entry in section["entries"] if entry["at"] is not None and entry["at"] < earlier_than]
     needs_total = len(needs)
     needs, needs_paging = page_of(needs, page if focus == NEEDS_YOU else 1)
     ordered = [sections["scheduler"]] + [sections[key] for key, _ in GROUPS]
     shown = [section for section in ordered if section["entries"] or section["unavailable"]]
-    return {"sections": shown, "needs_you": needs, "needs_calm": calm, "needs_calm_more": calm_more, "nothing": not shown and not needs,
+    informed = [section for section in ordered if section["info"] and section not in shown]
+    return {"sections": shown, "info_sections": informed, "needs_you": needs, "needs_calm": calm, "needs_calm_more": calm_more, "nothing": not shown and not needs,
             "unreadable": reader.broken,
             "when": fmt, "recent_days": RECENT_DAYS, "needs_paging": needs_paging if focus == NEEDS_YOU else None,
             "needs_more": 0 if focus == NEEDS_YOU else max(0, needs_total - LIST_LIMIT), "needs_total": needs_total}
@@ -1776,7 +1848,7 @@ PROMPT_WITHHELD = "(The prompt Sidedoor sent and the AI's working are not shown:
 
 
 def codex_safe(text, truncated):
-    """A codex run's printed log without its prompt echo and transcript (as `reply_worker._redacted_lines`
+    """A codex run's printed log without its prompt echo and transcript (as the removed `reply_worker._redacted_lines`
     keeps its stderr): the header before codex's "user" marker, then only codex's own ERROR/WARN lines
     (`reply_worker._CODEX_LEVEL`). A tail that began past the header (`truncated`) and shows no marker
     may be inside the echo, so only those level lines are kept from it too. Other text is unchanged."""
@@ -1825,36 +1897,17 @@ _CAUSE_LINE = re.compile(r"^(?:Error|error|fatal|Fatal|FATAL|panicked|thread '[^
 TRACE_NOTE = "(Only this session's error events are shown: its reasoning, messages and tool calls hold your details.)"
 
 
-def trace_errors(text):
-    """A codex --json trace's error events only (type error, turn.failed, or an item that failed), each
-    "<type>: <message>"; reasoning, agent messages and tool arguments and results are dropped."""
-    return "\n".join(line for _, line in trace_pairs([(None, line) for line in text.splitlines()]))
+def trace_errors(text, engine):
+    """A trace's error events only, as `engine` (engines.for_run of its folder) finds them (Codex: type
+    error, turn.failed, or an item that failed), each "<type>: <message>"; reasoning, agent messages and
+    tool arguments and results are dropped."""
+    return "\n".join(line for _, line in trace_pairs([(None, line) for line in text.splitlines()], engine))
 
 
-def trace_pairs(pairs):
+def trace_pairs(pairs, engine):
     """`trace_errors` over [(byte offset, line)], each kept event with its line's offset."""
-    kept = [(None, TRACE_NOTE)]
-    for offset, line in pairs:
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        kind = str(event.get("type") or "")
-        item = event.get("item") if isinstance(event.get("item"), dict) else {}
-        message = None
-        if kind == "error":
-            message = event.get("message")
-        elif kind == "turn.failed":
-            message = (event.get("error") or {}).get("message") if isinstance(event.get("error"), dict) else event.get("error")
-        elif item and (str(item.get("status") or "").lower() in ("failed", "error") or item.get("error")):
-            error = item.get("error")
-            message = (error.get("message") if isinstance(error, dict) else error) or "failed (%s)" % item.get("type")
-            kind = "%s %s" % (kind, item.get("type") or "item")
-        if message is not None:
-            kept.append((offset, "%s: %s" % (kind, str(message)[:ERROR_CHARACTERS])))
-    return kept
+    return [(None, TRACE_NOTE)] + [(offset, "%s: %s" % (kind, str(message)[:ERROR_CHARACTERS]))
+                                   for offset, kind, message in engine.error_events(pairs)]
 
 
 HEAD_BYTES = 4096
@@ -1889,19 +1942,25 @@ def _file(path, secrets, title=None, older=None):
     end = older[1] if older and older[0] == name else None
     chunk = read_range(path, end)
     state, pairs = chunk["state"], chunk["lines"]
-    if state == "ok" and path.name == "trace.jsonl":
-        pairs = trace_pairs(pairs)
-    elif state == "ok" and path.suffix == ".log":   # research step logs, a session's stderr / executor log
+    engine = None
+    if state == "ok" and (path.name == "trace.jsonl" or path.suffix == ".log"):
+        try:   # the engine that wrote the run (engine.json or <log>.engine.json; none: Codex)
+            engine = engines.for_run(path)
+        except engines.EngineRecordError:   # no known reader: only the note is shown
+            pairs = [(None, TRACE_NOTE if path.name == "trace.jsonl" else PROMPT_WITHHELD)]
+    if engine is not None and path.name == "trace.jsonl":
+        pairs = trace_pairs(pairs, engine)
+    elif engine is not None and path.suffix == ".log":   # research step logs, a session's stderr / executor log
         truncated = chunk["start"] > 0
         if end is not None:
             # An older chunk: never a head. One that starts mid-file starts in an unknown place, which the
             # gap line marks as inside the echo; the gap itself is not shown.
-            kept = codex_pairs([(None, GAP)] + pairs if truncated else pairs, True)
+            kept = engine.log_pairs([(None, GAP)] + pairs if truncated else pairs, True)
             pairs = [(offset, line) for offset, line in kept if not (offset is None and line == GAP)]
         else:
             if truncated:   # codex's header is at the start: a bounded head, the gap, then the tail
                 pairs = [(None, line) for line in read_head(path).splitlines()] + [(None, GAP)] + pairs
-            pairs = codex_pairs(pairs, truncated)
+            pairs = engine.log_pairs(pairs, truncated)
     try:
         at = dt.datetime.fromtimestamp(os.lstat(path).st_mtime, dt.timezone.utc)
     except OSError:

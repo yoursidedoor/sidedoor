@@ -42,6 +42,15 @@ class LogRetentionTests(unittest.TestCase):
             self.assertTrue(path.exists())
         self.assertEqual(log_retention.retain(self.root, retain_bytes=1)["removed"], 1)
 
+    def test_expired_worker_log_takes_its_engine_record(self):
+        name = "0" * 8 + "-0000-0000-0000-" + "0" * 12 + ".ai.1.discovery.log"
+        path, record = self.root / "logs" / name, self.root / "logs" / (name + ".engine.json")
+        path.write_text("old")
+        record.write_text('{"engine": "codex"}')
+        os.utime(path, (0, 0))
+        self.assertEqual(log_retention.retain(self.root, retain_seconds=1)["removed"], 1)
+        self.assertFalse(path.exists() or record.exists())
+
     def test_new_archive_gets_one_sweep_grace(self):
         path = self.root / "logs/research.stdout.log"
         path.write_bytes(b"history" * 50)
@@ -68,6 +77,22 @@ class LogRetentionTests(unittest.TestCase):
             with contextlib.redirect_stderr(output):
                 log_retention.startup(self.root)
         self.assertEqual(json.loads(output.getvalue()), {"log_retention": "DEFERRED", "error_type": "OSError"})
+
+    def test_a_clean_up_that_only_skipped_open_files_says_nothing(self):
+        errors, output = io.StringIO(), io.StringIO()
+        with mock.patch.object(log_retention, "retain", return_value={"state": "COMPLETE", "rotated": 0, "removed": 0, "skipped_open": 13}):
+            with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(output):
+                log_retention.startup(self.root)
+        self.assertEqual((errors.getvalue(), output.getvalue()), ("", ""))
+
+    def test_a_clean_up_that_did_something_is_output_not_an_error(self):
+        errors, output = io.StringIO(), io.StringIO()
+        result = {"state": "COMPLETE", "rotated": 1, "removed": 2, "skipped_open": 3}
+        with mock.patch.object(log_retention, "retain", return_value=result):
+            with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(output):
+                log_retention.startup(self.root)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue()), {"log_retention": result})
 
     def test_compact_output_omits_large_result_but_keeps_report_pointer(self):
         output = io.StringIO()

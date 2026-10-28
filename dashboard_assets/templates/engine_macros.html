@@ -1,0 +1,76 @@
+{# U1 3g: the engine choice and Claude's sign-in, shared by Setup step 6 and Settings > Connections. Never "Claude Code". #}
+{% macro engine_choice(action, target, engine, options, risk) %}
+  <form method="post" action="{{ action }}" hx-post="{{ action }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="engine-choice">
+    <fieldset>
+      <legend>Which AI runs Sidedoor's research and browser work</legend>
+      {% for name, label in options %}
+      <label><input type="radio" name="engine" value="{{ name }}"{% if name == engine %} checked{% endif %}> {{ label }}{% if name == "codex" %} (default){% endif %}</label>
+      {% if name == "antigravity" %}<p class="note note-warning antigravity-risk">{{ risk }}</p>{% endif %}
+      {% endfor %}
+    </fieldset>
+    <button class="button" type="submit">Save choice</button> <span class="htmx-indicator muted">Saving...</span>
+  </form>
+  {% if engine == "antigravity" %}<p class="note note-warning antigravity-chosen" role="status">{{ risk }}</p>{% endif %}
+{% endmacro %}
+
+{% macro antigravity_signin(base, target, v) %}
+  <p class="why">Sidedoor's research and browser work run through Antigravity, signed in with your own Google account.</p>
+  {% if v.antigravity_path and v.antigravity_done %}<p class="muted">Found at {{ v.antigravity_path }}</p>{% endif %}
+  {% if v.antigravity_models %}
+  <form method="post" action="{{ base }}/models" hx-post="{{ base }}/models" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="antigravity-models">
+    <label for="{{ base|replace('/', '-') }}-main">Model for applications and checks</label>
+    <select id="{{ base|replace('/', '-') }}-main" name="main">
+      {% for id, label in v.antigravity_models %}<option value="{{ id }}"{% if id == v.antigravity_model %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+    <label for="{{ base|replace('/', '-') }}-read">Model for reading pages and research</label>
+    <select id="{{ base|replace('/', '-') }}-read" name="read">
+      {% for id, label in v.antigravity_models %}<option value="{{ id }}"{% if id == v.antigravity_read_model %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+    {% for gone in v.antigravity_model_gone or [] %}<p class="note note-warning antigravity-model-gone" role="status">{{ gone }}</p>{% endfor %}
+    <p class="note note-info antigravity-model-note">{{ v.antigravity_model_note }}</p>
+    <button class="button" type="submit">Save models</button> <span class="htmx-indicator muted">Saving...</span>
+  </form>
+  {% endif %}
+  <form method="post" action="{{ base }}" hx-post="{{ base }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Check</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  <a class="guide-link" href="/setup/guide/antigravity" hx-get="/setup/guide/antigravity" hx-target="#guide-panel">Show me how</a>
+{% endmacro %}
+
+{% macro claude_signin(base, target, v, input_id) %}
+  {% if v.claude_auth_view == "api_key" %}
+  <p class="why">Sidedoor's research and browser work run through Claude, using your Anthropic API key. Anthropic bills that key for what Sidedoor uses. The key is kept on this computer.</p>
+  {% else %}
+  <p class="why">Sidedoor's research and browser work run through Claude, signed in with your Claude subscription.</p>
+  {% endif %}
+  {% if v.claude_path and v.claude_done %}<p class="muted">Found at {{ v.claude_path }}</p>{% endif %}
+  <form method="post" action="{{ base }}/auth" hx-post="{{ base }}/auth" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="choice">
+    <button class="button {{ 'button-highlight' if v.claude_auth_view != 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="subscription" aria-pressed="{{ 'true' if v.claude_auth_view != 'api_key' else 'false' }}">Use my Claude subscription</button>
+    <button class="button {{ 'button-highlight' if v.claude_auth_view == 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="api_key" aria-pressed="{{ 'true' if v.claude_auth_view == 'api_key' else 'false' }}">Use an Anthropic API key</button>
+  </form>
+  {% if v.claude_auth_view == "api_key" %}
+  {% if v.keychain_notice %}<p class="note note-warning" role="status">{{ v.keychain_notice }}</p>{% endif %}
+  {% if v.keychain_wait and v.keychain_wait != v.keychain_notice %}<p class="note note-warning" role="status">{{ v.keychain_wait }}</p>{% endif %}
+  {% if not v.keychain_wait or v.offer_file %}
+  {% if v.claude_key and not v.keychain_wait %}
+  <p>A key is saved, ending in <code>{{ v.claude_key }}</code>.</p>
+  <form method="post" action="{{ base }}/key/remove" hx-post="{{ base }}/key/remove" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button button-quiet" type="submit">Remove key</button>
+  </form>
+  {% endif %}
+  <form method="post" action="{{ base }}/key" hx-post="{{ base }}/key" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <label for="{{ input_id }}">{% if v.claude_key %}A different Anthropic API key{% else %}Anthropic API key{% endif %}</label>
+    <input id="{{ input_id }}" type="password" name="key" value="" autocomplete="off" spellcheck="false" required>
+    {% if not v.keychain_wait %}<button class="button" type="submit">Save</button>{% endif %}
+    {% if v.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
+    <span class="htmx-indicator muted">Saving...</span>
+  </form>
+  {% endif %}
+  {% endif %}
+  <form method="post" action="{{ base }}" hx-post="{{ base }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">Check</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  <a class="guide-link" href="/setup/guide/claude" hx-get="/setup/guide/claude" hx-target="#guide-panel">Show me how</a>
+{% endmacro %}

@@ -32,7 +32,7 @@ class BacklogNeverReachesTheReplyAI(unittest.TestCase):
                 patch.object(reply_execution, "BACKLOG_CUTOFF", OWNER_CUTOFF):
             fixture.seed()
             task = review_task(fixture.database)
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute:
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute:
                 result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             execute.assert_not_called()
             self.assertEqual([("BACKLOG_NOT_SENT", reply_execution.BACKLOG_BLOCKER)],
@@ -51,7 +51,7 @@ class BacklogNeverReachesTheReplyAI(unittest.TestCase):
             handed = engagement.handoff_reviews(fixture.database, fixture.config, fixture.now)
             self.assertEqual(["HANDED_OFF"], [item["state"] for item in handed["items"]])
             # A second cycle finds nothing to do.
-            with fixture.clock(), patch.object(reply_worker, "_execute") as execute:
+            with fixture.clock(), patch.object(reply_worker, "execute_text") as execute:
                 again = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             execute.assert_not_called()
             self.assertEqual([], again["items"])
@@ -96,7 +96,7 @@ class BacklogDoesNotTakeTheReplyWorkersPlaces(unittest.TestCase):
                 seen.append(request["source_snapshot"]["identity"])
                 return fixture.execute(config, prompt, schema, timeout)
 
-            with fixture.clock(), patch.object(reply_worker, "_execute", side_effect=execute):
+            with fixture.clock(), patch.object(reply_worker, "execute_text", side_effect=execute):
                 result = orchestrator.reply_classification_cycle(fixture.root, fixture.database, fixture.config)
             self.assertEqual(["linkedin.com/in/mock-contact"], seen)
             self.assertEqual(3, sum(item["state"] == "BACKLOG_NOT_SENT" for item in result["items"]))

@@ -28,10 +28,12 @@ import external_history
 import browser_guard
 import browser_runtime
 import desktop_adapter
+import engines
 import outreach_history_browser
 import portable
 import openai_auth
 import provider_limits
+import provider_pacing
 import reply_worker
 import reply_resume
 import run_locks
@@ -1182,12 +1184,10 @@ def command(config, directory):
     CAPTCHA-wait context, so `wait_for_human_check` is there too. No self-spawned `.py` server, no
     computer-use: the native macOS Open-panel fallback is dropped (owner, 2026-10-22)."""
     config = dict(config, _browser_operation=config.get("_application_operation") or "inspect")
-    result = outreach_history_browser.command(config, directory)
-    if config.get("_application_operation") in MAIN_MODEL_OPERATIONS or config.get("_application_guard_claim"):
-        result[result.index("--model") + 1] = config["model"]
-    for option in ('model_provider="openai"', "features.skills=false"):
-        result[-1:-1] = ["-c", option]
-    return result
+    return engines.engine(config).browser_command(
+        config, directory, application=True,
+        main_model=bool(config.get("_application_operation") in MAIN_MODEL_OPERATIONS
+                        or config.get("_application_guard_claim")))
 
 
 UNSUPPORTED_BROWSER_CODE = re.compile(r"\b(?:fetch|XMLHttpRequest|require|import|process|eval)\b|\.evaluate\s*\(")
@@ -1279,27 +1279,49 @@ CODE_TOOLS = {"browser_run_code_unsafe": "code"}
 
 
 def tool_item(item, submit, investigate=False):
-    """One Codex trace item of a browser session: True when it is a counted browser call, False when
-    it is not a tool call (or the uncounted CAPTCHA wait); raises on a refused one. The checks are
-    live's cua_repl checks mapped to the guarded server's tool names (E7.T1 live-parity table)."""
-    kind = item.get("type")
-    if kind in {"command_execution", "web_search", "web_search_call"}:
+    """`tool_event` for one Codex trace item (the `item` of an item.started/item.completed line)."""
+    return tool_event(engines.CODEX.item_event(item), submit, investigate)
+
+
+def tool_event(event, submit, investigate=False):
+    """One step of a browser session's trace (engines.TraceEvent): True when it is a counted browser
+    call, False when it is not a tool call (or the uncounted CAPTCHA wait); raises on a refused one.
+    The checks are live's cua_repl checks mapped to the guarded server's tool names (E7.T1 live-parity
+    table). A shell command or web search the engine ran itself is refused, and so is a step whose
+    item is not an object (it cannot be checked)."""
+    if event.kind in {"shell", "web_search", "malformed"}:
         raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
-    if kind != "mcp_tool_call":
+    # Claude (U1 3e, review C2): a failure its reader found ends the session as a refused tool does (a tool
+    # outside the run's list: APPLICATION_UNAUTHORIZED_TOOL; the browser server did not start:
+    # APPLICATION_BROWSER_EXECUTOR_FAILED); its other codes are judged when the run ends (check_run). A
+    # built-in tool Claude ran itself (WebFetch or any other: a call under kind "other") is refused.
+    # Codex never writes these events (its "other" steps carry no call).
+    if event.kind == "error":
+        if event.raw_kind == engines.ClaudeEngine.FORBIDDEN_TOOL:
+            raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
+        if event.raw_kind in engines.ClaudeEngine.LIVE_STOPS:
+            raise RuntimeError("APPLICATION_BROWSER_EXECUTOR_FAILED") from engines.ClaudeRunFailure(
+                event.raw_kind, event.text)
         return False
-    if item.get("server") != browser_runtime.SERVER:
+    if event.kind == "web_fetch" or (event.kind == "other" and event.call is not None):
         raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
-    tool = item.get("tool")
+    if event.kind != "tool":
+        return False
+    call = event.call
+    if call.server != browser_runtime.SERVER:
+        raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
+    tool = call.tool
     if tool == browser_guard.ARM_TOOL and submit:
         return True
     # The owner-CAPTCHA wait observes nothing and touches no page, so it is neither counted
     # toward the tool limit nor ever usable as evidence (owner, 2026-09-28).
     if tool == browser_guard.HUMAN_CHECK_TOOL:
         return False
+    if tool == browser_guard.CONTINUE_TOOL:   # Claude only: the next piece of a cut answer (a page read)
+        return True
     if tool not in browser_guard.TOOLS:
         raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
-    arguments = item.get("arguments")
-    arguments = arguments if isinstance(arguments, dict) else {}
+    arguments = call.args
     if tool == "browser_evaluate":
         raise ValueError("APPLICATION_UNSUPPORTED_BROWSER_CODE")
     if tool in CODE_TOOLS:
@@ -1348,7 +1370,8 @@ def observed_text(result, tool=None):
         sections[-1][1].append(line)
     kept = []
     for title, lines in sections:
-        if title == "Ran Playwright code" or (title == "Result" and tool in ECHO_RESULT_TOOLS):
+        if (title == "Ran Playwright code" or (title == "Result" and tool in ECHO_RESULT_TOOLS)
+                or title == browser_guard.CONTINUATION_TITLE):   # the guard's own piece note (Claude)
             continue
         if title == "Result" and tool == "browser_find":
             lines = [line for line in lines if not FIND_HEADER.match(line.strip())]
@@ -1390,7 +1413,8 @@ def reap_live_workers():
 
 
 def execute(config, prompt, directory, timeout):
-    worker = None
+    worker = arguments = None
+    engine = engines.engine(config)
     deadline = time.monotonic() + timeout
     # The bundled Node and @playwright/mcp (E7.T1) must be in place, and Sidedoor's own Chrome profile
     # free, before codex is started: either missing is an ordinary failed session, never a hang.
@@ -1406,18 +1430,25 @@ def execute(config, prompt, directory, timeout):
             (directory / "trace.jsonl").open("w") as trace, \
             (directory / "trace.jsonl").open() as monitor, \
             (directory / "stderr.log").open("w") as errors:
+        claude = engine.judged_by_stream   # Claude or Antigravity (U1 4): judged from the stream
+        judged = False   # Claude: finish_run wrote the run's model_calls row
         try:
-            import setup_steps
-            missing = setup_steps.codex_wait(config)
+            missing = engine.wait(config)
             if missing:   # no usable Codex: never started; a read waits (2026-10-23)
                 raise RuntimeError("APPLICATION_BROWSER_CODEX_NOT_FOUND") from missing
             arguments = command(config, directory)
+            # Which engine wrote this session's trace (U1 3a), with a Claude run's allowed tools (3e); the
+            # live reader knows the same list, so a tool outside it stops the session (review C2).
+            engines.record_run(directory, engine, command=arguments)
+            reader = engine.trace_reader(engine.allowed_of(arguments)) if claude else engine.trace_reader()
             worker = subprocess.Popen(arguments, stdin=subprocess.PIPE,
-                stdout=trace, stderr=errors, text=True, encoding="utf-8", cwd=working,
-                env=openai_auth.environment(arguments, reply_worker._environment()), **portable.worker_spawn_options())  # POSIX: start_new_session=True
+                stdout=trace, stderr=errors, text=True, encoding="utf-8",
+                cwd=getattr(arguments, "cwd", None) or working,
+                env=engine.environment(arguments, engine.base_environment() if claude else reply_worker._environment()),
+                **portable.worker_spawn_options())  # POSIX: start_new_session=True
             _LIVE_WORKER_GROUPS.add(worker.pid)
             portable.contain(worker)
-            pending = prompt
+            pending = engine.prompt_input(prompt)
             ceiling = deadline + HUMAN_CHECK_SECONDS + HUMAN_CHECK_FINISH
             extension = directory / "human_check.json"
             while True:
@@ -1447,23 +1478,47 @@ def execute(config, prompt, directory, timeout):
                     if not line.endswith("\n"):
                         monitor.seek(position)
                         break
-                    event = json.loads(line)
-                    if event.get("type") not in {"item.started", "item.completed"}:
-                        continue
-                    tool_item(event.get("item", {}), bool(config.get("_application_guard_claim")),
-                              config.get("_application_operation") == "investigate")
+                    for event in reader.feed(line):
+                        if event.phase is None and event.kind != "error":   # Claude's failures: review C2
+                            continue
+                        tool_event(event, bool(config.get("_application_guard_claim")),
+                                   config.get("_application_operation") == "investigate")
                 if finished:
+                    if claude:
+                        # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the
+                        # exit code; a clean run's answer is written to output.json.
+                        trace.flush()
+                        errors.flush()
+                        failure = engine.finish_run(worker.returncode,
+                                                    (directory / "trace.jsonl").read_text(errors="replace"),
+                                                    (directory / "stderr.log").read_text(errors="replace"),
+                                                    command=arguments, worker="application_browser")
+                        judged = True
+                        if failure is not None:
+                            raise RuntimeError("APPLICATION_BROWSER_EXECUTOR_FAILED") from failure
+                        break
                     if worker.returncode:
-                        raise RuntimeError("APPLICATION_BROWSER_EXECUTOR_FAILED") from provider_limits.check(
+                        raise RuntimeError("APPLICATION_BROWSER_EXECUTOR_FAILED") from engine.limit(
                             worker.returncode, directory / "trace.jsonl", directory / "stderr.log", command=arguments)
-                    openai_auth.succeeded(arguments)   # E0.T8 AK5
+                    engine.succeeded(arguments)   # E0.T8 AK5
                     break
         finally:
+            if arguments is not None:
+                engine.run_ended(arguments)   # U1 4: Antigravity's per-run MCP config goes (N3e: Popen failed too)
             if worker is not None:
                 _LIVE_WORKER_GROUPS.discard(worker.pid)
                 portable.kill_tree(worker.pid)
                 worker.wait(timeout=5)
                 browser_runtime.end_session(config)
+                if claude and not judged:   # stopped live or timed out: its model_calls row all the same
+                    try:
+                        trace.flush()
+                        engine.record_model_call(engine.read_trace(
+                            (directory / "trace.jsonl").read_text(errors="replace"),
+                            allowed=engine.allowed_of(arguments), strict=False),
+                            worker="application_browser", outcome="refused")
+                    except Exception:
+                        pass
 
 
 def leaves(value, pointer=""):
@@ -1566,27 +1621,31 @@ def session_carry_forward(directory, limit=8 * 1024):
     try:
         pages, notes, steps, last = [], [], 0, None
         trace = directory / "trace.jsonl"
-        if trace.exists():
+        try:   # the engine that wrote it (none recorded: Codex); a broken record skips only the trace
+            reader = engines.for_run(directory).trace_reader()
+        except engines.EngineRecordError:
+            reader = None
+        if reader is not None and trace.exists():
             for line in trace.read_text(errors="ignore").splitlines():
                 try:
-                    event = json.loads(line)
+                    events = reader.feed(line)
                 except ValueError:
                     continue
-                item = event.get("item") or {}
-                if event.get("type") != "item.completed":
-                    continue
-                if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-                    notes.append(item["text"][:400])
-                elif item.get("type") == "mcp_tool_call":
-                    steps += 1
-                    arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
-                    last = (str(item.get("tool")) + " " + json.dumps(arguments, sort_keys=True))[:300]
-                    for value in arguments.values():
-                        if isinstance(value, str):
-                            pages.extend(re.findall(r"https?://[^\s'\"`<>)]+", value))
-                    response = item.get("result")
-                    if isinstance(response, dict):
-                        pages.extend(PAGE_URL.findall(result_text(response)))
+                for event in events:
+                    if event.phase != "completed":
+                        continue
+                    if event.kind == "message" and isinstance(event.text, str):
+                        notes.append(event.text[:400])
+                    elif event.kind == "tool":
+                        steps += 1
+                        arguments = event.call.args
+                        last = (str(event.call.tool) + " " + json.dumps(arguments, sort_keys=True))[:300]
+                        for value in arguments.values():
+                            if isinstance(value, str):
+                                pages.extend(re.findall(r"https?://[^\s'\"`<>)]+", value))
+                        response = event.call.result
+                        if isinstance(response, dict):
+                            pages.extend(PAGE_URL.findall(result_text(response)))
         carried.update(pages_opened=list(dict.fromkeys(pages))[:12], last_notes=notes[-3:], steps=steps,
                        last_step=last)
         output = directory / "output.json"
@@ -2165,30 +2224,37 @@ def normalize(request, raw, trace, observed_at, trace_path):
     quotable = quotable_request(request)
     observations, failed_observations, calls, sequence = {}, {}, set(), []
     pages = {}  # tool call id -> the page URL its answer showed (host-observed, never model text)
-    for line in trace.splitlines():
-        event = json.loads(line)
-        if event.get("type") not in {"item.started", "item.completed"}:
+    reader = engines.for_run(Path(trace_path).parent).trace_reader()   # the session's engine (none recorded: Codex)
+    for event in (event for line in trace.splitlines() for event in reader.feed(line)):
+        if event.phase is None:
             continue
-        item = event.get("item", {})
-        if not tool_item(item, operation == "submit", operation == "investigate"):
+        if not tool_event(event, operation == "submit", operation == "investigate"):
             continue
-        identifier = item["id"]
+        call = event.call
+        if not call.has_id:
+            raise KeyError("id")
+        identifier = call.id
         calls.add(identifier)
-        if event["type"] != "item.completed":
+        if event.phase != "completed":
             continue
-        sequence.append(item)
-        response = item.get("result", {})
+        sequence.append(call)
+        response = call.result
         # Only the browser's own tools observe a page (E7.T1): the arm answer and the CAPTCHA wait are
         # never evidence, as live (they were other servers there).
-        if item.get("tool") not in browser_guard.TOOLS or not isinstance(response, dict):
+        if (call.tool not in browser_guard.TOOLS and call.tool != browser_guard.CONTINUE_TOOL
+                or not isinstance(response, dict)):   # CONTINUE_TOOL: a piece of a cut page read (Claude)
             continue
         shown = PAGE_URL.findall(result_text(response))
+        if call.tool == browser_guard.CONTINUE_TOOL:
+            # A piece of a cut answer (Claude) is about the page its guard note names, as the whole answer
+            # is (review E4 b fix 1): the webmail absence rule then holds for a quote from any piece.
+            shown = [page for page in [browser_guard.continuation_page(result_text(response))] if page]
         if shown:
             pages[identifier] = shown[-1]
-        if item.get("status") == "failed" or response.get("isError"):
-            failed_observations[identifier] = observed_text(response, item.get("tool"))
-        elif item.get("status") == "completed" and not item.get("error"):
-            observations[identifier] = observed_text(response, item.get("tool"))
+        if call.is_error:
+            failed_observations[identifier] = observed_text(response, call.tool)
+        elif call.is_error is False:
+            observations[identifier] = observed_text(response, call.tool)
     evidence = raw["evidence"]
     if not isinstance(evidence, list):
         raise ValueError("APPLICATION_EVIDENCE_LIMIT")
@@ -2694,16 +2760,57 @@ def _holds_browser(function):
     no claim spent) and gets BROWSER_BUSY back."""
     @functools.wraps(function)
     def held(root, database, config, request_id, executor=None):
-        with run_locks.browser_session(root, wait_seconds=run_locks.APPLICATION_BROWSER_WAIT_SECONDS) as free:
-            if not free:
-                return {"state": "BROWSER_BUSY", "request_id": request_id}
-            # The bundled runtime missing, or a Chrome already on Sidedoor's profile, is a capacity
-            # wait like a busy browser (review fix 2): checked before the claim, so no read is spent.
-            code = browser_runtime.check_available(database, config, "APPLICATION_BROWSER_", "applications")
-            if code:
-                return {"state": "BROWSER_UNAVAILABLE", "code": code, "request_id": request_id}
-            return function(root, database, config, request_id, executor)
+        # The pacing slot (provider_pacing, 2026-10-27) comes first, BEFORE the browser lock (never waited
+        # for while holding it) and before the claim (so the claim's lease, the deadline the AI sees in
+        # request.json and the session's own limit all start after the wait). The scheduled adapter
+        # (application_connection) already took both, in that order; it holds the lock here.
+        paced = None
+        if not run_locks.browser_held_here(root):
+            if not claimable(database, request_id):
+                return {"state": "NOT_CLAIMED", "request_id": request_id}   # no slot spent on nothing
+            try:
+                paced = pacing_slot(config)
+            except provider_limits.ProviderUsageLimit as limit:
+                return {"state": "PACING_WAIT", "request_id": request_id, "resume_at": limit.next_at}
+        try:
+            # Holding a slot, the browser is waited for only briefly (provider_pacing.BROWSER_LOCK_WAIT_SECONDS):
+            # busy, BROWSER_BUSY comes back and the slot is released at once, nothing claimed.
+            wait = run_locks.APPLICATION_BROWSER_WAIT_SECONDS if paced is None else provider_pacing.BROWSER_LOCK_WAIT_SECONDS
+            with run_locks.browser_session(root, wait_seconds=wait) as free:
+                if not free:
+                    return {"state": "BROWSER_BUSY", "request_id": request_id}
+                # The bundled runtime missing, or a Chrome already on Sidedoor's profile, is a capacity
+                # wait like a busy browser (review fix 2): checked before the claim, so no read is spent.
+                code = browser_runtime.check_available(database, config, "APPLICATION_BROWSER_", "applications")
+                if code:
+                    return {"state": "BROWSER_UNAVAILABLE", "code": code, "request_id": request_id}
+                return function(root, database, config, request_id, executor)
+        finally:
+            if paced is not None:
+                paced.release()
     return held
+
+
+def pacing_slot(config):
+    """`provider_pacing.browser_slot`: one browser session's slot under its engine's pacing key, waited for
+    at most provider_pacing.BROWSER_SLOT_WAIT_SECONDS, then the short rate-limit wait (no try spent)."""
+    return provider_pacing.browser_slot(config)
+
+
+def claimable(database, request_id):
+    """True when `request_id` could be claimed now (the claim itself stays the authority): it is pending, or
+    claimed with its lease run out, and no other request holds a live claim. Unreadable: True."""
+    now = applications.stamp()
+    try:
+        if database.execute("SELECT 1 FROM desktop_requests WHERE state='CLAIMED' AND lease_until>? LIMIT 1",
+                            (now,)).fetchone():
+            return False
+        return bool(database.execute("SELECT 1 FROM desktop_requests WHERE request_id=? AND (state='PENDING' OR "
+                                     "state='CLAIMED' AND lease_until<=?)", (request_id, now)).fetchone())
+    except (AttributeError, sqlite3.Error):
+        return True
+
+
 
 
 @_holds_browser

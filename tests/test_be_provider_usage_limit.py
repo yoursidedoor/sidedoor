@@ -109,10 +109,9 @@ class ProviderUsageLimitTests(unittest.TestCase):
             {"error": {"code": "APPLICATION_BROWSER_EXECUTOR_FAILED", "trace_path": str(trace)}}))
 
     def test_workflow_attempt_refused_by_provider_is_not_counted(self):
-        with self.assertRaises(reply_worker.Held) as raised:
-            reply_worker._execute(self.config(), "prompt", "{}", 30)
-        wait = provider_limits.wait_of(raised.exception)
-        self.assertEqual(raised.exception.code, "SUBSCRIPTION_EXECUTOR_FAILED")  # unchanged for other callers
+        # The codex run's refusal as the browser sessions still classify it (the text workers are
+        # direct calls since 2026-10-27).
+        wait = provider_limits.check_output(1, STDERR, command=["codex"])
         self.assertEqual(wait.stated_reset, RESET)
         workflow_tasks.initialize(self.database)
         with self.database:

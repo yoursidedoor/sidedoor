@@ -183,6 +183,10 @@ def retain(root, *, rotate_bytes=ROTATE_BYTES, retain_bytes=RETAIN_BYTES,
                 if _same(path, info):
                     if portable.try_remove(path):
                         result["removed"] += 1
+                        # A research worker log's engine record (engines.record_run) goes with it.
+                        engine_record = path.with_name(path.name + ".engine.json")
+                        if WORKER_NAME.fullmatch(path.name) and engine_record.is_file() and not engine_record.is_symlink():
+                            portable.try_remove(engine_record)
                     else:
                         result["skipped_open"] += 1
             else:
@@ -253,7 +257,8 @@ def startup(root):
         traces = prune_traces(root)
         if traces["removed"]:
             # Machine contract (E2.T6): a JSON status line (parsed by tests and reports); stays print.
-            print(json.dumps({"trace_retention": traces}), file=sys.stderr)
+            # A clean-up that worked is output, not an error (owner, 2026-10-27).
+            print(json.dumps({"trace_retention": traces}))
     except OSError as error:
         # Machine contract (E2.T6): a JSON status line (parsed by tests and reports); stays print.
         print(json.dumps({"trace_retention": "DEFERRED", "error_type": type(error).__name__}), file=sys.stderr)
@@ -263,9 +268,12 @@ def startup(root):
         # Machine contract (E2.T6): a JSON status line (parsed by tests and reports); stays print.
         print(json.dumps({"log_retention": "DEFERRED", "error_type": type(error).__name__}), file=sys.stderr)
         return
-    if result["rotated"] or result["removed"] or result.get("skipped_open"):
+    if result["rotated"] or result["removed"]:
         # Machine contract (E2.T6): a JSON status line (parsed by tests and reports); stays print.
-        print(json.dumps({"log_retention": result}), file=sys.stderr)
+        # Only when something was rotated or removed, and as output: files skipped because a running
+        # job still writes them are normal, and this line used to fill the Errors logs every run
+        # (owner, 2026-10-27). A clean-up that could not run (DEFERRED above) stays an error.
+        print(json.dumps({"log_retention": result}))
 
 
 def print_result(result, report_path):

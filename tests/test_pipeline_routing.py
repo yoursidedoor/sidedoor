@@ -572,7 +572,7 @@ class ReplyDecisionRoutingTests(ReplyDecisionHarness, unittest.TestCase):
         def execute(config, prompt, schema, timeout):
             request = json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2])
             return routing.encoded(self.output(request, "QUESTION"))
-        with patch.object(reply_worker, "_execute", side_effect=execute) as executor:
+        with patch.object(reply_worker, "execute_text", side_effect=execute) as executor:
             self.assertFalse(reply_worker.cycle(root, self.database, self.config, NOW)["items"])
             self.assertFalse(executor.called)
             reply_worker.cycle(root, self.database, self.config, LATER)
@@ -615,7 +615,7 @@ class ReplyDecisionRoutingTests(ReplyDecisionHarness, unittest.TestCase):
         self.database.commit()
         def execute(config, prompt, schema, timeout):
             return routing.encoded(self.output(json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2])))
-        with patch.object(reply_worker, "_execute", side_effect=execute):
+        with patch.object(reply_worker, "execute_text", side_effect=execute):
             reply_worker.cycle(Path(__file__).resolve().parents[1], self.database, self.config, NOW)
         self.assertEqual(prior, routing.one(self.database, "SELECT * FROM reply_worker_results WHERE task_id=?", (prior_id,)))
         self.assertIn(upgrade_id, self.source_result(source_key)["reply_decisions"])
@@ -625,7 +625,7 @@ class ReplyDecisionRoutingTests(ReplyDecisionHarness, unittest.TestCase):
         engagement.record_event(self.database, message("Could you clarify the team?", "timeout"))
         routing.cycle(self.database, self.config, NOW)
         self.database.commit()
-        with patch.object(reply_worker, "_execute", side_effect=reply_worker.Held("CLASSIFICATION_TIMEOUT", retry=True)):
+        with patch.object(reply_worker, "execute_text", side_effect=reply_worker.Held("CLASSIFICATION_TIMEOUT", retry=True)):
             reply_worker.cycle(Path(__file__).resolve().parents[1], self.database, self.config, NOW)
         task = routing.one(self.database, "SELECT * FROM workflow_tasks WHERE worker='pipeline_routing_review'")
         saved = routing.rows(self.database, "SELECT * FROM reply_worker_inputs")
@@ -664,7 +664,7 @@ class ReplyDecisionRoutingTests(ReplyDecisionHarness, unittest.TestCase):
         self.assertIsNotNone(revised)
         def execute(config, prompt, schema, timeout):
             return routing.encoded(self.output(json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2]), "QUESTION"))
-        with patch.object(reply_worker, "_execute", side_effect=execute):
+        with patch.object(reply_worker, "execute_text", side_effect=execute):
             reply_worker.cycle(Path(__file__).resolve().parents[1], self.database, self.config, NOW)
             self.database.commit()
             reply_worker.cycle(Path(__file__).resolve().parents[1], self.database, self.config, LATER)

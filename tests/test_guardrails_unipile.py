@@ -843,7 +843,7 @@ class FollowupBase(Base):
 
     def setUp(self):
         super().setUp()
-        self.enterContext(patch("reply_worker._execute", side_effect=self.model))
+        self.enterContext(patch("reply_worker.execute_text", side_effect=self.model))
         self.compositions = []
         self.research_run([self.SLUG])
         self.hourly(2, minutes=30)
@@ -1150,7 +1150,7 @@ class MessageBase(Base):
     def setUp(self):
         super().setUp()
         self.enterContext(patch.object(outreach_agent.Adapter, "inspect", REAL_INSPECT))
-        self.enterContext(patch("reply_worker._execute", side_effect=self.model))
+        self.enterContext(patch("reply_worker.execute_text", side_effect=self.model))
 
     def model(self, config, prompt, schema, timeout):
         packet = json.loads(prompt.split("UNTRUSTED_SOURCE_JSON:\n", 1)[1])

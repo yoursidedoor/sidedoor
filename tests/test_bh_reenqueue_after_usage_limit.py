@@ -4,9 +4,8 @@ import sqlite3
 import unittest
 
 import workflow_tasks
-from test_be_provider_usage_limit import RESET, fake_codex  # noqa: F401  (same fixtures as BE)
+from test_be_provider_usage_limit import RESET, STDERR  # noqa: F401  (same fixtures as BE)
 import provider_limits
-import reply_worker
 import test_part_c_read_gating as part_c
 
 
@@ -14,10 +13,7 @@ class ReenqueueAfterUsageLimitTests(unittest.TestCase):
     setUp = part_c.PartCTests.setUp
 
     def test_reenqueue_matches_refunded_allowance(self):
-        config = dict(part_c.RECOVERY, codex=fake_codex(self.root), model="gpt-test", timezone="America/Los_Angeles")
-        with self.assertRaises(reply_worker.Held) as raised:
-            reply_worker._execute(config, "prompt", "{}", 30)
-        wait = provider_limits.wait_of(raised.exception)
+        wait = provider_limits.check_output(1, STDERR, command=["codex"])
         workflow_tasks.initialize(self.database)
         args = ("outreach-draft-inspection", "a1", "parent", [{"source": "s", "observed_at": part_c.NOW}], part_c.at(86400))
         with self.database:

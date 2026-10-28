@@ -23,51 +23,23 @@ import workflow_tasks
 from test_pipeline_routing import NOW, message, opportunity
 from backlog_fixture import setUpModule, tearDownModule  # noqa: F401 (fixture messages predate the reply cutoff)
 import synthetic_resume  # noqa: F401 (synthetic designated resume; the owner's is not in the repo)
-import posix_process_mocks
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class MockProcess:
-    def __init__(self, owner, command, options):
-        self.owner = owner
-        self.command = command
-        self.options = options
-        self.returncode = None
-        self.pid = 987654321
-        self.waited = False
-
-    def communicate(self, prompt, timeout):
-        self.owner.prompts.append(prompt)
-        self.owner.timeouts.append(timeout)
-        request = json.loads(prompt.split("UNTRUSTED_SOURCE_JSON:\n", 1)[1])
-        actual = json.loads(request["source_snapshot"]["payload"])["inbox"]["text"]
-        span = {"start": 0, "end": len(actual), "text": actual}
-        output = {"output_version": reply_worker.VERSION, "source_sha256": request["source_sha256"],
-                  "label": "QUESTION", "literal_quote": actual, "quote_span": span,
-                  "role_reference": request["job_scope"][0]["job_key"] if request["job_scope"] else None,
-                  "reason": "The speaker is asking a question; this is an inference.",
-                  "unknown_factual_requirements": [], "reply_proposal": None,
-                  "next_action": "Review the authenticated thread without sending.",
-                  "review_at": "2026-09-17T20:00:00+00:00"}
-        if self.owner.timeout:
-            raise subprocess.TimeoutExpired(self.command, timeout, stderr="private-error")
-        if self.owner.mutate_output:
-            self.owner.mutate_output(output)
-        if self.owner.during_process:
-            self.owner.during_process()
-        self.returncode = self.owner.returncode
-        path = Path(self.command[self.command.index("--output-last-message") + 1])
-        path.write_text(self.owner.raw if self.owner.raw is not None else json.dumps(output), encoding="utf-8")
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self, timeout):
-        self.waited = True
-        self.returncode = -9
-        return self.returncode
+def model_answer(owner, prompt):
+    """The fixture model's answer to one reply prompt (a QUESTION grounded in the message)."""
+    request = json.loads(prompt.split("UNTRUSTED_SOURCE_JSON:\n", 1)[1])
+    actual = json.loads(request["source_snapshot"]["payload"])["inbox"]["text"]
+    span = {"start": 0, "end": len(actual), "text": actual}
+    return {"output_version": reply_worker.VERSION, "source_sha256": request["source_sha256"],
+            "label": "QUESTION", "literal_quote": actual, "quote_span": span,
+            "role_reference": request["job_scope"][0]["job_key"] if request["job_scope"] else None,
+            "reason": "The speaker is asking a question; this is an inference.",
+            "unknown_factual_requirements": [], "reply_proposal": None,
+            "next_action": "Review the authenticated thread without sending.",
+            "review_at": "2026-09-17T20:00:00+00:00"}
 
 
 class ReplyWorkerTests(unittest.TestCase):
@@ -104,6 +76,7 @@ class ReplyWorkerTests(unittest.TestCase):
                                                  "opportunities": [role], "drafts": []}, now=NOW)
         self.database.commit()
         self.config = {"codex": "/mock-only/codex", "model": "existing-model", "timezone": "UTC",
+                       "text_model": {"model": "existing-model"},
                        "pipeline_routing": {"account_ids": [123]}, "reply_worker": {"enabled": True, "timeout_seconds": 10}}
         self.processes = []
         self.prompts = []
@@ -113,15 +86,37 @@ class ReplyWorkerTests(unittest.TestCase):
         self.raw = None
         self.mutate_output = None
         self.during_process = None
+        self.tool_turns = []
         reply_resume.context()
-        self.popen = self.enterContext(patch.object(reply_worker.subprocess, "Popen", side_effect=self.process))
-        self.kill = self.enterContext(patch.object(reply_worker.os, "killpg", create=True))
-        posix_process_mocks.simulate(self)
+        # The reply AI is a direct OpenRouter call (2026-10-27): the fake replaces text_model.complete.
+        self.popen = self.enterContext(patch.object(reply_worker.text_model, "complete", side_effect=self.complete))
 
-    def process(self, command, **options):
-        process = MockProcess(self, command, options)
-        self.processes.append(process)
-        return process
+    def complete(self, config, prompt, **named):
+        """One fake chat-completions turn: records the reply prompt and answers it (no tools called)."""
+        self.processes.append(dict(named, messages=list(named.get("messages") or [])))
+        if self.tool_turns and named.get("tool_choice") != "none":
+            # A turn that calls tools: OpenAI-style tool_calls, run by reply_tools in this process.
+            calls = [{"id": "call-%d-%d" % (len(self.processes), index), "type": "function",
+                      "function": {"name": name, "arguments": json.dumps(arguments)}}
+                     for index, (name, arguments) in enumerate(self.tool_turns.pop(0))]
+            message = {"role": "assistant", "content": None, "tool_calls": calls}
+            return {"content": "", "tool_calls": calls, "message": message, "usage": {}, "finish_reason": "tool_calls",
+                    "model": "existing-model"}
+        prompt = named["messages"][1]["content"]
+        self.prompts.append(prompt)
+        self.timeouts.append(named["timeout"])
+        output = model_answer(self, prompt)
+        if self.timeout:
+            raise TimeoutError("private-error")
+        if self.mutate_output:
+            self.mutate_output(output)
+        if self.during_process:
+            self.during_process()
+        if self.returncode:
+            raise reply_worker.text_model.TextModelHTTPError(500, "private-error")
+        content = self.raw if self.raw is not None else json.dumps(output)
+        return {"content": content, "tool_calls": [], "message": {"role": "assistant", "content": content},
+                "usage": {}, "finish_reason": "stop", "model": "existing-model"}
 
     def enqueue(self, body="Could you explain the role?", source_id="message-1", flags=None):
         event = message(body, source_id)
@@ -143,49 +138,26 @@ class ReplyWorkerTests(unittest.TestCase):
     def handoff(self, task_id):
         return json.loads(self.database.execute("SELECT handoff FROM reply_worker_results WHERE task_id=?", (task_id,)).fetchone()[0])
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_real_subprocess_protocol_is_mocked_subscription_only_and_private(self):
+    def test_the_reply_ai_is_one_direct_call_with_its_tools_and_strict_schema(self):
         task_id = self.enqueue()
-        environment = {"HOME": "/mock-home", "CODEX_HOME": "/mock-auth", "PATH": "/mock-path",
-                       "OPENAI_API_KEY": "private-key", "CODEX_API_KEY": "private-key", "OPENAI_BASE_URL": "private-url",
-                       "AZURE_OPENAI_ENDPOINT": "private-url", "ANTHROPIC_API_KEY": "private-key",
-                       "HTTP_PROXY": "private-proxy", "CODEX_CONFIG_OVERRIDES": "private-override"}
         stdout, stderr = io.StringIO(), io.StringIO()
-        with patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        with patch.object(subprocess, "Popen", side_effect=AssertionError("no codex")), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             result = self.run_cycle()
         self.assertEqual("COMPLETE", self.task(task_id)["status"])
         self.assertEqual("INVESTIGATION_REQUIRED", result["items"][0]["state"])
-        process = self.processes[0]
-        self.assertEqual("/mock-only/codex", process.command[0])
-        self.assertEqual("existing-model", process.command[process.command.index("--model") + 1])
-        self.assertEqual("-", process.command[-1])
-        for argument in ("--ignore-user-config", "--ignore-rules", "--ephemeral", 'forced_login_method="chatgpt"',
-                         'approval_policy="never"', 'model_provider="openai"', 'web_search="disabled"',
-                         "features.shell_tool=false", "features.apps=false", "features.skills=false",
-                         "features.apply_patch_freeform=false", "features.multi_agent=false"):
-            self.assertIn(argument, process.command)
-        # Its one tool server is reply_tools (owner, 2026-10-06), and with tools the schema is in
-        # the prompt rather than codex's --output-schema (which stops the text model calling them).
-        self.assertNotIn("mcp_servers={}", process.command)
-        self.assertNotIn("--output-schema", process.command)
-        self.assertEqual({reply_worker.reply_tools.SERVER},
-                         {argument.split(".")[1] for argument in process.command if argument.startswith("mcp_servers.")})
+        call = self.processes[0]
+        self.assertEqual(("low", reply_worker.REPLY_MAX_TOKENS), (call["effort"], call["max_tokens"]))
+        self.assertEqual({tool["name"] for tool in reply_worker.reply_tools.TOOLS},
+                         {tool["function"]["name"] for tool in call["tools"]})
+        self.assertIsNone(call["tool_choice"])
         self.assertIn(reply_worker.TOOLS_OUTPUT_INSTRUCTIONS, self.prompts[0].split("UNTRUSTED_SOURCE_JSON:")[0])
-        self.assertEqual("read-only", process.command[process.command.index("--sandbox") + 1])
-        self.assertEqual({key: environment[key] for key in ("HOME", "CODEX_HOME", "PATH")}, process.options["env"])
-        self.assertEqual(subprocess.DEVNULL, process.options["stdout"])
-        self.assertEqual(subprocess.PIPE, process.options["stderr"])  # in memory only (BE)
-        self.assertEqual(subprocess.PIPE, process.options["stdin"])
-        self.assertTrue(process.options["start_new_session"])
-        self.assertNotIn("shell", process.options)
-        self.assertNotEqual(self.root, process.options["cwd"])
-        self.assertFalse(process.options["cwd"].exists())
-        self.assertEqual([10], self.timeouts)
+        self.assertTrue(call["messages"][0]["content"].endswith(Path(ROOT / "reply-schema.json").read_text()))
+        self.assertLessEqual(self.timeouts[0], 10)
         self.assertEqual("", stdout.getvalue() + stderr.getvalue())
-        with patch.object(reply_worker.resource, "setrlimit") as limits:
-            process.options["preexec_fn"]()
-        limits.assert_called_once_with(reply_worker.resource.RLIMIT_CORE, (0, 0))
-        self.assertNotIn(reply_worker.resource.RLIMIT_FSIZE, [call.args[0] for call in limits.call_args_list])
+        provenance = self.handoff(task_id)["model_provenance"]
+        self.assertEqual((None, "openrouter_chat_completions", "low"),
+                         (provenance["executable"], provenance["route"], provenance["reasoning_effort"]))
 
     def test_exact_audit_and_forward_handoff_are_immutable_and_restart_safe(self):
         task_id = self.enqueue()
@@ -321,17 +293,14 @@ class ReplyWorkerTests(unittest.TestCase):
         self.run_cycle()
         self.assertEqual(1, self.popen.call_count)
         self.assertIn(body, self.prompts[0])
-        self.assertNotIn(body, str(self.processes[0].command))
+        self.assertNotIn(body, str(self.processes[0]["messages"][0]))
         self.assertFalse(self.handoff(task_id)["can_send"])
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_timeouts_kill_process_group_and_share_three_attempt_backoff(self):
+    def test_timeouts_share_three_attempt_backoff(self):
         task_id = self.enqueue()
         self.timeout = True
         self.run_cycle()
         self.assertEqual("RETRY_WAIT", self.task(task_id)["status"])
-        self.kill.assert_called_with(987654321, posix_process_mocks.SIGKILL)
-        self.assertTrue(self.processes[0].waited)
         self.run_cycle()
         self.assertEqual(1, self.popen.call_count)
         self.run_cycle("2026-09-17T16:16:00+00:00")
@@ -407,7 +376,7 @@ class ReplyWorkerTests(unittest.TestCase):
         task_id = self.enqueue()
         self.timeout = True
         self.run_cycle()
-        self.config["model"] = "different-model"
+        self.config["text_model"] = {"model": "different-model"}
         self.run_cycle("2026-09-17T16:16:00+00:00")
         self.assertEqual("CLASSIFICATION_IMMUTABLE_INPUT_CHANGED", self.task(task_id)["blocker"])
         self.assertEqual(1, self.popen.call_count)
@@ -419,16 +388,13 @@ class ReplyWorkerTests(unittest.TestCase):
         self.assertEqual("SUBSCRIPTION_EXECUTOR_UNAVAILABLE", self.task(task_id)["blocker"])
         self.assertNotIn("private-error", str([tuple(row) for row in self.database.execute("SELECT * FROM workflow_task_events")]))
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_service_interruption_kills_child_and_restores_handler(self):
+    def test_service_interruption_restores_handler(self):
         task_id = self.enqueue()
         previous = signal.getsignal(signal.SIGTERM)
         self.during_process = lambda: signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
         self.run_cycle()
         self.assertEqual("CLASSIFICATION_INTERRUPTED", self.task(task_id)["blocker"])
         self.assertIs(previous, signal.getsignal(signal.SIGTERM))
-        self.kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
-        self.assertTrue(self.processes[0].waited)
 
     def test_service_shutdown_preserves_next_queued_task_and_stops_cycle(self):
         tasks = [self.enqueue(source_id="shutdown-" + str(index)) for index in range(2)]
@@ -454,21 +420,6 @@ class ReplyWorkerTests(unittest.TestCase):
         self.assertEqual("LEASE_EXPIRED", result["items"][0]["state"])
         self.assertEqual(1, self.popen.call_count)
         self.assertEqual(["QUEUED", "RUNNING"], sorted(self.task(task_id)["status"] for task_id in tasks))
-
-    @unittest.skipIf(os.name == "nt", "POSIX-only (E2.T3: process groups, rlimits, flock, lsof or symlinks)")
-    def test_exited_parent_still_cleans_process_group_without_reaping_again(self):
-        task_id = self.enqueue()
-        self.run_cycle()
-        self.kill.assert_called_once_with(987654321, posix_process_mocks.SIGKILL)
-        self.assertFalse(self.processes[0].waited)
-        self.assertEqual("COMPLETE", self.task(task_id)["status"])
-
-    def test_already_gone_process_group_does_not_discard_success(self):
-        task_id = self.enqueue()
-        self.kill.side_effect = ProcessLookupError()
-        self.run_cycle()
-        self.assertEqual("COMPLETE", self.task(task_id)["status"])
-        self.assertFalse(self.processes[0].waited)
 
     def test_source_mutation_during_execution_rejects_saved_output(self):
         task_id = self.enqueue()

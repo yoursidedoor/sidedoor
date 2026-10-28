@@ -18,9 +18,11 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
+import engines
 import portable
 import openai_auth
 import provider_limits
+import provider_pacing
 import setup_steps
 import workflow_tasks
 import paths
@@ -103,16 +105,7 @@ def enqueue_pending_applications(database, now, limit=1):
 
 
 def _command(config, directory):
-    command = [config["codex"], "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
-               "--skip-git-repo-check", "--sandbox", "read-only", "--model", config["model"], "--json"]
-    for setting in ('approval_policy="never"', 'forced_login_method="chatgpt"', 'model_provider="openai"',
-                    'web_search="live"', "features.shell_tool=false", "features.apps=false",
-                    "features.skills=false", "features.apply_patch_freeform=false", "features.unified_exec=false",
-                    "features.multi_agent=false", "mcp_servers={}"):
-        command.extend(["-c", setting])
-    # E0.T8: ChatGPT sign-in returns this command untouched; an API key drops the forced login.
-    return openai_auth.command(command + ["--output-schema", str(directory / "schema.json"), "--output-last-message",
-                                          str(directory / "output.json"), "--color", "never", "-"])
+    return engines.engine(config).investigation_command(config, directory)
 
 
 # No core file for a worker (POSIX; None on Windows, where portable.no_crash_dialogs covers it).
@@ -121,30 +114,47 @@ _limits = portable.no_core
 
 
 def _execute(config, prompt, directory, timeout):
-    allowed = {"HOME", "PATH", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT"}
-    environment = {key: value for key, value in os.environ.items() if key in allowed}
-    worker = None
+    engine = engines.engine(config)
+    environment = engine.base_environment()
+    worker = arguments = None
     with tempfile.TemporaryDirectory(prefix="agent-web-") as working, (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
-            missing = setup_steps.codex_wait(config)
+            missing = engine.wait(config)
             if missing:   # no usable Codex: never started; a wait, no try spent (2026-10-23)
-                raise RuntimeError("CODEX_NOT_FOUND") from missing
+                # The engine's own wait kind (codex_not_found, claude_signed_out, ...), R8.
+                raise RuntimeError(str(getattr(missing, "kind", None) or "codex_not_found").upper()) from missing
             arguments = _command(config, directory)
+            # Which engine wrote this attempt's trace (U1 3a), with a Claude run's allowed tools (3c C3).
+            engines.record_run(directory, engine, command=arguments)
             worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
-                                      stderr=errors, text=True, encoding="utf-8", cwd=working,
-                                      env=openai_auth.environment(arguments, environment), **portable.worker_spawn_options())
+                                      stderr=errors, text=True, encoding="utf-8",
+                                      cwd=getattr(arguments, "cwd", None) or working,
+                                      env=engine.environment(arguments, environment), **portable.worker_spawn_options())
             portable.contain(worker)
-            worker.communicate(prompt, timeout=timeout)
+            worker.communicate(engine.prompt_input(prompt), timeout=timeout)
+            if engine.judged_by_stream:   # Claude, Antigravity (U1 4)
+                # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the exit
+                # code; a clean run's answer is written to output.json.
+                trace.flush()
+                errors.flush()
+                failure = engine.finish_run(worker.returncode, (directory / "trace.jsonl").read_text(errors="replace"),
+                                            (directory / "stderr.log").read_text(errors="replace"),
+                                            command=arguments, worker=WORKER)
+                if failure is not None:
+                    raise RuntimeError("EXECUTOR_FAILED") from failure
+                return
             if worker.returncode:
                 trace.flush()
                 errors.flush()
-                raise RuntimeError("EXECUTOR_FAILED") from provider_limits.check(
+                raise RuntimeError("EXECUTOR_FAILED") from engine.limit(
                     worker.returncode, directory / "trace.jsonl", directory / "stderr.log", command=arguments)
-            openai_auth.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
+            engine.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
         finally:
             if worker is not None:
                 portable.kill_tree(worker.pid)
                 worker.wait(timeout=5)
+            if arguments is not None:
+                engine.run_ended(arguments)   # U1 4: Antigravity's per-run MCP config goes (N3e: Popen failed too)
             for stream in (trace, errors):
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -180,16 +190,11 @@ def _result(directory):
             raise ValueError("BOUNDED_NEXT_ACTION_REQUIRED")
     elif next_action is not None or reason is not None:
         raise ValueError("RESOLVED_REASON_AND_NEXT_ACTION_MUST_BE_NULL")
-    events = []
-    for line_number, line in enumerate(_read(directory / "trace.jsonl").splitlines(), 1):
-        event = json.loads(line)
-        if not isinstance(event, dict):
-            raise ValueError("INVALID_TOOL_TRACE")
-        item = event.get("item", {})
-        if (event.get("type") == "item.completed" and isinstance(item, dict)
-                and item.get("type") in {"web_search", "web_search_call"}
-                and item.get("status") in {None, "completed"}):
-            events.append(line_number)
+    try:
+        # The engine that wrote the attempt (engine.json; none: Codex). An unreadable record is an invalid trace.
+        events = engines.for_run(directory).read_trace(_read(directory / "trace.jsonl")).web_searches
+    except (engines.TraceShapeError, engines.EngineRecordError):
+        raise ValueError("INVALID_TOOL_TRACE") from None
     if result["status"] == "RESOLVED" and (not events or not result["citations"]):
         raise ValueError("OBSERVED_WEB_SEARCH_AND_CITATIONS_REQUIRED")
     return result, events
@@ -241,7 +246,15 @@ def cycle(root, database, config, now=None, execute=None):
                              (WORKER, current(), current(), limit)).fetchall()
     report["state"] = "COMPLETE"
     for task in tasks:
+        paced = None
         try:
+            if task["attempts"] < task["max_attempts"] and workflow_tasks.instant(current()) < workflow_tasks.instant(task["deadline"]):
+                # The pacing slot is taken first (2026-10-27): before the compute is reserved and the day
+                # stamped (a wait across midnight never turns into COMPUTE_RESERVATION_CHANGED, a spent
+                # try) and before the claim (its lease starts after the wait, so no other pass can claim
+                # the task meanwhile). The command always sets model_provider="openai" (`_command`): the
+                # engine's own pacing key.
+                paced = provider_pacing.take(None, timeout, provider=engines.engine(config).pacing_provider)
             stamp = current()
             day = workflow_tasks.budget_day(stamp, "America/Los_Angeles")
             reservation = WORKER + ":" + task["task_id"] + ":" + str(task["attempts"] + 1) + ":" + day
@@ -250,17 +263,23 @@ def cycle(root, database, config, now=None, execute=None):
                     reserved = workflow_tasks.reserve_compute(database, reservation, stamp, timeout,
                                                               "America/Los_Angeles", budget)
                 if not reserved:
+                    if paced is not None:
+                        paced.release()
                     report["state"] = "BUDGET_WAIT"
                     report["tasks"].append({"task_id": task["task_id"], "state": "COMPUTE_BUDGET_EXHAUSTED"})
                     report["counts"]["COMPUTE_BUDGET_EXHAUSTED"] = report["counts"].get("COMPUTE_BUDGET_EXHAUSTED", 0) + 1
                     continue
             claim = workflow_tasks.claim(database, task["task_id"], current(), lease_seconds=timeout + 15)
         except Exception:
+            if paced is not None:
+                paced.release()
             report["state"] = "BLOCKED"
             report["tasks"].append({"task_id": task["task_id"], "state": "CLAIM_FAILED"})
             report["counts"]["CLAIM_FAILED"] = report["counts"].get("CLAIM_FAILED", 0) + 1
             continue
         state = claim["status"]
+        if state != "CLAIMED" and paced is not None:
+            paced.release()
         if state == "CLAIMED":
             reserved_attempt = task["attempts"] + 1
             task = database.execute("SELECT * FROM workflow_tasks WHERE task_id=?", (task["task_id"],)).fetchone()
@@ -315,6 +334,8 @@ def cycle(root, database, config, now=None, execute=None):
                 if isinstance(error, InterruptedError):
                     report["state"] = "INTERRUPTED"
             finally:
+                if paced is not None:
+                    paced.release()
                 for signum, handler in handlers.items():
                     signal.signal(signum, handler)
             try:

@@ -225,7 +225,16 @@ def card_of(database, item):
             "judge": judge_verdict(database, item["action_id"], item["evidence"] if item["stage"] == "MESSAGE" else None,
                                    held.get("agent_decision")),
             "conversation": conversation(database, action) if item["purpose"] == "REPLY" else [],
-            "edited": edited, "held_at": overview_page._utc(item["held_at"]) if item["held_at"] else None}
+            "edited": edited, "held_at": overview_page._utc(item["held_at"]) if item["held_at"] else None,
+            # Not Premium (owner, 2026-10-27): the invitation goes without its note, the note after they accept.
+            "note_after_accept": item["purpose"] == "INVITE" and not _premium()}
+
+
+def _premium():
+    """The last Premium read (setup_steps.saved_premium); never read counts as not Premium."""
+    import setup_steps
+    saved = setup_steps.saved_premium()
+    return bool(saved and saved["premium"])
 
 
 def _role_line(title, company):

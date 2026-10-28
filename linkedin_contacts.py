@@ -850,9 +850,12 @@ def run_one(root, database, config, item, now, executor=None):
         # Sidedoor's browser runtime missing, or a Chrome already on its profile (E7.T1 review fix 2):
         # deferred like a busy browser, with no run row, no compute and no try.
         code = browser_runtime.check_available(database, config, "LINKEDIN_CONTACTS_BROWSER_", "linkedin-contact-discovery")
-        import setup_steps
-        if not code and setup_steps.codex_wait(config):
-            code = "CODEX_NOT_FOUND"   # no usable Codex: deferred like a busy browser, no run row, no try
+        import engines
+        engine = engines.engine(config)
+        missing = None if code else engine.wait(config)   # Codex: setup_steps.codex_wait, unchanged
+        if missing:   # no usable engine: deferred like a busy browser, no run row, no try
+            code = "CODEX_NOT_FOUND" if engine is engines.CODEX else str(getattr(missing, "kind", None)
+                                                                          or "claude_not_found").upper()
         if code:
             return {"company": item["company"], "state": BROWSER_BUSY, "code": code}
         return _run_one(root, database, config, item, now, executor)

@@ -133,7 +133,7 @@ def _save(database, action_id, state, result, expected):
     database.commit()
 
 
-def _record_sent(database, action, attempt, person, observed_at):
+def _record_sent(database, action, attempt, person, observed_at, attempts=()):
     """initial_sent, verified by the read that showed the invitation (pending or already accepted)."""
     engagement.record_event(database, {
         "source": SOURCE, "source_id": "invite:" + action["action_id"], "profile": action["profile"],
@@ -141,7 +141,25 @@ def _record_sent(database, action, attempt, person, observed_at):
         "occurred_at": attempt["started_at"], "observed_at": observed_at,
         "evidence": "unipile-read:" + observed_at,
         "raw": {"ack": attempt.get("ack"), "lookup": _jsonable(person.raw), "note": action.get("note"),
+                "note_deferred": note_deferred(action, attempts),
                 "occurred_at_basis": "REQUEST_STARTED_UPPER_BOUND"}})
+
+
+def note_deferred(action, attempts):
+    """True only when the note certainly did not go with the invitation: the action has a note, and
+    every attempt that may have landed carried none. An attempt the provider refused as already
+    existing (REFUSED_INVITATION_EXISTS) never landed. Any other attempt that carried the note may
+    have landed (an absence read can lag), so the note is then never sent again (no double send
+    takes priority over a lost note; owner, 2026-10-27)."""
+    landed = [item for item in attempts if item.get("outcome") != "REFUSED_INVITATION_EXISTS"]
+    return bool(action.get("note")) and bool(landed) and all(item.get("note") is None for item in landed)
+
+
+def deferred_invite(event):
+    """True for a verified Unipile INVITE initial_sent whose note waits for acceptance."""
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    return (event.get("kind") == "initial_sent" and event.get("source") == SOURCE and event.get("purpose") == INVITE
+            and raw.get("note_deferred") is True)
 
 
 def _read_failure(error, **extra):
@@ -156,11 +174,18 @@ def _read_failure(error, **extra):
 
 def _attempt(database, port, action_id, action, result, expected_state):
     """One invitation request: written as started before the transport, then its outcome."""
-    attempt = {"started_at": _now(), "provider_id": action["provider_id"], "note": action.get("note")}
+    # Premium is read before every invitation (owner, 2026-10-27). Not Premium: the invitation goes
+    # without its note, and the note is sent as the first message once they accept
+    # (`queue_deferred_notes`). This also covers a note queued while Premium that is sent after it ended.
+    import setup_steps
+    premium = setup_steps.check_premium(port, getattr(getattr(port, "transport", None), "home", None))
+    note = action.get("note") if premium else None
+    attempt = {"started_at": _now(), "provider_id": action["provider_id"], "note": note, "premium": premium,
+               "note_deferred": note is None and bool(action.get("note"))}
     result.setdefault("attempts", []).append(attempt)
     _save(database, action_id, STARTED, result, expected_state)
     try:
-        ack = port.send_invitation(action["provider_id"], action.get("note"))
+        ack = port.send_invitation(action["provider_id"], note)
     except linkedin_port.InvitationExists as error:
         # The provider said explicitly that an invitation exists or the people are connected:
         # nothing was sent. The reads that follow settle it (`_contacted_elsewhere`).
@@ -251,7 +276,7 @@ def reconcile_invite(database, port, action_id, config=None, now=None):
         _save(database, action_id, NOT_SENT, result, state)
         return NOT_SENT
     if status in {"PENDING", "ACCEPTED"}:
-        _record_sent(database, action, result["attempts"][-1], person, observed)
+        _record_sent(database, action, result["attempts"][-1], person, observed, result["attempts"])
         result["confirmed"] = {"at": observed, "by": status}
         _save(database, action_id, CONFIRMED, result, state)
         return CONFIRMED
@@ -510,3 +535,155 @@ def positions(database, zone, now=None, limit=25):
                 people.append({"profile": identity, "stage": view["stage"], "next": (view["next"] or {}).get("state"),
                                "position": position(view, zone)})
     return {"total": total, "people": people}
+
+
+# --- the note after acceptance (not Premium; owner, 2026-10-27) ------------------------------------
+DEFERRED_NOTE_SOURCE = "deferred_note"
+
+
+def deferred_note_action(invite, invite_action_id, now):
+    """The FIRST_MESSAGE that carries an invitation's drafted note, exactly as written, once the
+    person accepted. One per person: its slot is the person's INITIAL slot (outreach.enqueue_action)."""
+    import hashlib
+    verification = dict(invite.get("verification") or {})
+    verification.update(verified_at=now.isoformat(), content_verified=True,
+                        content_sources=[*(verification.get("content_sources") or []), "outreach_actions:" + invite_action_id])
+    return {"action_id": "deferred-note:" + hashlib.sha256(invite_action_id.encode()).hexdigest()[:32],
+            "profile": invite["profile"], "recipient": invite["recipient"], "company": invite["company"],
+            "purpose": "FIRST_MESSAGE", "message": invite["note"], "channel": "linkedin", "provider": SOURCE,
+            "conversation_id": None, "verification": verification,
+            "source": {"kind": DEFERRED_NOTE_SOURCE, "invite_action_id": invite_action_id}}
+
+
+NOTE_PHASE = "DEFERRED_NOTE"
+# What counts as a refused note (owner pick P3, allowlist): the owner rejecting it in Review, the send
+# judge's BLOCKED (its JUDGE_OBJECTION record), or a gate saying the person is no longer eligible.
+# Anything else (a missing or stale proof, a read that could not finish, the judge not deciding, a
+# switched-off path) stays retryable and is never marked done.
+INELIGIBLE_GATES = frozenset({"INITIAL_ALREADY_SENT_OR_UNKNOWN", "OUTREACH_CLOSED", "OPTED_OUT", "HAS_REPLY_PRESENT",
+                              "NEGATIVE_REPLY_PRESENT", "OPT_OUT_PRESENT", "SUPPRESSED_CONTACT", "EXCLUDED_CONTACT",
+                              "NO_AUTOMATIC_OUTREACH_CONTACT", "REPLY_STOPS_OUTREACH", "INACTIVITY_CLOSURE_REVIEW_REQUIRED",
+                              "REPLY_REQUIRES_CONTEXT", "INBOX_CONVERSATION_UNDECODABLE"})
+
+
+def _judge_refused(database, note_action_id):
+    """The send judge decided BLOCKED on this note (outreach_agent.record_judge_objection)."""
+    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outreach_agent_audit'").fetchone():
+        return False
+    return any(json.loads(row[0]).get("agent_decision") == "BLOCKED" for row in database.execute(
+        "SELECT record FROM outreach_agent_audit WHERE action_id=? AND kind='JUDGE_OBJECTION'", (note_action_id,)))
+
+
+def _note_refused(database, note_action_id, state, result):
+    """True only for a real refusal of the queued note (see INELIGIBLE_GATES)."""
+    # Terminal and never dispatched again: CLOSED, CONFIRMED_NOT_SENT (reconciled as not sent) and
+    # CANCELLED_BEFORE_SEND (a Review rejection, an ineligible person or a final check) all count as
+    # done, so the follow-up clock starts at the acceptance instead of waiting for the closure.
+    if state in {"CLOSED", "CONFIRMED_NOT_SENT", "CANCELLED_BEFORE_SEND"}:
+        return True
+    if state == "BLOCKED":
+        gates = result if isinstance(result, list) else []
+        return bool(INELIGIBLE_GATES.intersection(gates)) or (
+            "AGENT_DECISION_NOT_READY" in gates and _judge_refused(database, note_action_id))
+    return False
+
+
+def _settle_refused(database, note_action_id, state, raw, now):
+    """Mark a refused note done (`deferred_note_done`) and take it out of dispatch for good."""
+    try:
+        result = json.loads(raw) if raw else {}
+    except ValueError:
+        result = {}
+    result = result if isinstance(result, dict) else {"previous_result": result}
+    result["deferred_note_done"] = {"at": now.isoformat(), "from": state}
+    # A terminal state is kept as recorded; a BLOCKED row is taken out of dispatch.
+    final = state if state in {"CLOSED", "CONFIRMED_NOT_SENT", "CANCELLED_BEFORE_SEND"} else "CANCELLED_BEFORE_SEND"
+    database.execute("UPDATE outreach_actions SET state=?,result=? WHERE action_id=? AND state=?",
+                     (final, json.dumps(result, sort_keys=True), note_action_id, state))
+    database.commit()
+
+
+def _stops_pass(error):
+    """A rate limit (429), an invalid LinkedIn session or a setup hold stops this cycle's reads."""
+    import unipile_port
+    return (isinstance(error, (linkedin_port.SessionInvalid, unipile_port.SetupHold))
+            or getattr(error, "status", None) == 429)
+
+
+def queue_deferred_notes(database, port, now=None):
+    """For each confirmed invitation sent without its note: read acceptance (`record_acceptance`) on
+    followup_execution's acceptance poll backoff (`poll_wait`: 1h, 2h, 4h ... at most 7 days, counted
+    from ACCEPTANCE_POLL audit rows, phase DEFERRED_NOTE) until they accept, then queue the note as a
+    FIRST_MESSAGE when `engagement.next_action` says it is due. The existing FIRST_MESSAGE pass of
+    `outreach.cycle` then reads the person's chats (a reply or a message of ours already there refuses
+    it), runs the send judge, holds it in Review mode, and sends it over the port. A note that was
+    rejected, refused or blocked is marked done and never sent (`_settle_refused`). A 429, an invalid
+    session or a setup hold stops the reads for this cycle. Returns {"state", "items"}."""
+    import followup_execution
+    import outreach
+    import outreach_agent
+    now = engagement.timestamp(now or dt.datetime.now(dt.timezone.utc))
+    outreach_agent.initialize(database)
+    database.commit()
+    items, stopped = [], None
+    rows = database.execute("""SELECT action_id,payload FROM outreach_actions WHERE state=?
+        AND json_extract(payload,'$.purpose')=? ORDER BY action_id""", (CONFIRMED, INVITE)).fetchall()
+    for action_id, payload in rows:
+        invite = json.loads(payload)
+        events = engagement.events_for(database, invite["profile"])
+        if not any(deferred_invite(event) and event.get("source_id") == "invite:" + action_id for event in events):
+            continue
+        item = {"action_id": action_id}
+        items.append(item)
+        try:
+            note = deferred_note_action(invite, action_id, now)
+            queued = database.execute("SELECT state,result FROM outreach_actions WHERE action_id=?",
+                                      (note["action_id"],)).fetchone()
+            if queued:   # queued once; never again, whatever became of it (sent, held, rejected)
+                result = json.loads(queued[1]) if queued[1] else None
+                if _note_refused(database, note["action_id"], queued[0], result) and not (isinstance(result, dict) and "deferred_note_done" in result):
+                    _settle_refused(database, note["action_id"], queued[0], queued[1], now)
+                    item["settled"] = "NOTE_REFUSED_COUNTED_DONE"
+                item.update(state="ALREADY_QUEUED", note_action_id=note["action_id"], note_state=queued[0])
+                continue
+            planned = engagement.next_action(database, invite["profile"], now, invite.get("recipient", ""))
+            if planned.get("blocker") == "NOTE_WAITS_FOR_ACCEPTANCE":
+                if stopped:
+                    item.update(state="WAIT_ACCEPTANCE", blocker=stopped)
+                    continue
+                polls = [found[0] for found in database.execute(
+                    "SELECT observed_at FROM outreach_agent_audit WHERE action_id=? AND phase=? AND kind='ACCEPTANCE_POLL'",
+                    (action_id, NOTE_PHASE))]
+                latest = max((engagement.timestamp(value) for value in polls), default=None)
+                if latest and now < latest + followup_execution.poll_wait(len(polls)):
+                    item.update(state="WAIT_ACCEPTANCE",
+                                next_at=(latest + followup_execution.poll_wait(len(polls))).isoformat())
+                    continue
+                reference = outreach_agent.audit(database, action_id, NOTE_PHASE, "ACCEPTANCE_POLL", now.isoformat(),
+                                                 {"started_at": now.isoformat(), "profile": invite["profile"]})
+                database.commit()
+                try:
+                    item["acceptance"] = record_acceptance(database, port, invite["profile"])
+                except Exception as error:
+                    if database.in_transaction:
+                        database.rollback()
+                    outreach_agent.audit(database, action_id, NOTE_PHASE, "ACCEPTANCE_POLL_RESULT", now.isoformat(),
+                                         {"poll_ref": reference, "state": "ERROR", "error_type": type(error).__name__})
+                    database.commit()
+                    if _stops_pass(error):
+                        stopped = "ACCEPTANCE_READS_STOPPED_" + type(error).__name__
+                    raise
+                outreach_agent.audit(database, action_id, NOTE_PHASE, "ACCEPTANCE_POLL_RESULT", now.isoformat(),
+                                     {"poll_ref": reference, "state": item["acceptance"]})
+                database.commit()
+                planned = engagement.next_action(database, invite["profile"], now, invite.get("recipient", ""))
+            if planned.get("state") != "DUE" or planned.get("deferred_note") is not True:
+                item.update(state=planned.get("state"), blocker=planned.get("blocker"))
+                continue
+            item.update(outreach.enqueue_action(database, note))
+            database.commit()
+        except Exception as error:
+            if database.in_transaction:
+                database.rollback()
+            item.update(_read_failure(error), state="HELD", reason=str(error)[:200] if isinstance(error, ValueError) else None)
+    return {"state": "STOPPED" if stopped else "PROCESSED", "items": items, "stopped": stopped}

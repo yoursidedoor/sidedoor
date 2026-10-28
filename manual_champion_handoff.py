@@ -119,7 +119,7 @@ class ChampionFixture(Fixture):
         with self.clock(), contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(orchestrator, "ROOT", self.root))
             stack.enter_context(patch.object(orchestrator, "HeyReach", return_value=self))
-            stack.enter_context(patch.object(reply_worker, "_execute", side_effect=self.execute))
+            stack.enter_context(patch.object(reply_worker, "execute_text", side_effect=self.execute))
             stack.enter_context(patch.object(orchestrator.decision_transport, "cycle", return_value={"state": "MOCK_UNRELATED"}))
             stack.enter_context(patch.object(orchestrator, "draft_promotion_cycle", return_value={"state": "MOCK_UNRELATED"}))
             stack.enter_context(patch.object(notifications.Telegram, "send", side_effect=notifications.Unavailable("Offline notification failure")))

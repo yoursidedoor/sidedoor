@@ -108,16 +108,9 @@ def bounded_decision(root, config, prompt, artifacts, timeout, *, runtime=None,
     if executor is None and text_model.settings(config):
         return _direct_decision(config, prompt, schema if schema is not None else DECISION_SCHEMA,
                                 output, log, timeout, calls)
-    command = list(runtime.research_command(Path(root), config, output, str(schema_path)))
-    for index, setting in enumerate(command):
-        if setting == 'web_search="live"':
-            command[index] = 'web_search="disabled"'
-    settings = ('forced_login_method="chatgpt"', 'model_provider="openai"', 'web_search="disabled"',
-                "features.shell_tool=false", "features.apps=false", "features.skills=false",
-                "features.apply_patch_freeform=false", "features.unified_exec=false",
-                "features.multi_agent=false", "mcp_servers={}")
-    command[-1:-1] = [argument for setting in settings for argument in ("-c", setting)]
-    command = openai_auth.command(text_model.command(config, command))  # E0.T8
+    import engines
+    command = engines.engine(config).research_recovery_command(
+        config, runtime.research_command(Path(root), config, output, str(schema_path)))
     if text_model.settings(config) and executor is None:
         # run_research_worker passes this process's environment through to codex.
         os.environ[text_model.KEY_VARIABLE] = text_model.key(config)

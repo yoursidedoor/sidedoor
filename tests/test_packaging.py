@@ -65,6 +65,7 @@ LITERAL_EXEMPTIONS = {
     ("parallel_research.py", "discovery-schema.json"): "passed to research_command, which uses resources.path",
     ("approvals_page.py", "settings.json"): "the owner's override file in the home folder, not the bundle",
     ("user_profile.py", "settings.json"): "the owner's override file in the home folder, not the bundle",
+    ("engines.py", "settings.json"): "Antigravity's own global settings in ~/.gemini (A1 allow rules), not the bundle",
 }
 
 

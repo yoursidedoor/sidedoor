@@ -348,9 +348,24 @@ def without_dashes(text):
     """
     if not isinstance(text, str):
         return text
-    for character in DASH_CHARACTERS:
-        text = text.replace(character, ", " if character in "\u2014\u2013" else "-")
-    return " ".join(text.split())
+    # An en dash between two digits is a range ("2\u20133 years"), written as a hyphen.
+    text = re.sub(r"(?<=\d)\u2013(?=\d)", "-", text)
+    return " ".join(_DASH_RUN.sub(_dash_replacement, text).split())
+
+
+_DASH_RUN = re.compile(r"\s*[\u2014\u2013]+\s*")
+_PUNCTUATION = ".,;:!?)"
+
+
+def _dash_replacement(match):
+    """A comma with no space before it, and none at all next to punctuation or at the end."""
+    before = match.string[:match.start()]
+    after = match.string[match.end():]
+    if not after or after[0] in _PUNCTUATION:
+        return ""
+    if before and before[-1] in _PUNCTUATION:
+        return " "
+    return ", " if before else ""
 
 
 def dash_gates(texts):

@@ -13,21 +13,19 @@ import json
 import traceback
 import os
 import re
-from pathlib import Path
 import signal
-import subprocess
+from pathlib import Path
 import tempfile
 import time
 
+import engines
 import pipeline_routing as routing
 import portable
-import openai_auth
 import champion_composition
 import provider_limits
 import reply_resume
 import reply_tools
 import model_calls
-import setup_steps
 import text_model
 import workflow_tasks
 
@@ -97,46 +95,6 @@ _CODEX_LEVEL = re.compile(r"^(?:(?:ERROR|WARN|WARNING):\s|\[?\d{4}-\d{2}-\d{2}T[
 # is never kept (after "user" comes the echoed prompt, dropped line by line and in the fallback).
 _TRANSCRIPT_MARKERS = ("codex", "thinking")
 _KEY_FRAGMENT = 8
-_TAIL_CHARACTERS = 65536
-
-
-def _redacted_lines(text, secrets=(), prompt=None):
-    """A bounded, redacted tail of an executor's stderr: codex's own ERROR/WARN lines (else the
-    last 5 lines before codex's "user" prompt echo), at most 8 lines of 300 characters.
-
-    Never stored: a line of the prompt itself, a partial first line of the bounded tail, anything
-    after the model transcript markers ("codex"/"thinking"), anything after the "user" prompt echo
-    in the fallback, a line holding any 8-character fragment of a configured secret outside a URL
-    (a key split across lines), URLs with or without a scheme, sk- keys, JWTs, cookies,
-    Authorization/Bearer/Basic values and key/token/secret/password fields (bare, JSON or quoted,
-    or "password is ...")."""
-    if isinstance(text, bytes):
-        text = text.decode("utf-8", "replace")
-    text = text or ""
-    if len(text) > _TAIL_CHARACTERS:
-        text = text[-_TAIL_CHARACTERS:]
-        text = text.split("\n", 1)[1] if "\n" in text else ""  # the slice began mid-line
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    marker = next((index for index, line in enumerate(lines) if line in _TRANSCRIPT_MARKERS), None)
-    if marker is not None:
-        lines = lines[:marker]
-    prompt_lines = {line.strip() for line in (prompt or "").splitlines() if line.strip()}
-    lines = [line for line in lines if line not in prompt_lines]
-    fragments = secret_fragments(secrets)
-    chosen = [line for line in lines if _CODEX_LEVEL.match(line)]
-    if not chosen:
-        if "user" in lines:
-            lines = lines[:lines.index("user")]
-        chosen = lines[-5:]
-    result = []
-    for line in chosen:
-        line = redact_line(line, secrets, fragments)
-        if line is None:
-            continue
-        line = line[:300]
-        if not result or result[-1] != line:
-            result.append(line)
-    return result[-8:]
 
 
 def secret_fragments(secrets):
@@ -163,20 +121,6 @@ def redact_line(line, secrets=(), fragments=()):
     line = _SECRET_FIELD.sub(lambda match: match.group(1) + "<redacted>", line)
     line = _SECRET_PROSE.sub(lambda match: match.group(1) + match.group(2) + "<redacted>", line)
     return re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{6,}", r"\1 <redacted>", line)
-
-
-def executor_failure(returncode, seconds, stderr, config=None, prompt=None):
-    """What a failed `codex exec` said, kept so the failure can be diagnosed (2026-10-02: the
-    SUBSCRIPTION_EXECUTOR_FAILED runs of 10-03/04 left no record; the posting-judge logs, which
-    keep stderr, show OpenRouter 402 Payment Required from 2026-10-03T19:15Z)."""
-    secrets = []
-    try:
-        if text_model.settings(config):
-            secrets.append(text_model.key(config))
-    except (OSError, TypeError, AttributeError):
-        pass
-    return {"exit_code": returncode, "duration_seconds": round(seconds, 1),
-            "stderr_tail": _redacted_lines(stderr, secrets, prompt)}
 
 
 def executor_detail(error, depth=8):
@@ -216,7 +160,7 @@ def _options(config):
             or not 1 <= limit <= 20 or type(budget) is not int or not timeout <= budget <= 21000):
         raise Held("INVALID_REPLY_WORKER_BOUNDS")
     if any(not isinstance(config.get(field), str) or not config[field].strip() or config[field].startswith("-")
-           for field in ("codex", "model")):
+           for field in ("model",)):
         raise Held("EXISTING_SUBSCRIPTION_CONFIGURATION_REQUIRED")
     return timeout, limit, budget
 
@@ -448,8 +392,8 @@ def _source(database, task, config, now):
 
 
 def _environment():
-    allowed = {"HOME", "PATH", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT"}
-    return {key: value for key, value in os.environ.items() if key in allowed}
+    """The allowlisted base environment of the engine's child (engines.Engine.ENVIRONMENT)."""
+    return engines.engine().base_environment()
 
 
 # No core file for a worker (POSIX; None on Windows, where portable.no_crash_dialogs covers it).
@@ -462,121 +406,115 @@ TOOLS_OUTPUT_INSTRUCTIONS = ("When you are done with the tools, your final messa
                              "JSON Schema:")
 
 
-def _command(config, schema_path, output_path):
-    command = [config["codex"], "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
-               "--skip-git-repo-check", "--sandbox", "read-only", "--model", config["model"]]
-    for setting in ('approval_policy="never"', 'forced_login_method="chatgpt"', 'model_provider="openai"',
-                    'web_search="disabled"', "features.shell_tool=false", "features.apps=false",
-                    "features.skills=false", "features.apply_patch_freeform=false", "features.unified_exec=false",
-                    "features.multi_agent=false", "mcp_servers={}"):
-        command.extend(["-c", setting])
-    if config.get("_reply_tools") is not None:
-        # The reply AI's tools (owner, 2026-10-06). codex's --output-schema is left off: with it
-        # the text model (GLM-5.3 through OpenRouter) never calls a tool, without it it does
-        # (probe 2026-10-06). The schema goes in the prompt instead and `_validate` checks the
-        # answer as it always has.
-        index = command.index("mcp_servers={}")
-        del command[index - 1:index + 1]
-        for setting in reply_tools.options(Path(schema_path).parent):
-            command.extend(["-c", setting])
-        command.extend(["--output-last-message", str(output_path), "--color", "never", "-"])
-        return openai_auth.command(text_model.command(config, command))
-    command.extend(["--output-schema", str(schema_path), "--output-last-message", str(output_path), "--color", "never", "-"])
-    # E0.T8: ChatGPT sign-in returns this command untouched; an API key drops the forced login.
-    return openai_auth.command(text_model.command(config, command))
+SLOT_WAIT_SECONDS = 60   # the longest a browser read session waits for a pacing slot (2026-10-27)
+
+# Every text worker's model call (owner, 2026-10-27: the reply writer and its repair, the follow-up
+# writer and send judge and the outreach judge "become direct GLM calls ... never run through
+# Codex"): one OpenRouter chat-completions call (text_model.complete) at low reasoning with the
+# strict schema, as the posting judge and the first-note send judge already were. The reply AI's
+# tools (reply_tools) run in this process in a bounded tool loop. A failure is the retryable Held
+# the codex run raised; a 402 (out of credit) or 429 stays chained, so it is a wait, not a try.
+DIRECT_ROUTE = "openrouter_chat_completions"   # outreach_agent.DIRECT_ROUTE
+DIRECT_EFFORT = "low"
+DIRECT_MAX_TOKENS = 4000
+REPLY_MAX_TOKENS = 16000   # the reply answer is up to 6000 characters (a champion handoff more)
+# Model turns that may call tools: each such turn calls at least one, so a run can reach
+# reply_tools.MAX_CALLS (12, refused past that by reply_tools.Session) and then gets one last turn
+# with no tools (tool_choice "none") and the strict schema, which must be the answer.
+MAX_TOOL_TURNS = reply_tools.MAX_CALLS
+TOOL_SYSTEM = ("You may call the tools provided. When you are done with them, your final message is exactly one "
+               "JSON object and nothing else, valid against this JSON Schema:\n")
 
 
-def _execute(config, prompt, schema, timeout):
-    """`_codex`, with one model_calls row per run (C4): codex reports only its total tokens, on stderr."""
-    meta = {}
-    worker = model_calls.caller()
-    started = time.monotonic()
+def text_executor(name, calls=None, *, effort=DIRECT_EFFORT, max_tokens=DIRECT_MAX_TOKENS):
+    """An `execute(config, prompt, schema, timeout)` for a text worker: `execute_text` with its call
+    named `name` (the strict schema's name), `calls` collecting each call's usage or failure record,
+    and the model_calls row named after the module that calls it (as the codex run's row was)."""
+    def execute(config, prompt, schema, timeout):
+        options = {"name": name, "calls": calls, "effort": effort, "max_tokens": max_tokens,
+                   "worker": model_calls.caller()}
+        return execute_text(dict(config, _text_call=options), prompt, schema, timeout)
+    return execute
 
-    def recorded(outcome):
-        model_calls.record("codex", outcome, worker=worker, model=text_model.model(config),
-                           provider="openrouter" if text_model.settings(config) else "openai",
-                           total_tokens=model_calls.codex_tokens(meta.get("stderr")),
-                           seconds=round(time.monotonic() - started, 3))
 
+def execute_text(config, prompt, schema, timeout):
+    """The text of the model's JSON answer, or a Held. `config["_reply_tools"]` (the reply worker) runs
+    the tool loop; `config["_text_call"]` (text_executor) names the call."""
+    import outreach_agent
+    options = config.get("_text_call") or {}
+    calls = options.get("calls")
+    calls = [] if calls is None else calls
+    worker = options.get("worker") or model_calls.caller()
+    tools = config.get("_reply_tools")
+    if tools is not None:
+        return _tool_loop(config, prompt, schema, timeout, tools, calls, worker)
+    return outreach_agent._direct_execute(config, prompt, schema, timeout, calls,
+                                          name=options.get("name") or "text_answer",
+                                          effort=options.get("effort") or DIRECT_EFFORT,
+                                          max_tokens=options.get("max_tokens") or DIRECT_MAX_TOKENS, worker=worker)
+
+
+TOOL_SPECS = [{"type": "function", "function": {"name": tool["name"], "description": tool["description"],
+                                                "parameters": tool["inputSchema"]}} for tool in reply_tools.TOOLS]
+
+
+def _tool_result(session, call):
+    """One tool call run in this process through reply_tools.Session (its limits and logging), as the
+    MCP server ran it: (tool message text, failed)."""
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
     try:
-        text = _codex(config, prompt, schema, timeout, meta)
-    except Held as error:
-        recorded("timeout" if error.code == "CLASSIFICATION_TIMEOUT" else "refused"
-                 if error.code in {"SUBSCRIPTION_EXECUTOR_FAILED", "SUBSCRIPTION_EXECUTOR_UNAVAILABLE"} else "invalid")
-        raise
-    recorded("ok")
-    return text
+        arguments = json.loads(function.get("arguments") or "{}")
+    except (ValueError, TypeError):
+        arguments = None
+    try:
+        return session.call(function.get("name"), arguments)
+    except Exception as error:
+        session.log({"tool": function.get("name"), "error_type": type(error).__name__})
+        return "The lookup failed; decide with what you have.", True
 
 
-def _codex(config, prompt, schema, timeout, meta):
-    with tempfile.TemporaryDirectory(prefix="reply-worker-") as directory:
-        working = Path(directory)
-        schema_path = working / "schema.json"
-        schema_path.write_text(schema, encoding="utf-8")
-        output_path = working / "output.json"
-        tools = config.get("_reply_tools")
-        if tools is not None:
-            reply_tools.prepare(working, tools["root"], tools["task_id"])
-        def interrupted(signum, frame):
-            raise Held("CLASSIFICATION_INTERRUPTED", retry=True)
+def _tool_loop(config, prompt, schema, timeout, tools, calls, worker):
+    """The reply AI with its tools: model turn, tools run, results back, until the model answers.
 
+    Read tools read the database read-only and write tools record an intent (reply_tools.Session),
+    exactly as the per-run MCP server did; `tools["calls"]` gets the run's tool log for
+    reply_tools.apply_intents. All turns together stay within `timeout`."""
+    import outreach_agent
+    deadline = time.monotonic() + timeout
+
+    def interrupted(signum, frame):   # a service stop ends the read as the codex run's did
+        raise Held("CLASSIFICATION_INTERRUPTED", retry=True)
+
+    with tempfile.TemporaryDirectory(prefix="reply-tools-") as directory:
+        reply_tools.prepare(directory, tools["root"], tools["task_id"])
+        session = reply_tools.Session(directory)
+        messages = [{"role": "system", "content": TOOL_SYSTEM + schema}, {"role": "user", "content": prompt}]
         previous_handler = signal.signal(signal.SIGTERM, interrupted)
-        worker = None
-        started = time.monotonic()
         try:
-            try:
-                # stderr is read into memory only (never persisted) so the provider's usage-limit
-                # refusal can be told apart from a failed classification.
-                missing = setup_steps.codex_wait(config)
-                if missing:   # no usable Codex: never started; a wait, no try spent (2026-10-23)
-                    raise Held("CODEX_NOT_FOUND", retry=True) from missing
-                arguments = _command(config, schema_path, output_path)
-                worker = subprocess.Popen(arguments, stdin=subprocess.PIPE,
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                                          encoding="utf-8", cwd=working,
-                                          env=openai_auth.environment(arguments, text_model.environment(config, _environment())),
-                                          **portable.worker_spawn_options())
-                portable.contain(worker)
-            except OSError:
-                raise Held("SUBSCRIPTION_EXECUTOR_UNAVAILABLE") from None
-            try:
-                streams = worker.communicate(prompt, timeout=timeout)
-                meta["stderr"] = streams[1] if isinstance(streams, tuple) and len(streams) == 2 else None
-            except subprocess.TimeoutExpired:
-                raise Held("CLASSIFICATION_TIMEOUT", retry=True) from None
+            for turn in range(MAX_TOOL_TURNS + 1):
+                last = turn == MAX_TOOL_TURNS
+                answer = outreach_agent._direct_call(
+                    config, calls, messages=messages, effort=DIRECT_EFFORT, max_tokens=REPLY_MAX_TOKENS,
+                    # The slot wait is capped as the codex run's was and spent from the deadline, so
+                    # a wait never runs the loop past its lease (2026-10-27).
+                    timeout=deadline - time.monotonic(), tools=TOOL_SPECS,
+                    max_wait=max(0, min(SLOT_WAIT_SECONDS, deadline - time.monotonic())), wait_in_timeout=True, tool_choice="none" if last else None,
+                    response_format=outreach_agent.strict_format("reply_decision", schema) if last else None,
+                    worker=worker)
+                if not answer["tool_calls"]:
+                    if not answer["content"].strip():
+                        raise Held("CLASSIFICATION_OUTPUT_MISSING")
+                    return outreach_agent.json_text(answer["content"])
+                if last:   # asked for the answer with no tools, it called one anyway
+                    raise Held("CLASSIFICATION_OUTPUT_MISSING")
+                messages.append({key: value for key, value in answer["message"].items()
+                                 if key in {"role", "content", "tool_calls"}})
+                for call in answer["tool_calls"]:
+                    text, unused_failed = _tool_result(session, call)
+                    messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": text})
         finally:
-            try:
-                if worker is not None:
-                    portable.kill_tree(worker.pid)
-                    if worker.poll() is None:
-                        worker.wait(timeout=5)
-            finally:
-                signal.signal(signal.SIGTERM, previous_handler)
-                if tools is not None:
-                    tools["calls"] = reply_tools.collect(working)
-        if worker.returncode:
-            stderr = streams[1] if isinstance(streams, tuple) and len(streams) == 2 else None
-            failed = Held("SUBSCRIPTION_EXECUTOR_FAILED", retry=True)
-            failed.executor = executor_failure(worker.returncode, time.monotonic() - started, stderr, config, prompt)
-            raise failed from provider_limits.check_output(worker.returncode, stderr, command=arguments)
-        openai_auth.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
-        if not output_path.is_file() or output_path.is_symlink():
-            raise Held("CLASSIFICATION_OUTPUT_MISSING")
-        with output_path.open("rb") as output:
-            content = output.read(MAX_OUTPUT_BYTES + 1)
-        if len(content) > MAX_OUTPUT_BYTES:
-            # A retry with size feedback, not a terminal hold (owner, 2026-10-01).
-            raise Held("CLASSIFICATION_OUTPUT_EXCEEDS_LIMIT", retry=True)
-        try:
-            text = content.decode("utf-8")
-        except UnicodeError:
-            raise Held("CLASSIFICATION_OUTPUT_ENCODING_INVALID") from None
-        if tools is not None:
-            # Without --output-schema the model sometimes wraps its JSON in a code fence.
-            fenced = re.fullmatch(r"\s*```(?:json)?\s*\n(.*)\n\s*```\s*", text, re.DOTALL)
-            if fenced:
-                text = fenced.group(1)
-        return text
+            signal.signal(signal.SIGTERM, previous_handler)
+            tools["calls"] = reply_tools.collect(directory)
 
 
 def _unique_object(pairs):
@@ -852,10 +790,25 @@ def _validate(raw, request, message, source_holds):
             "classification": output}
 
 
+# Provenance that may change under an in-flight read, which then continues once as a successor under the
+# current assets: the prompt and schema, and the route (2026-10-27: codex runs became direct calls).
+ASSET_PROVENANCE = {"prompt_sha256", "schema_sha256", "executable", "route", "reasoning_effort", "max_tokens"}
+
+
+# Of those, only the route fields may differ when a changed context is revised (review B1/B4): a prompt or
+# schema change still refuses that revision, as before.
+ROUTE_PROVENANCE = {"executable", "route", "reasoning_effort", "max_tokens"}
+
+
+def _beyond_assets(provenance, fields=ASSET_PROVENANCE):
+    return {key: value for key, value in provenance.items() if key not in fields}
+
+
 def _revise_legacy_assets(database, task, config, now, provenance):
     """Upgrade one unchanged legacy read within its original remaining budget."""
-    if config.get("conversion", {}).get("champion_handoff_enabled") is not True:
-        return None
+    # Owner, 2026-10-27 (review B1): a read whose provenance differs only in ASSET_PROVENANCE (a
+    # codex-era read) continues once whether champion_handoff_enabled is on or off; every other
+    # difference already returns None below, so the flag gate was dropped.
     saved = routing.one(database, "SELECT * FROM reply_worker_inputs WHERE task_id=?", (task["task_id"],))
     if not saved or routing.one(database, "SELECT 1 FROM reply_worker_results WHERE task_id=?", (task["task_id"],)):
         return None
@@ -880,8 +833,8 @@ def _revise_legacy_assets(database, task, config, now, provenance):
                 # No round limit (owner, 2026-09-24): the upper bound of 2 is deleted; rounds must still follow on by one.
                 or type(review_round) is not int or review_round < 0
                 or remaining < 1
-                or {key: value for key, value in previous_provenance.items() if key not in {"prompt_sha256", "schema_sha256"}}
-                != {key: value for key, value in provenance.items() if key not in {"prompt_sha256", "schema_sha256"}}):
+                or {key: value for key, value in previous_provenance.items() if key not in ASSET_PROVENANCE}
+                != {key: value for key, value in provenance.items() if key not in ASSET_PROVENANCE}):
             return None
         current, unused_message, unused_holds = _source(database, task, config, now)
         # The output instructions are assets, not the message: the 4 round-2 reads of 2026-09-23
@@ -1255,7 +1208,7 @@ def notify_failed_attempt(database, task, request, blocker, state, now, continue
 def cycle(root, database, config, now=None):
     """Process eligible queued reads and due retries; return private-data-free IDs.
 
-    config supplies the existing codex/model plus pipeline_routing.account_ids.
+    config supplies the model and text_model (a direct call, 2026-10-27) plus pipeline_routing.account_ids.
     reply_worker.enabled defaults to false and must be exactly true to execute.
     Optional bounds are timeout_seconds (1..120), max_items (1..20).
     No provider/config discovery, paid fallback, prompts for approval, or effects.
@@ -1281,20 +1234,24 @@ def cycle(root, database, config, now=None):
         prompt_template = resources.read_text("reply-prompt.md")
         prompt_template += "\n" + champion_composition.INDEPENDENT_REFERRAL_INSTRUCTIONS
         schema = resources.read_text("reply-schema.json")
-        # The run has tools, so codex's --output-schema is off (see _command); the schema is part
-        # of the saved prompt instead, which stays exactly what the model was given.
+        # The schema is part of the saved prompt (it was when codex ran the tools without
+        # --output-schema), which stays exactly what the model was given.
         prompt_template += "\n" + TOOLS_OUTPUT_INSTRUCTIONS + "\n" + schema
     except (Held, OSError, ValueError, TypeError) as error:
         return {"state": "BLOCKED", "blocker": error.code if isinstance(error, Held) else "REPLY_WORKER_ASSETS_UNAVAILABLE", "items": []}
     initialize(database)
     database.commit()
-    provenance = {"model": text_model.model(config), "executable": config["codex"], "auth": text_model.auth(config),
+    # A direct call (owner, 2026-10-27): no executable, the route and its settings recorded instead.
+    provenance = {"model": text_model.model(config), "executable": None, "auth": text_model.auth(config),
                   "model_source": "configured_cli_argument", "output_version": VERSION,
-                  "prompt_sha256": sha(prompt_template), "schema_sha256": sha(schema)}
+                  "prompt_sha256": sha(prompt_template), "schema_sha256": sha(schema),
+                  "route": DIRECT_ROUTE, "reasoning_effort": DIRECT_EFFORT, "max_tokens": REPLY_MAX_TOKENS}
 
     def revise_context(task, stamp):
         saved = routing.one(database, "SELECT provenance FROM reply_worker_inputs WHERE task_id=?", (task["task_id"],))
-        if saved and saved["provenance"] == routing.encoded(provenance):
+        # Equal apart from the route (review B1/B4: a codex-era read or decision is revised too).
+        if saved and (_beyond_assets(json.loads(saved["provenance"]), ROUTE_PROVENANCE)
+                      == _beyond_assets(provenance, ROUTE_PROVENANCE)):
             return routing.revise_reply_context(database, task, config, stamp)
         return None
 
@@ -1385,7 +1342,7 @@ def cycle(root, database, config, now=None):
             # 2026-10-01). The note goes in front of the saved prompt, which stays the task's
             # immutable input (its hash binds the attempt rows and the decision).
             feedback = size_feedback(database, task["task_id"])
-            raw = _execute(dict(config, _reply_tools=tools), feedback + "\n\n" + prompt if feedback else prompt, schema, timeout)
+            raw = execute_text(dict(config, _reply_tools=tools), feedback + "\n\n" + prompt if feedback else prompt, schema, timeout)
             handoff = _validate(raw, request, message, holds)
             checked, unused_message, unused_holds = _source(database, task, config, current())
             if routing.encoded(checked) != routing.encoded(request):

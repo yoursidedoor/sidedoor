@@ -610,7 +610,7 @@ def revise_reply_context(database, task, config, now):
             provenance = json.loads(saved["provenance"])
             template, separator, request_json = saved["input"].partition("\n\nUNTRUSTED_SOURCE_JSON:\n")
             if (not separator or reply_worker.sha(template) != provenance["prompt_sha256"]
-                    or provenance["model"] != text_model.model(config) or provenance["executable"] != config["codex"]
+                    or provenance["model"] != text_model.model(config)
                     or provenance["output_version"] != "reply-decision-v2"):
                 return None
             attempts = rows(database, "SELECT provenance FROM reply_worker_attempts WHERE task_id=? AND input_sha256=?",

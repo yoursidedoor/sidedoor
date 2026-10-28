@@ -332,8 +332,12 @@ class Status:
 
 
 def session_config(config, home, root):
-    """`config` for the support-email session: Setup's Codex, the shown operation."""
+    """`config` for the support-email session: Setup's Codex (or the Claude found, U1 3e), the shown operation."""
+    import engines
     import setup_steps
+    config = setup_steps.with_engine(config, home)   # U1 3g: the engine chosen in Setup or Settings
+    if engines.engine(config).judged_by_stream:   # Claude (U1 3e), Antigravity (U1 4)
+        return dict(engines.engine(config).prepare(dict(config), home), _browser_operation=OPERATION)
     config = setup_steps.with_codex(dict(config or {}), home)
     return dict(config, _browser_operation=OPERATION)
 

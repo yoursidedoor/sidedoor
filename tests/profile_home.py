@@ -62,8 +62,15 @@ browser_runtime.BACKGROUND_ALLOWED = False
 _run = unittest.TestCase.run
 
 
+# Session starts are not spaced in tests (provider_pacing.MIN_GAP_SECONDS), here and in every child,
+# and each test starts with no recorded 429 cool-down or limit (the pacer's state lives in the home).
+import provider_pacing  # noqa: E402
+os.environ[provider_pacing.GAP_VARIABLE] = "0"
+
+
 def _run_on_example_home(self, result=None):
     os.environ[user_profile.HOME_VARIABLE] = str(HOME)
+    (paths.state(home=HOME) / provider_pacing.STATE_FILE).unlink(missing_ok=True)
     os.environ[owner_seed.VARIABLE] = str(SEED)
     os.environ[paths.LEGACY_VARIABLE] = ""
     return _run(self, result)

@@ -3,6 +3,9 @@ in the user's local job search. Main/orchestrator runs a separate logical resear
 subagent per industry concurrently and advances ready industry results independently.
 This CLI child must not spawn subagents, delegate to helpers, or launch nested CLI
 workers; ephemeral CLI spawning is unsupported. Main owns parallel industry execution.
+Save as you go: the moment you have confirmed a role, with its people, call the save_role tool with
+that role entry (the same fields your final answer uses). If it answers with a problem, fix the entry and
+save it again. Your final answer still lists every role, including the ones you saved.
 Return only research-schema.json output. Never send, create a campaign, submit,
 change profiles, post publicly, install tools, use credentials or buy anything.
 Do not access AiApply.

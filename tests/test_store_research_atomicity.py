@@ -70,21 +70,66 @@ class StoreResearchAtomicityTests(unittest.TestCase):
         self.assertEqual(self.database.execute("SELECT COUNT(*) FROM rw_results").fetchone()[0], 1)
         self.assertEqual(self.database.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0], 1)
 
-    def test_storage_failure_rolls_back_savepoint_without_discarding_caller_work(self):
+    def test_one_bad_opportunity_is_dropped_and_the_rest_are_stored(self):
+        # Owner, 2026-10-27: "One bad entry no longer rejects the whole set".
         self.initialize()
         with research_workflow.transaction(self.database):
             processed = self.process()
-            invalid = copy.deepcopy(processed)
-            invalid["opportunities"].append(dict(invalid["opportunities"][0], url="http://invalid.example/job"))
-            with self.assertRaisesRegex(ValueError, "HTTPS source"):
-                orchestrator.store_research(self.database, self.pipeline, invalid)
+            mixed = copy.deepcopy(processed)
+            mixed["opportunities"].append(dict(mixed["opportunities"][0], company="Other", url="http://invalid.example/job"))
+            mixed["drafts"].append({"recipient": "Nobody", "company": "Fixture"})
+            rejected = orchestrator.store_research(self.database, self.pipeline, mixed)
             self.assertTrue(self.database.in_transaction)
-            self.assertEqual(self.database.execute("SELECT COUNT(*) FROM rw_results").fetchone()[0], 1)
-            self.assertEqual(self.database.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0], 0)
-            self.assertEqual(self.database.execute("SELECT COUNT(*) FROM application_jobs").fetchone()[0], 0)
-            self.assertEqual(self.database.execute("SELECT COUNT(*) FROM application_events").fetchone()[0], 0)
-            orchestrator.store_research(self.database, self.pipeline, processed)
-        self.assertEqual(self.database.execute("SELECT COUNT(*) FROM application_jobs").fetchone()[0], 1)
+        self.assertEqual([(entry["company"], entry["kind"], entry["reason"]) for entry in rejected],
+                         [("Other", "opportunity", "the role's link was not a secure (https) web address"),
+                          ("Fixture", "draft", "the note was missing its recipient, company, profile, message or source")])
+        self.assertTrue(all(entry["dropped"] for entry in rejected))
+        self.assertEqual(self.database.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0], 1)
+        self.assertEqual(self.database.execute("SELECT job_key FROM application_jobs").fetchall()[0][0], "fixture:123")
+
+    def test_an_opportunity_that_fails_to_save_is_rolled_back_alone(self):
+        self.initialize()
+        with research_workflow.transaction(self.database):
+            processed = self.process()
+            second = copy.deepcopy(processed)
+            second["opportunities"].insert(0, dict(second["opportunities"][0], url="https://employer.example/jobs/999"))
+            real = applications.ingest
+            calls = []
+            def ingest(database, opportunity):
+                calls.append(opportunity["url"])
+                if len(calls) == 1:
+                    real(database, opportunity)
+                    raise ValueError("synthetic ingest failure after a partial write")
+                return real(database, opportunity)
+            with patch.object(applications, "ingest", side_effect=ingest):
+                rejected = orchestrator.store_research(self.database, self.pipeline, second)
+        self.assertEqual([entry["reason"] for entry in rejected], ["the role could not be saved"])
+        self.assertEqual(rejected[0]["error_type"], "ValueError")
+        self.assertEqual([row[0] for row in self.database.execute("SELECT url FROM opportunities")],
+                         ["https://employer.example/jobs/123"])
+
+    def test_out_of_plan_role_is_dropped_alone_and_the_industry_stays_complete(self):
+        self.initialize()
+        self.raw["opportunities"].append(dict(self.raw["opportunities"][0], company="Outside", requisition_id="9",
+                                              url="https://employer.example/jobs/9"))
+        processed = self.process()
+        self.assertEqual(processed["industry_status"], "COMPLETE")
+        self.assertIn({"company": "Outside", "role": "Software Engineer",
+                       "reason": "it was outside today's planned companies",
+                       "source": "https://employer.example/jobs/9"}, processed["dropped_entries"])
+        self.assertEqual([role["company"] for role in processed["opportunities"]], ["Fixture"])
+
+    def test_a_role_that_fails_after_its_opportunity_is_built_is_undone_whole(self):
+        self.initialize()
+        with patch.object(research_workflow, "research_eligible", side_effect=ValueError("synthetic")):
+            processed = self.process()
+        self.assertEqual(processed["opportunities"], [])
+        self.assertEqual(processed["people"], [])
+        self.assertEqual(processed["dropped_entries"],
+                         [{"company": "Fixture", "role": "Software Engineer", "reason": "the role entry was incomplete or malformed",
+                           "source": "https://employer.example/jobs/123"}])
+        orchestrator.store_research(self.database, self.pipeline, processed)
+        self.assertEqual(self.database.execute("SELECT COUNT(*) FROM application_jobs").fetchone()[0], 0)
 
     def test_missing_nested_schema_fails_closed_without_committing_caller_work(self):
         before = list(self.database.iterdump())

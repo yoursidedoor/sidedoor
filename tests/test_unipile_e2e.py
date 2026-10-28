@@ -71,6 +71,7 @@ class InvitationThroughTheRelay(RelayHarness):
         self.set_response("GET /users/e2e-invitee", (200, {"provider_id": "INVITEE1", "network_distance": "SECOND_DEGREE",
                                                            "invitation": None, "public_identifier": "e2e-invitee"}))
         self.set_response("GET /users/invite/sent", (200, {"items": [], "cursor": None}))
+        self.set_response("GET /users/me", (200, {"provider_id": "OWNER1", "premium": True}))   # owner, 2026-10-27
         self.set_response("GET /chats", (200, {"items": [], "cursor": None}))
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

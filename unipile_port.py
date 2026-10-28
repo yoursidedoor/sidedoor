@@ -78,6 +78,11 @@ Decisions this adapter makes (recorded in BACKLOG E3.T2):
   (top-level `status`, and each `sources[*].status`) is "OK", None when the item carries no
   status, False otherwise (CREDENTIALS, ERROR, STOPPED, CONNECTING, ...). `own_profile` is
   `connection_params.im.publicIdentifier` as a profile URL when present.
+- Premium (owner, 2026-10-27). `own_premium()` reads `GET /users/me?account_id` (Unipile's
+  account-owner profile) and returns its `premium` boolean, None when absent or not a boolean. The
+  relay forwards exactly this route (relay/server.py) and local-dev calls Unipile directly, as for
+  every other read. `send_invitation(provider_id, None)` sends no `message` key (an invitation
+  without a note).
 
 Credentials: `settings()` reads unipile.json ({"dsn", "token"}) from `user_profile.home()`
 (the spike's reader, moved here); `UnipilePort.from_settings()` builds a live port. That file holds
@@ -127,6 +132,7 @@ VALID_STATUSES = {"OK"}
 DETAIL_LIMIT = 300
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_TIMEOUT = 60
+PREMIUM_TIMEOUT = 10   # the Premium read never holds an invitation long (owner, 2026-10-27)
 # Unipile's explicit refusals of POST /users/invite (GL-I1). Matched exactly; any other answer is
 # UncertainWrite. Not yet observed live (no live call was made for this change).
 INVITATION_EXISTS_TYPES = {"errors/already_invited_recently": "ALREADY_INVITED",
@@ -618,8 +624,23 @@ class UnipilePort:
         return Person(profile=profile_url, provider_id=provider_id, network_distance=distance,
                       pending_invitation=pending, raw=parsed)
 
+    def own_premium(self):
+        """True / False from the signed-in account's own profile (`GET /users/me`, its `premium`
+        field; owner, 2026-10-27; at most PREMIUM_TIMEOUT seconds); None when the answer carries no boolean `premium`. Errors raise
+        as for any read (the caller, `setup_steps.check_premium`, falls back to the last known value)."""
+        if self._session_valid is False:
+            raise SessionInvalid("ACCOUNT_SESSION_INVALID")
+        status, parsed = self.transport("GET", "/users/me", query={"account_id": self._account_id()},
+                                        timeout=PREMIUM_TIMEOUT)
+        parsed = self._classify(status, parsed, None)
+        value = parsed.get("premium") if isinstance(parsed, dict) else None
+        return value if type(value) is bool else None
+
     def send_invitation(self, provider_id, note):
-        body = {"provider_id": provider_id, "account_id": self._account_id(), "message": note}
+        # No note (not Premium, owner 2026-10-27): the `message` key is left out, not sent as null.
+        body = {"provider_id": provider_id, "account_id": self._account_id()}
+        if note is not None:
+            body["message"] = note
         return self._write("send_invitation", dict(body), "/users/invite", body=body)
 
     def sent_invitations(self, cursor=None):

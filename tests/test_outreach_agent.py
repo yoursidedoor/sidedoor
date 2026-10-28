@@ -162,7 +162,7 @@ class OutreachAgentTests(unittest.TestCase):
     def setUp(self):
         test_outreach.ActionTests.setUp(self)
         for target in ("socket.socket.connect", "socket.getaddrinfo", "subprocess.Popen",
-                       "reply_worker._execute"):
+                       "text_model._post"):
             boundary = patch(target, side_effect=AssertionError("External execution forbidden"))
             boundary.start()
             self.addCleanup(boundary.stop)

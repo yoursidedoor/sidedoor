@@ -63,7 +63,8 @@ import uuid
 from pathlib import Path
 
 
-NAMES = {"openrouter": "openrouter.key", "license": "license.key", "openai": "openai.key"}   # openai: E0.T8
+NAMES = {"openrouter": "openrouter.key", "license": "license.key", "openai": "openai.key",   # openai: E0.T8
+         "anthropic": "anthropic.key"}   # anthropic: U1 3c, Claude's API-key mode (no UI before 3g)
 SERVICE = "Sidedoor"
 ID_FILE = "credentials-id"
 LOCK_FILE = "credentials.lock"
@@ -764,10 +765,16 @@ def values(home=None):
 
 
 def _wanted(name, home):
-    """The OpenAI API key (E0.T8) is optional: it counts for the waits below only while the user
+    """The OpenAI API key (E0.T8) and the Anthropic API key (U1 3c) are optional: the OpenAI one counts for the waits below only while the user
     chose it (setup-state codex_auth "api_key") or one was saved (its file or `openai.key.tested`).
     Otherwise a locked store would hold every Sign-in-with-ChatGPT user on a key they never had.
     The other keys always count."""
+    if name == "anthropic":   # U1 3c: the same for the Anthropic API key (Claude's API-key mode)
+        home = _home(home)
+        if (home / NAMES[name]).exists():
+            return True
+        import setup_steps
+        return setup_steps.claude_api_key_mode(home)   # the same source ClaudeEngine.api_key_mode reads
     if name != "openai":
         return True
     home = _home(home)

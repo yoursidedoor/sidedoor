@@ -121,6 +121,40 @@ class GatherTest(GatherBase):
         self.assertEqual(item["text"], "Research didn't finish on Tue Oct 20: it ran into an error.")
         self.assertNotIn("KeyError", item["text"] + item["todo"])
 
+    def test_a_finished_day_with_skipped_entries_shows_them_as_information(self):
+        industries = [{"industry": "AI", "state": "COMPLETE", "dropped_entries": [
+            {"stage": "discovery", "company": "Airia", "role": None, "reason": "it was listed twice"},
+            {"stage": "saving", "company": "WitnessAI", "role": "Staff Engineer",
+             "reason": "the role's link was not a secure (https) web address"}]}]
+        research_day(self.database, "2026-10-22", "COMPLETE", "a1", "COMPLETE", base.pacific(2026, 10, 22, 9, 0),
+                     result={"state": "COMPLETE", "industries": industries})
+        view = self.gather()
+        # Owner 2026-10-27 ("3:a"): shown, but not counted as a failure anywhere.
+        self.assertEqual(self.items(view, "research"), [])
+        self.assertEqual((view["sections"], view["needs_you"], view["needs_calm"], view["needs_total"]), ([], [], [], 0))
+        self.assertTrue(view["nothing"])
+        [section] = view["info_sections"]   # shown in the Research section, not under Needs you
+        self.assertEqual(section["key"], "research")
+        [item] = section["info"]
+        self.assertEqual(item["calm"], "info")
+        self.assertEqual(item["text"], "Research finished today. 2 entries were skipped: Airia: it was listed twice; "
+                                       "WitnessAI, Staff Engineer: the role's link was not a secure (https) web address.")
+        self.assertEqual(item["todo"], "Nothing you need to do. The rest of that day's results were kept.")
+
+    def test_a_finished_day_with_a_session_cut_off_shows_it_as_information(self):
+        # R1 review S11: a session that ended early but kept what it saved is shown, never counted.
+        note = "A research session ended early (it reached its time limit); kept the 3 roles it saved."
+        industries = [{"industry": "AI", "state": "COMPLETE", "session_cut_offs": [{"stage": "qualification", "note": note}]}]
+        research_day(self.database, "2026-10-22", "COMPLETE", "a1", "COMPLETE", base.pacific(2026, 10, 22, 9, 0),
+                     result={"state": "COMPLETE", "industries": industries})
+        view = self.gather()
+        self.assertEqual((view["sections"], view["needs_you"], view["needs_calm"], view["needs_total"]), ([], [], [], 0))
+        [section] = view["info_sections"]
+        [item] = section["info"]
+        self.assertEqual(item["calm"], "info")
+        self.assertEqual(item["text"], "Research finished today. " + note)
+        self.assertTrue(item["todo"].startswith("Nothing you need to do."))
+
     def test_example_2_a_crashed_job_shows_its_time_and_its_redacted_error_log(self):
         logs = self.root / "logs"
         logs.mkdir()
@@ -763,6 +797,23 @@ class FailuresPageTest(unittest.TestCase):
         self.assertNotIn("no log yet", page)
         self.assertFalse((self.root / "state").exists())
         self.assertFalse((self.root / "logs").exists())
+
+    def test_skipped_research_entries_show_in_the_research_section_and_are_not_failures(self):
+        database = base.database_with_schema(self.root)
+        now = dt.datetime.now(dt.timezone.utc)
+        industries = [{"industry": "AI", "state": "COMPLETE", "dropped_entries": [
+            {"stage": "discovery", "company": "Airia", "role": None, "reason": "it was listed twice"}]}]
+        research_day(database, now.date().isoformat(), "COMPLETE", "a1", "COMPLETE", now - dt.timedelta(minutes=5),
+                     result={"state": "COMPLETE", "industries": industries})
+        database.commit()
+        database.close()
+        page = self.get()
+        research = text_of(page.text.split('id="research"', 1)[1].split("</section>", 1)[0])
+        self.assertIn("1 entry was skipped: Airia: it was listed twice.", research)
+        self.assertIn("Nothing you need to do.", research)
+        text = text_of(page.text)
+        self.assertIn("Nothing has failed.", text)
+        self.assertIn("Nothing needs you right now.", text)
 
     def test_example_5_overview_links_land_on_their_sections(self):
         loop = {"running": True, "last_error": None, "job_failures": {"applications": {"exit_code": 1, "at": "2026-10-22T17:30:00+00:00"}}}

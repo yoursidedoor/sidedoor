@@ -1,3 +1,4 @@
+import contextlib
 import datetime as dt
 import json
 import uuid
@@ -34,6 +35,14 @@ BROWSER_BUSY_CODE = "APPLICATION_BROWSER_BUSY"
 # Capacity waits of Sidedoor's own browser (E7.T1): no try spent, no request, no reservation.
 BROWSER_UNAVAILABLE_CODES = ("APPLICATION_BROWSER_RUNTIME_MISSING", "APPLICATION_BROWSER_PROFILE_IN_USE")
 BROWSER_BUSY_RETRY_SECONDS = 300
+
+
+@contextlib.contextmanager
+def paced_until_done(paced):
+    try:
+        yield paced
+    finally:
+        paced.release()
 
 
 class CapacityWait(applications.AdapterPending):
@@ -288,7 +297,18 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
         # One Chrome session at a time (state/browser.lock, owner 2026-10-02). Taken before any
         # compute is reserved or any request is created, and held until the session's result is
         # read, so a busy browser costs the job nothing: it waits as a capacity wait.
-        with run_locks.browser_session(self.root, wait_seconds=self.browser_wait_seconds) as free:
+        # The provider pacing slot (2026-10-27) comes before the browser lock, never waited for while holding
+        # it, and before any request is created or claimed, so the claim's lease starts after the wait. A
+        # wait past provider_pacing.BROWSER_SLOT_WAIT_SECONDS is the short rate-limit wait: no try spent.
+        import provider_pacing
+        try:
+            paced = provider_pacing.browser_slot(self.config)
+        except provider_limits.ProviderUsageLimit as limit:
+            raise desktop_adapter.ProviderUsageWait("pacing:" + job_key, limit.next_at) from limit
+        # Holding the slot, the browser is waited for only briefly: busy, the slot is released at once and
+        # the job retries after BROWSER_BUSY_RETRY_SECONDS as the same capacity wait (no try, no request).
+        with paced_until_done(paced), run_locks.browser_session(
+                self.root, wait_seconds=min(self.browser_wait_seconds, provider_pacing.BROWSER_LOCK_WAIT_SECONDS)) as free:
             if not free:
                 raise CapacityWait(BROWSER_BUSY_CODE, desktop_adapter.later(self.clock(), BROWSER_BUSY_RETRY_SECONDS))
             # Sidedoor's browser runtime missing, or a Chrome already on its profile (E7.T1 review fix
@@ -296,12 +316,14 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
             code = browser_runtime.check_available(self.database, self.config, "APPLICATION_BROWSER_", "applications")
             if code:
                 raise CapacityWait(code, desktop_adapter.later(self.clock(), BROWSER_BUSY_RETRY_SECONDS))
-            import setup_steps
-            missing = setup_steps.codex_wait(self.config)
+            import engines
+            engine = engines.engine(self.config)
+            missing = engine.wait(self.config)   # Codex: setup_steps.codex_wait, unchanged (U1 3e)
             if missing:
-                # No usable Codex (2026-10-23): before any reservation or request, the job waits like a
-                # provider wait (no try spent, nothing abandoned) and resumes after the backoff.
-                raise desktop_adapter.ProviderUsageWait("codex:" + job_key, missing.next_at)
+                # No usable engine (Codex 2026-10-23; Claude not found or signed out, U1 3e): before any
+                # reservation or request, the job waits like a provider wait (no try spent, nothing
+                # abandoned) and resumes after the backoff. The wait key names the engine ("codex:" kept).
+                raise desktop_adapter.ProviderUsageWait(engine.name + ":" + job_key, missing.next_at)
             if self.prepaid.get(job_key, 0):
                 self.prepaid[job_key] -= 1
             else:

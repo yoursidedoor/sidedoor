@@ -294,7 +294,8 @@ class MigrationTest(Base):
     def test_no_os_store_keeps_the_0600_file_and_doctor_says_so(self):
         credentials.use_backend(credentials.NO_STORE)
         self.write("license", LICENSE)
-        self.assertEqual(credentials.migrate(self.home), {"openrouter": "absent", "license": "no_store", "openai": "absent"})
+        self.assertEqual(credentials.migrate(self.home), {"openrouter": "absent", "license": "no_store", "openai": "absent",
+                                                          "anthropic": "absent"})
         self.assertTrue(self.exists("license"))
         line = doctor.check_credentials(self.home)
         self.assertEqual(line["status"], doctor.WARN)

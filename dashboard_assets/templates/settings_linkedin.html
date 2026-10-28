@@ -5,8 +5,13 @@
   {% set l = x.linkedin %}
   {% if not x.has_license %}
   <p class="muted">Needs your license first (<a href="#license">License</a>).</p>
+  <p class="note note-info">If your LinkedIn account isn't Premium, Sidedoor sends your first outreach without a note, and sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.</p>
   {% else %}
   {% if l.message %}<p class="note note-{{ 'success' if l.status == 'done' else ('error' if l.status == 'failed' else 'info') }}" role="status">{{ x.say(l.message) }}</p>{% endif %}
+  {% set p = x.linkedin_premium %}
+  {% if p %}<p class="muted" id="linkedin-premium">Your LinkedIn account: {{ "Premium" if p.premium else "not Premium" }}{% if p.checked %} (checked {{ p.checked }}){% endif %}.</p>
+  {% elif l.status == "done" %}<p class="muted" id="linkedin-premium">Your LinkedIn account: not checked yet.</p>{% endif %}
+  <p class="note note-info">If your LinkedIn account isn't Premium, Sidedoor sends your first outreach without a note, and sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.</p>
   {% if l.offer == "waiting" %}
   {% if x.link_url %}<p><a class="button" href="{{ x.link_url }}" target="_blank" rel="noopener noreferrer">Open the LinkedIn sign-in page</a></p>{% endif %}
   {% set again = "reconnect" if l.kind == "reconnect" else "connect" %}

@@ -59,7 +59,16 @@ def next_daily_time(now, config):
 CODEX_WAIT = "CODEX_WAIT"
 
 
-def codex_wait(database, config, now):
+# The research day's state and next step when Claude, not Codex, is what research waits for (U1 3d).
+CLAUDE_WAIT_STATES = {"claude_not_found": ("CLAUDE_NOT_FOUND", "Find Claude again in Setup or Settings"),
+                      "claude_signed_out": ("CLAUDE_SIGNED_OUT", "Sign in to Claude again"),
+                      "claude_key_refused": ("CLAUDE_KEY_REFUSED", "Add an Anthropic API key that works in Settings"),
+                      # U1 4: Antigravity's own waits, at parity with Claude's
+                      "antigravity_not_found": ("ANTIGRAVITY_NOT_FOUND", "Find Antigravity again in Setup or Settings"),
+                      "antigravity_signed_out": ("ANTIGRAVITY_SIGNED_OUT", "Sign in to Antigravity again")}
+
+
+def codex_wait(database, config, now, kind=None):
     """No usable Codex at research time (2026-10-23): the day's row is written as CODEX_WAIT with no
     attempt, so the hourly cycle and the applications job count research as having had its turn
     (`orchestrator.research_turn_pending`) instead of yielding all day. `claim` treats it like a day
@@ -68,6 +77,9 @@ def codex_wait(database, config, now):
     with database:
         database.execute("INSERT OR IGNORE INTO research_days(" + DAY_COLUMNS + ") VALUES (?,?,0,NULL,NULL,NULL,0)",
                          (day, CODEX_WAIT))
+    if kind in CLAUDE_WAIT_STATES:   # the same no-attempt day row; Claude's own words
+        state, next_action = CLAUDE_WAIT_STATES[kind]
+        return {"state": state, "day": day, "next_action": next_action}
     return {"state": "CODEX_NOT_FOUND", "day": day, "next_action": "Find Codex again in Setup or Settings"}
 
 
@@ -130,12 +142,20 @@ def compute_wait_retry(result, now):
     return moment.isoformat()
 
 
-LONG_WAIT_KINDS = (None, "openrouter_out_of_credit", "codex_not_found")   # the ChatGPT plan limit has kind None
+# The provider waits that never spend one of the day's tries. The ChatGPT plan limit has kind None; a 429
+# ("rate_limited", 2026-10-27) joins them although its retry is short (30 s to 300 s), so a provider asking
+# Sidedoor to slow down never uses up the day.
+# U1 3d (review C4): Claude not found, signed out, or its API key refused are waits only the user ends, like
+# no usable Codex.
+LONG_WAIT_KINDS = (None, "openrouter_out_of_credit", "codex_not_found", "rate_limited",
+                   "claude_signed_out", "claude_not_found", "claude_key_refused",
+                   "antigravity_signed_out", "antigravity_not_found")   # U1 4
 
 
 def provider_wait(result):
     """True when every industry still waiting waits on the provider for something only the user or the
-    clock ends: the ChatGPT usage limit, OpenRouter out of credit, or no usable Codex (2026-10-23).
+    clock ends: the ChatGPT usage limit, OpenRouter out of credit, no usable Codex (2026-10-23), or the
+    provider's 429 "Too Many Requests" (2026-10-27).
     Those never count toward the day's tries, past the cap below too. The cap on ordinary compute waits
     stays: it bounds how many times one day's research is claimed (each claim starts a run that plans
     and reserves before it finds the shared budget empty). A provider wait is bounded anyway: its retry
@@ -156,14 +176,19 @@ def provider_wait(result):
 def long_wait_retry(result, now, config):
     """A provider wait (`provider_wait`) whose reset is past COMPUTE_WAIT_HORIZON (a ChatGPT limit can
     state one up to provider_limits.MAX_WAIT away): the day waits until that reset, or until the next
-    service day starts if that is sooner (the next day then waits likewise), spending no tries."""
+    service day starts if that is sooner (the next day then waits likewise), spending no tries. A reset
+    already passed when the run finishes means retry now."""
     value = result.get("next_retry_at")
     try:
         moment = dt.datetime.fromisoformat(value) if isinstance(value, str) else None
     except ValueError:
         moment = None
-    if moment is None or moment.tzinfo is None or moment <= now:
+    if moment is None or moment.tzinfo is None:
         return None
+    if moment <= now:
+        # A short provider wait (a 429's 30 s, a stated 20 ms) has usually passed by the time the run
+        # finishes: retry now, never a spent try (2026-10-27).
+        return now.isoformat()
     return min(moment, dt.datetime.fromisoformat(next_daily_time(now, config))).isoformat()
 
 

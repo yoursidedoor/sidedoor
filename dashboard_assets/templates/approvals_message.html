@@ -16,6 +16,7 @@
   {% endif %}
   <p class="approval-judge"><span class="muted">Send check:</span> <strong class="{{ 'approval-not-ready' if m.judge.verdict != 'Ready to send' }}">{{ m.judge.verdict }}</strong>{% if m.judge.reason %} <span class="muted">· {{ m.judge.reason }}</span>{% endif %}</p>
   {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
+  {% if m.note_after_accept %}<p class="note note-info approval-note-after">The note is sent after they accept.</p>{% endif %}
   {% if m.revisable %}
   {% if f.kept is string and f.kept != m.text %}
   <p class="approval-label">The message now reads:</p>

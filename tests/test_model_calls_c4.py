@@ -49,25 +49,22 @@ class ModelCallTests(unittest.TestCase):
                          (9314, 325, 36, 0.0039, "ok"))
         self.assertEqual((refused["outcome"], refused["worker"], refused["cost"]), ("refused", "test_model_calls_c4", None))
 
-    def test_codex_runs_record_total_tokens_and_unknown_cost(self):
-        def run(config, prompt, schema, timeout, meta):
-            meta["stderr"] = "codex\n{...}\ntokens used\n15,582\n"
-            return "{}"
-
-        with patch.object(reply_worker, "_codex", side_effect=run):
-            reply_worker._execute(self.config, "prompt", "{}", 5)
-        with patch.object(reply_worker, "_codex", side_effect=reply_worker.Held("CLASSIFICATION_TIMEOUT", retry=True)):
+    def test_text_workers_record_one_direct_row_per_call_under_their_own_name(self):
+        # 2026-10-27: the reply, follow-up and outreach text workers are direct calls (no codex row).
+        answer = {"id": "gen-7", "model": "z-ai/glm-5.3", "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+                  "usage": {"prompt_tokens": 10, "completion_tokens": 2}}
+        with patch.object(text_model, "_post", return_value=(200, json.dumps(answer).encode())):
+            reply_worker.text_executor("followup")(self.config, "prompt", "{}", 5)
+        import provider_limits
+        self.addCleanup(provider_limits.clear, provider_limits.CREDIT_WAIT_FILE)
+        with patch.object(text_model, "_post", return_value=(402, b'{"error": "credits"}')):
             with self.assertRaises(reply_worker.Held):
-                reply_worker._execute(self.config, "prompt", "{}", 5)
-        ok, timeout = self.rows()
-        self.assertEqual((ok["route"], ok["total_tokens"], ok["cost"], ok["outcome"]), ("codex", 15582, None, "ok"))
-        self.assertEqual((timeout["outcome"], timeout["total_tokens"]), ("timeout", None))
-        database = sqlite3.connect(self.path)
-        try:
-            totals = model_calls.today(database, dt.datetime.now(dt.timezone.utc), "UTC")
-        finally:
-            database.close()
-        self.assertEqual(model_calls.summary_line(totals), "Model cost today: $0.0000 across 2 calls (2 without cost data)")
+                reply_worker.text_executor("followup")(self.config, "prompt", "{}", 5)
+        ok, refused = self.rows()
+        self.assertEqual((ok["route"], ok["worker"], ok["prompt_tokens"], ok["outcome"]),
+                         ("openrouter_direct", "test_model_calls_c4", 10, "ok"))
+        self.assertEqual((refused["route"], refused["worker"], refused["outcome"]),
+                         ("openrouter_direct", "test_model_calls_c4", "refused"))
 
     def test_no_database_records_nothing(self):
         model_calls._DATABASE = None

@@ -24,9 +24,11 @@ import tempfile
 import time
 from urllib.parse import unquote
 
+import engines
 import portable
 import openai_auth
 import provider_limits
+import provider_pacing
 import reply_worker
 import outreach_history
 from orchestrator import profile_key
@@ -166,28 +168,10 @@ def command(config, directory):
     # Browser reads run on the cheaper read model when one is configured (owner, 2026-09-28:
     # gpt-6-sol for reads); application_browser.command switches back for submit/verify/reconcile.
     # E7.T1 (owner, 2026-10-22, option A): the browser is the guarded @playwright/mcp server
-    # (`sidedoor browser-guard`, browser_runtime) and nothing else. The user's Codex config is ignored,
+    # (`sidedoor browser-guard`, browser_runtime) and nothing else. The user's engine config is ignored,
     # so neither the Chrome plugin (cua_repl) nor computer-use nor any other server the user set up
     # can load into a browser session; `config["_browser_operation"]` names the guard's operation.
-    result = [config["codex"], "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check",
-              "--sandbox", "read-only", "--model", config.get("browser_read_model") or config["model"], "--json"]
-    for setting in ('approval_policy="never"', 'forced_login_method="chatgpt"',
-                    'web_search="disabled"', "features.apps=false",
-                    "features.shell_tool=false", "features.unified_exec=false",
-                    "features.apply_patch_freeform=false", "features.multi_agent=false"):
-        result.extend(["-c", setting])
-    operation = config.get("_browser_operation")
-    if operation:
-        import browser_runtime
-        for setting in browser_runtime.codex_options(config, directory, operation,
-                                                     claim=config.get("_application_guard_claim"),
-                                                     human_check=config.get("_application_human_check")):
-            result.extend(["-c", setting])
-    else:
-        result.extend(["-c", "mcp_servers={}"])
-    # E0.T8: ChatGPT sign-in returns this command untouched; an API key drops the forced login.
-    return openai_auth.command(result + ["--output-schema", str(directory / "schema.json"), "--output-last-message",
-                                         str(directory / "output.json"), "-"])
+    return engines.engine(config).browser_command(config, directory)
 
 
 def communicate(worker, prompt, timeout, directory, arguments, clock=time.monotonic):
@@ -219,29 +203,54 @@ def communicate(worker, prompt, timeout, directory, arguments, clock=time.monoto
 
 
 def execute(config, prompt, directory, timeout):
-    environment = reply_worker._environment()
-    worker = None
+    engine = engines.engine(config)
+    # Claude needs its own allowlist (USER finds its sign-in); Codex's is unchanged.
+    environment = engine.base_environment() if engine.judged_by_stream else reply_worker._environment()
+    worker = paced = arguments = None
     with tempfile.TemporaryDirectory(prefix="history-work-", dir=directory) as working, \
             (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
-            import setup_steps
-            missing = setup_steps.codex_wait(config)
+            missing = engine.wait(config)
             if missing:   # no usable Codex: never started; a wait (2026-10-23)
                 raise RuntimeError("HISTORY_BROWSER_CODEX_NOT_FOUND") from missing
             arguments = command(config, directory)
+            # Which engine wrote this session's trace (U1 3a), with a Claude run's allowed tools (3e).
+            engines.record_run(directory, engine, command=arguments)
+            try:   # waits before the session's own clock starts, at most reply_worker.SLOT_WAIT_SECONDS
+                paced = provider_pacing.take(arguments, timeout, max_wait=reply_worker.SLOT_WAIT_SECONDS)
+            except provider_limits.ProviderUsageLimit as limit:
+                raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED") from limit
             worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
-                stderr=errors, text=True, encoding="utf-8", cwd=working,
-                env=openai_auth.environment(arguments, environment),
+                stderr=errors, text=True, encoding="utf-8", cwd=getattr(arguments, "cwd", None) or working,
+                env=engine.environment(arguments, environment),
                 **portable.worker_spawn_options())
             portable.contain(worker)
-            communicate(worker, prompt, timeout, directory, arguments)
+            communicate(worker, engine.prompt_input(prompt), timeout, directory, arguments)
+            if engine.judged_by_stream:   # Claude, Antigravity (U1 4)
+                # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the exit code
+                # (a tool outside the run's list, a browser server that did not start, a limit); a clean
+                # run's answer is written to output.json, and its model_calls row is written either way.
+                trace.flush()
+                errors.flush()
+                failure = engine.finish_run(worker.returncode, (directory / "trace.jsonl").read_text(errors="replace"),
+                                            (directory / "stderr.log").read_text(errors="replace"),
+                                            command=arguments, worker=config.get("_browser_operation") or "browser")
+                if failure is not None and failure.code == engines.ClaudeEngine.FORBIDDEN_TOOL:
+                    raise ValueError("HISTORY_UNAUTHORIZED_TOOL_TRACE") from failure   # Codex's label (E6)
+                if failure is not None:
+                    raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED") from failure
+                return
             if worker.returncode:
                 trace.flush()
                 errors.flush()
-                raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED") from provider_limits.check(
+                raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED") from engine.limit(
                     worker.returncode, directory / "trace.jsonl", directory / "stderr.log", command=arguments)
-            openai_auth.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
+            engine.succeeded(arguments)   # E0.T8 AK5: a call that worked ends a billing-wait streak
         finally:
+            if paced is not None:
+                paced.release()
+            if arguments is not None:
+                engine.run_ended(arguments)   # U1 4: Antigravity's per-run MCP config goes (N3e: Popen failed too)
             if worker is not None:
                 portable.kill_tree(worker.pid)
                 worker.wait(timeout=5)
@@ -267,7 +276,39 @@ def _key_or_none(link):
         return None
 
 
-def normalize(request, result, trace, observed_at, source):
+def completed_items(trace, engine=None):
+    """The completed steps of a session's trace as Codex trace items (dicts with type, id, server, tool,
+    arguments, status, error, result), read by `engine` (engines.for_run of its folder; None: Codex).
+    A Codex trace's items are its own, read as before. A Claude trace (U1 3e) is read by its stateful
+    reader: an MCP call is an mcp_tool_call item, a built-in tool (Bash, WebSearch, WebFetch or any
+    other) a command_execution item, and a tool outside the run's list (FORBIDDEN_TOOL) or a browser
+    server that did not start raises HISTORY_UNAUTHORIZED_TOOL_TRACE."""
+    if engine is None or not engine.judged_by_stream:
+        for line in trace.splitlines():
+            event = json.loads(line)
+            item = event.get("item", {})
+            if event.get("type") != "item.completed":
+                continue
+            yield item
+        return
+    reader = engine.trace_reader()
+    for line in trace.splitlines():
+        if not line.strip():
+            continue
+        for event in reader.feed(line):
+            if event.kind == "error" and event.raw_kind in engines.ClaudeEngine.LIVE_STOPS:
+                raise ValueError("HISTORY_UNAUTHORIZED_TOOL_TRACE")
+            if event.phase != "completed" or event.call is None:
+                continue
+            call = event.call
+            if event.kind != "tool":
+                yield {"type": "command_execution", "id": call.id}
+                continue
+            yield {"type": "mcp_tool_call", "id": call.id, "server": call.server, "tool": call.tool,
+                   "arguments": call.args, "status": call.status, "error": call.error, "result": call.result}
+
+
+def normalize(request, result, trace, observed_at, source, engine=None):
     if (set(result) != set(schema()["required"]) or result["version"] != VERSION
             or result["source_sha256"] != digest(request)
             or result["outcome"] not in {"CLEAR", "PRIOR", "PENDING", "UNKNOWN"}):
@@ -275,11 +316,7 @@ def normalize(request, result, trace, observed_at, source):
     observations = {}
     tool_calls = []
     calls = 0
-    for line in trace.splitlines():
-        event = json.loads(line)
-        item = event.get("item", {})
-        if event.get("type") != "item.completed":
-            continue
+    for item in completed_items(trace, engine):
         if item.get("type") in {"command_execution", "web_search", "web_search_call"}:
             raise ValueError("HISTORY_UNAUTHORIZED_TOOL_TRACE")
         if item.get("type") != "mcp_tool_call":
@@ -565,12 +602,10 @@ def _relative_age_upper_bound(value, start, end):
     return bound
 
 
-def _observed_texts(trace):
+def _observed_texts(trace, engine=None):
     texts = {}
-    for line in trace.splitlines():
-        event = json.loads(line)
-        item = event.get("item", {})
-        if (event.get("type") == "item.completed" and item.get("type") == "mcp_tool_call"
+    for item in completed_items(trace, engine):
+        if (item.get("type") == "mcp_tool_call"
                 and item.get("status") == "completed" and not item.get("error")
                 and isinstance(item.get("result"), dict) and not item["result"].get("isError")):
             texts[item.get("id")] = "\n".join(block["text"] for block in item["result"].get("content", [])
@@ -588,7 +623,7 @@ def _verifiable(entry, texts):
     return isinstance(reference, str) and entry["quote"] in texts.get(reference, "")
 
 
-def normalize_inactivity(request, result, trace, observed_at, source):
+def normalize_inactivity(request, result, trace, observed_at, source, engine=None):
     """Validate an inactivity review, keeping every independently verified part.
 
     One missing or ambiguous quote no longer discards the whole result: that
@@ -608,7 +643,7 @@ def normalize_inactivity(request, result, trace, observed_at, source):
     original = result["evidence"]
     if not isinstance(original, list) or any(not isinstance(entry, dict) or entry.get("kind") not in INACTIVITY_KINDS for entry in original):
         raise ValueError("BROWSER_HISTORY_INACTIVITY_EVIDENCE_INVALID")
-    texts = _observed_texts(trace)
+    texts = _observed_texts(trace, engine)
     rejected, positions, evidence = [], {}, []
     for index, entry in enumerate(original):
         if _verifiable(entry, texts):
@@ -760,7 +795,8 @@ class Collector:
         result = json.loads(output, object_pairs_hook=reply_worker._unique_object)
         source = "browser-history:" + digest([digest(request), hashlib.sha256(trace).hexdigest()])
         normalizer = normalize_inactivity if inactivity else normalize
-        return normalizer(request, result, trace, dt.datetime.now(dt.timezone.utc).isoformat(), source)
+        return normalizer(request, result, trace, dt.datetime.now(dt.timezone.utc).isoformat(), source,
+                          engine=engines.for_run(directory))   # the engine that wrote the trace (U1 3e)
 
 
 def main():

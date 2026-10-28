@@ -1,0 +1,11 @@
+{# Settings > Connections > the AI engine (U1 3g): the choice, then the chosen engine's own part; swapped whole on a switch. #}
+{% from "engine_macros.html" import engine_choice %}
+<div id="connection-ai"{% if oob %} hx-swap-oob="true"{% endif %}>
+<div class="connection" id="connection-engine">
+  <h3>AI engine</h3>
+  {{ engine_choice("/settings/engine", "#connection-ai", x.engine, x.engine_options, x.antigravity_risk) }}
+</div>
+{% if x.engine == "claude" %}{% with oob = False %}{% include "settings_claude.html" %}{% endwith %}
+{% elif x.engine == "antigravity" %}{% with oob = False %}{% include "settings_antigravity.html" %}{% endwith %}
+{% elif x.engine == "codex" %}{% with oob = False %}{% include "settings_codex.html" %}{% endwith %}{% endif %}
+</div>

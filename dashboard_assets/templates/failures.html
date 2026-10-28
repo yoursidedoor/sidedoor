@@ -89,6 +89,7 @@
   {% elif not s.unavailable %}
   <p class="muted">Nothing failed here.</p>
   {% endif %}
+  {% if s.info %}<ul class="fail-list fail-calm-list">{% for f in s.info %}{{ failure(f, v) }}{% endfor %}</ul>{% endif %}
 </section>
 {% endfor %}
 {% if not (v.sections | selectattr("key", "equalto", "scheduler") | list) %}
@@ -98,6 +99,14 @@
 </section>
 {% endif %}
 {% endif %}
+
+{% for s in v.info_sections %}
+<section id="{{ s.key }}" class="fail-section" aria-labelledby="{{ s.key }}-title">
+  <h2 id="{{ s.key }}-title">{{ s.title }}</h2>
+  <p class="muted">Nothing failed here.</p>
+  <ul class="fail-list fail-calm-list">{% for f in s.info %}{{ failure(f, v) }}{% endfor %}</ul>
+</section>
+{% endfor %}
 
 <section id="checks" class="fail-section" aria-labelledby="checks-title">
   <h2 id="checks-title">Checks</h2>

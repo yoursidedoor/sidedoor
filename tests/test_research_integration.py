@@ -371,18 +371,40 @@ class ResearchIntegrationTests(unittest.TestCase):
         self.assertEqual(json.loads(legacy[2].rsplit("\n\nDATA:\n", 1)[1])["discovery_evidence"], [])
         self.process.assert_not_called()
 
-    def test_research_inputs_rejects_foreign_industry_discovery_before_reservations(self):
+    def test_research_inputs_retry_after_a_cut_off_covers_only_companies_not_done(self):
+        # R1 (owner, 2026-10-27, "3: a"): the retry of a cut-off session covers only the companies not yet done.
+        done = {"company": "Done Fixture", "industry": "AI", "source": "https://fixture-discovery.org/companies",
+                "observed_at": NOW, "excerpt": "Done Fixture builds software.", "excerpt_names_company": True}
+        left = dict(done, company="Left Fixture", excerpt="Left Fixture builds software.")
+        discovery = {"discovery_status": "COMPLETE", "summary": "Two companies", "companies": [done, left], "blockers": []}
+        arguments = (self.root, self.config, self.database, self.pipeline, {}, self.root / "unused.json")
+        names = ["Done Fixture", "Left Fixture"]
+        plan, *_ = orchestrator.research_inputs(*arguments, companies=names, industry="AI", discovery=discovery)
+        self.assertEqual([item["company"] for item in plan["assignments"]], names)
+        key = research_workflow.canonical(self.database, "company", "Done Fixture")
+        plan, plan_id, prompt, command = orchestrator.research_inputs(
+            *arguments, companies=names, industry="AI", discovery=discovery, done_companies=[key])
+        context = json.loads(prompt.rsplit("\n\nDATA:\n", 1)[1])
+        self.assertEqual([item["company"] for item in plan["assignments"]], ["Left Fixture"])
+        self.assertEqual(plan["assignments_already_saved"], ["Done Fixture"])
+        self.assertEqual(context["discovery_evidence"], [left])
+        self.assertEqual([item["company"] for item in context["research_plan"]["assignments"]], ["Left Fixture"])
+        # Review R1 S9: a later run the same day, with no cache, still skips the company recorded as done.
+        research_workflow.record_saved_companies(self.database, plan_id, [key], NOW)
+        plan, *_ = orchestrator.research_inputs(*arguments, companies=names, industry="AI", discovery=discovery)
+        self.assertEqual([item["company"] for item in plan["assignments"]], ["Left Fixture"])
+
+    def test_research_inputs_drops_only_the_foreign_industry_discovery_entry(self):
         own = {"company": "Fixture", "industry": "AI", "source": "https://fixture-discovery.org/companies",
                "observed_at": NOW, "excerpt": "Fixture builds procurement software.", "excerpt_names_company": True}
         foreign = dict(own, company="Energy Fixture", industry="Energy", excerpt="Energy Fixture builds batteries.")
         discovery = {"discovery_status": "COMPLETE", "summary": "Mixed industry evidence",
                      "companies": [own, foreign], "blockers": []}
-        changes = self.database.total_changes
-        with self.assertRaisesRegex(ValueError, "target industry"):
-            orchestrator.research_inputs(self.root, self.config, self.database, self.pipeline, {},
-                                         self.root / "unused.json", companies=["Fixture"], industry="AI",
-                                         discovery=discovery)
-        self.assertEqual(self.database.total_changes, changes)
+        # Owner, 2026-10-27: one bad entry no longer rejects the whole set; only it is left out.
+        plan, plan_id, prompt, command = orchestrator.research_inputs(
+            self.root, self.config, self.database, self.pipeline, {}, self.root / "unused.json",
+            companies=["Fixture"], industry="AI", discovery=discovery)
+        self.assertEqual(json.loads(prompt.rsplit("\n\nDATA:\n", 1)[1])["discovery_evidence"], [own])
         self.process.assert_not_called()
 
     def test_research_inputs_rejects_missing_or_future_dated_discovery_evidence(self):
@@ -400,8 +422,8 @@ class ResearchIntegrationTests(unittest.TestCase):
             *arguments, companies=["Fixture"], industry="AI", discovery=discovery)
         self.assertEqual(json.loads(prompt.rsplit("\n\nDATA:\n", 1)[1])["discovery_evidence"], [record],
                          "A page read days ago is still a real observation and must be reused")
-        record["observed_at"] = "2026-09-30T16:00:00+00:00"
-        with self.assertRaisesRegex(ValueError, "future-dated"):
+        record["observed_at"] = "2026-09-30T16:00:00+00:00"   # dropped, so nothing vouches for Fixture
+        with self.assertRaisesRegex(ValueError, "assignment lacks discovery evidence"):
             orchestrator.research_inputs(*arguments, companies=["Fixture"], industry="AI", discovery=discovery)
         self.process.assert_not_called()
 

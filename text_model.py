@@ -15,8 +15,8 @@ in the user's Sidedoor home while one is left), or `key_file` when set.
 `complete` (owner, 2026-10-13) is the direct alternative: one OpenRouter chat-completions call
 with a chosen reasoning effort and a bounded max_tokens. Through codex the reasoning effort did
 not reach the model, and codex asked for up to 131072 tokens, which OpenRouter refuses with 402
-once credits run low. The posting judge and the outreach send judge use it; other workers may
-adopt it.
+once credits run low. Every text worker uses it (2026-10-27: the reply, follow-up and outreach
+workers too, through reply_worker.execute_text); `command` remains for the research recovery run.
 """
 
 import json
@@ -138,11 +138,42 @@ def _post(url, data, headers, timeout):
         return error.code, error.read(1 << 16)
 
 
+SLOT_WAIT_SECONDS = 300   # the longest a direct call waits for an "openrouter" pacing slot
+
+
 def complete(config, prompt, *, system=None, effort="low", max_tokens=4000, timeout=60, transport=None,
-             response_format=None, provider=None, api_key=None, content_limit=CONTENT_LIMIT):
-    """`_complete`, with one model_calls row per call that reached the network (C4)."""
+             response_format=None, provider=None, api_key=None, content_limit=CONTENT_LIMIT,
+             messages=None, tools=None, tool_choice=None, worker=None, max_wait=None, wait_in_timeout=False):
+    """`_complete`, with one model_calls row per call that reached the network (C4). `worker` names
+    the row when the call is made on a worker's behalf (reply_worker.execute_text), else the caller.
+    `max_wait` caps the pacing-slot wait (default SLOT_WAIT_SECONDS); with `wait_in_timeout` the wait
+    is spent from `timeout` (the reply tool loop, whose turns share one deadline)."""
     meta = {}
-    worker = model_calls.caller()
+    worker = worker or model_calls.caller()
+    # A real call takes an "openrouter" pacing slot for its duration (owner, 2026-10-27); a key under test
+    # (`api_key`: Setup, Settings, doctor) is never held back.
+    import provider_pacing
+    waiting = time.monotonic()
+    try:
+        lease = provider_pacing.acquire("openrouter", timeout, max_wait=SLOT_WAIT_SECONDS if max_wait is None
+                                        else max_wait) if api_key is None else None
+    except provider_pacing.SlotWaitTooLong as busy:
+        # No slot within SLOT_WAIT_SECONDS: the same short wait a 429 is (2026-10-27), raised the way a 429 is.
+        import provider_limits
+        raise TextModelHTTPError(429, "PROVIDER_SLOT_WAIT_TOO_LONG") from provider_limits.slot_wait(busy)
+    if wait_in_timeout:
+        timeout -= time.monotonic() - waiting   # _complete raises TimeoutError when nothing is left
+    try:
+        return _paced(config, prompt, worker, meta, system=system, effort=effort, max_tokens=max_tokens,
+                      timeout=timeout, transport=transport, response_format=response_format, provider=provider,
+                      api_key=api_key, content_limit=content_limit, messages=messages, tools=tools,
+                      tool_choice=tool_choice)
+    finally:
+        provider_pacing.release("openrouter", lease)
+
+
+def _paced(config, prompt, worker, meta, *, system, effort, max_tokens, timeout, transport, response_format,
+           provider, api_key, content_limit, messages=None, tools=None, tool_choice=None):
     started = time.monotonic()
 
     def recorded(outcome, usage=None):
@@ -157,7 +188,8 @@ def complete(config, prompt, *, system=None, effort="low", max_tokens=4000, time
     try:
         answer = _complete(config, prompt, system=system, effort=effort, max_tokens=max_tokens, timeout=timeout,
                            transport=transport, response_format=response_format, provider=provider,
-                           api_key=api_key, content_limit=content_limit, meta=meta)
+                           api_key=api_key, content_limit=content_limit, meta=meta, messages=messages, tools=tools,
+                           tool_choice=tool_choice)
     except TimeoutError:
         recorded("timeout")
         raise
@@ -169,6 +201,10 @@ def complete(config, prompt, *, system=None, effort="low", max_tokens=4000, time
             # key under test (`api_key`, Setup and doctor) records nothing.
             import provider_limits
             raise error from provider_limits.out_of_credit(str(error))
+        if str(error.status) == "429" and api_key is None:
+            # Too many requests (2026-10-27): the same short wait as a Codex 429, chained the same way.
+            import provider_limits
+            raise error from provider_limits.rate_limit(str(error), provider="openrouter")
         raise
     except TextModelResponseError:
         recorded("invalid", meta.get("usage"))
@@ -178,11 +214,15 @@ def complete(config, prompt, *, system=None, effort="low", max_tokens=4000, time
     # A call that worked ends the out-of-credit banner at once: a real call, and also a key test that
     # passed (Setup's and Settings' Save/Test, doctor --online: each is this call with `api_key`).
     provider_limits.clear(provider_limits.CREDIT_WAIT_FILE)
+    if api_key is None:
+        import provider_pacing
+        provider_pacing.succeeded("openrouter")
     return answer
 
 
 def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, timeout=60, transport=None,
-              response_format=None, provider=None, api_key=None, content_limit=CONTENT_LIMIT, meta=None):
+              response_format=None, provider=None, api_key=None, content_limit=CONTENT_LIMIT, meta=None,
+              messages=None, tools=None, tool_choice=None):
     """One chat-completions call to the configured OpenRouter model.
 
     Returns {"content", "usage": {prompt_tokens, completion_tokens, reasoning_tokens, cost},
@@ -197,6 +237,10 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
     `api_key` (optional) is used instead of the saved key (`key(config)`), so a key can be tried
     before it is saved; a refused key is a TextModelHTTPError with its status (e.g. 401).
     `content_limit` (optional) raises the answer's byte limit for one caller (résumé intake).
+    `messages` (optional) is the whole conversation, sent instead of `system` and `prompt`; `tools`
+    and `tool_choice` (optional) are OpenAI-style function tools, sent as given (the reply AI's
+    tool loop, 2026-10-27). An answer that calls tools may have no content: its `tool_calls` and
+    the assistant `message` itself (to send back with the tools' results) are returned.
     """
     chosen = settings(config)
     if not chosen:
@@ -204,9 +248,14 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
     if timeout <= 0:
         raise TimeoutError("Text model deadline exhausted")
     secret = api_key if api_key is not None else key(config)
-    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+    if messages is None:
+        messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
     body = {"model": chosen["model"], "messages": messages, "reasoning": {"effort": effort},
             "max_tokens": max_tokens, "usage": {"include": True}}
+    if tools:
+        body["tools"] = tools
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
     if response_format is not None:
         body["response_format"] = response_format
     routing = provider if provider is not None else chosen.get("provider")
@@ -247,7 +296,11 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
         raise TextModelHTTPError(code if code is not None else status, _short(json.dumps(error), secret))
     message = choice.get("message") if isinstance(choice, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str) or not content.strip():
+    tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    tool_calls = [call for call in tool_calls if isinstance(call, dict)] if isinstance(tool_calls, list) else []
+    if tool_calls and tools:
+        content = content if isinstance(content, str) else ""
+    elif not isinstance(content, str) or not content.strip():
         error = TextModelResponseError("no content (finish_reason %s)" % (choice or {}).get("finish_reason"))
         error.finish_reason = (choice or {}).get("finish_reason")
         raise error
@@ -257,9 +310,12 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
         raise error
     usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
     details = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
-    return {"content": content, "model": answer.get("model"), "finish_reason": choice.get("finish_reason"),
+    result = {"content": content, "model": answer.get("model"), "finish_reason": choice.get("finish_reason"),
             "usage": {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"),
                       "reasoning_tokens": details.get("reasoning_tokens"), "cost": usage.get("cost")}}
+    if tools:
+        result.update(tool_calls=tool_calls if tool_calls else [], message=message)
+    return result
 
 
 def json_object(content):

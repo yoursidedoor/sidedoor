@@ -1014,6 +1014,24 @@ class UnipileReadAdapter:
                 "decoded_conversations": decoded_conversations, "unresolved": unresolved}
 
 
+def _note_deferred(event):
+    """A Unipile INVITE initial_sent sent without its note (sequence.note_deferred)."""
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    return event.get("source") == "unipile" and event.get("purpose") == "INVITE" and raw.get("note_deferred") is True
+
+
+def _deferred_note_done(database, identity):
+    """A deferred note's FIRST_MESSAGE that was rejected or refused and marked done
+    (sequence._settle_refused)."""
+    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outreach_actions'").fetchone():
+        return False
+    identities = sorted(identity_keys(database, identity))
+    placeholders = ",".join("?" for unused in identities)
+    return database.execute("SELECT 1 FROM outreach_actions WHERE identity IN (" + placeholders + ")"
+                            " AND json_extract(payload,'$.source.kind')='deferred_note'"
+                            " AND json_extract(result,'$.deferred_note_done') IS NOT NULL", identities).fetchone() is not None
+
+
 def next_action(database, profile, now=None, recipient="", campaign_id=None):
     """Plan only. Weekdays exclude weekends; no holiday calendar is assumed.
 
@@ -1039,6 +1057,21 @@ def next_action(database, profile, now=None, recipient="", campaign_id=None):
     follows = [event for event in events if event["kind"] == "followup_sent"]
     if len(follows) >= 2:
         return {"state": "BLOCKED", "blocker": "FOLLOWUP_LIMIT"}
+    if initials and _note_deferred(initials[0]):
+        # Not Premium (owner, 2026-10-27): the invitation went without its note, and the note is the
+        # first message once they accept (sequence.queue_deferred_notes). The follow-up clock starts
+        # when that message was sent, not at the invitation.
+        notes = [event for event in initials[1:] if event.get("purpose") == "FIRST_MESSAGE"]
+        if not notes:
+            accepts = [event for event in events if event["kind"] == "accepted" and event.get("verified") is True]
+            if not accepts:
+                return {"state": "BLOCKED", "purpose": "FIRST_MESSAGE", "blocker": "NOTE_WAITS_FOR_ACCEPTANCE"}
+            if not _deferred_note_done(database, identity):
+                return {"state": "DUE", "purpose": "FIRST_MESSAGE", "due_at": timestamp(accepts[0]["occurred_at"]).isoformat(),
+                        "expires_at": None, "blocker": None, "deferred_note": True}
+            # The note was rejected or refused (owner pick P3): done, never sent; the clock starts at the acceptance.
+            notes = [dict(initials[0], occurred_at=accepts[0]["occurred_at"])]
+        initials = notes
     if not initials:
         accepts = [event for event in events if event["kind"] == "accepted"]
         if not accepts:

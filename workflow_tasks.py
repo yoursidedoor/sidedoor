@@ -472,7 +472,8 @@ def refund_compute(database, action_id, started_at, completed_at, now, reason):
        idempotent: a replay credits nothing further.
     4. CLEAN COMPLETION, WITH TWO MEASURED EXCEPTIONS. The caller decides. A clean completion
        refunds its tail; so does a committed browser session's failure (owner, 2026-09-29) and a
-       contact-finder run that started and returned a failure (owner, 2026-10-22, CM1 b). Every
+       contact-finder run that started and returned a failure (owner, 2026-10-22, CM1 b), and a
+       failed follow-up writer attempt (owner, 2026-10-27, D4 a). Every
        other failure keeps its whole charge (AGENTS.md: "other workers' failed attempts keep
        their charge"), as does an interrupted, killed or uncertain outcome.
 

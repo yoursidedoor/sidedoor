@@ -33,6 +33,17 @@ its command) whose TERMINAL error names a 402 with "Payment Required" or credits
 (resume after BACKOFF_SECONDS). The direct call keeps raising its TextModelHTTPError, chained to the
 wait (`raise error from limit`), so `wait_of` finds it through every caller's wrapping.
 
+Too many requests (owner, 2026-10-27; on 2026-10-26 a research discovery session ended "ERROR: exceeded
+retry limit, last status: 429 Too Many Requests" and its industry failed for the day): a Codex call signed in
+with ChatGPT or pointed at OpenRouter whose TERMINAL error names an HTTP 429 status is the same capacity wait
+with kind RATE_LIMITED, but with a short retry: the provider's stated retry time when it gives one, else
+30 s, 60 s, 120 s, 240 s, capped at 300 s, by the provider's 429 streak (`provider_pacing.rate_limited`,
+which also slows new session starts for that provider). It spends no try and shows no banner: the
+provider asked Sidedoor to slow down and the work resumes by itself within minutes. The same holds for a
+Codex call to OpenAI with the user's API key whose terminal error is a rate limit (openai_auth.billing_kind
+RATE_LIMIT: no 1 h backoff, no API wait streak or day-long hold any more; owner 2026-10-27) and for a
+direct OpenRouter call refused with HTTP 429 (`text_model.complete`, key "openrouter").
+
 Banners (dashboard.layout, `banners`): the latest ChatGPT plan usage-limit wait (CHATGPT_WAIT_FILE)
 until its reset passes or a later Codex call to OpenAI succeeds, and the latest OpenRouter credit wait
 (CREDIT_WAIT_FILE) until a later OpenRouter call (direct or through Codex) succeeds. Both files are
@@ -63,9 +74,44 @@ _RESET = re.compile(r"try again at (?P<month>[A-Z][a-z]{2}) (?P<day>\d{1,2})(?:s
 
 
 OUT_OF_CREDIT = "openrouter_out_of_credit"
+RATE_LIMITED = "rate_limited"                # HTTP 429 Too Many Requests: a short wait (2026-10-27)
+_TOO_MANY = re.compile(r"(?:\bstatus:?\s*|\bhttp\s*|\"status\"\s*:\s*|\"code\"\s*:\s*)429\b|\b429 too many requests\b",
+                       re.IGNORECASE)
+_RETRY_IN = re.compile(r"(?:try again|retry) (?:in|after) (?P<amount>\d+(?:\.\d+)?) ?(?P<unit>ms|s|sec|secs|seconds?|m|min|mins|minutes?)\b",
+                       re.IGNORECASE)
 CHATGPT_WAIT_FILE = "chatgpt-usage-wait.json"
 CODEX_NOT_FOUND = "codex_not_found"          # setup_steps.with_codex found no usable Codex (2026-10-23)
 CODEX_WAIT_FILE = "codex-not-found.json"
+CLAUDE_NOT_FOUND = "claude_not_found"        # setup_steps.with_claude found no usable Claude (U1 3c)
+CLAUDE_SIGNED_OUT = "claude_signed_out"      # Claude is not signed in, or refused its sign-in (401) (U1 3c)
+CLAUDE_KEY_REFUSED = "claude_key_refused"    # API-key mode: Anthropic refused the saved key (401) (U1 3c)
+# U1 3d (review C4): each Claude wait has its own file, written by `noted` and removed once it is fixed
+# (Claude found again: setup_steps.with_claude; a sign-in probe that says signed in, or a Claude run that
+# worked: `claude_fixed`).
+CLAUDE_WAIT_FILES = {CLAUDE_NOT_FOUND: "claude-not-found.json", CLAUDE_SIGNED_OUT: "claude-signed-out.json",
+                     CLAUDE_KEY_REFUSED: "claude-key-refused.json"}
+# (words in Setup, words once Setup is finished, Overview > Health's words) per Claude wait, most urgent first.
+CLAUDE_WORDS = {
+    CLAUDE_NOT_FOUND: ("Sidedoor can't find Claude. Open Setup to find it again.",
+                       "Sidedoor can't find Claude. Open Settings to find it again.", "Can't find Claude"),
+    CLAUDE_KEY_REFUSED: ("Anthropic refused your API key. Sidedoor's AI work is paused until you add a key that works.",
+                         "Anthropic refused your API key. Sidedoor's AI work is paused until you add a key that works.",
+                         "Anthropic refused your key"),
+    CLAUDE_SIGNED_OUT: ("Claude is signed out. Sidedoor's AI work is paused until you sign in to Claude again.",
+                        "Claude is signed out. Sidedoor's AI work is paused until you sign in to Claude again.",
+                        "Claude is signed out"),
+}
+ANTIGRAVITY_NOT_FOUND = "antigravity_not_found"    # setup_steps.with_antigravity found no usable agy (U1 4)
+ANTIGRAVITY_SIGNED_OUT = "antigravity_signed_out"  # `agy models` or a run says agy is not signed in (U1 4)
+ANTIGRAVITY_WAIT_FILES = {ANTIGRAVITY_NOT_FOUND: "antigravity-not-found.json",
+                          ANTIGRAVITY_SIGNED_OUT: "antigravity-signed-out.json"}
+ANTIGRAVITY_WORDS = {
+    ANTIGRAVITY_NOT_FOUND: ("Sidedoor can't find Antigravity. Open Setup to find it again.",
+                            "Sidedoor can't find Antigravity. Open Settings to find it again.", "Can't find Antigravity"),
+    ANTIGRAVITY_SIGNED_OUT: ("Antigravity is signed out. Sidedoor's AI work is paused until you sign in to Antigravity again.",
+                             "Antigravity is signed out. Sidedoor's AI work is paused until you sign in to Antigravity again.",
+                             "Antigravity is signed out"),
+}
 CODEX_WORDS = "Sidedoor can't find Codex. Open Setup to find it again."
 CODEX_WORDS_FINISHED = "Sidedoor can't find Codex. Open Settings to find it again."
 CREDIT_WAIT_FILE = "openrouter-credit-wait.json"
@@ -80,7 +126,7 @@ class ProviderUsageLimit(RuntimeError):
     code = CODE
     kind = None   # E0.T8: None for the ChatGPT plan limit; openai_auth.OUT_OF_CREDIT/RATE_LIMIT/KEY_REFUSED
 
-    def __init__(self, message, now=None, kind=None):
+    def __init__(self, message, now=None, kind=None, delay=None, reset_at=None):
         now = _utc(now)
         if kind is not None:
             import openai_auth
@@ -88,10 +134,14 @@ class ProviderUsageLimit(RuntimeError):
         message = str(message)
         self.message = message[:500]
         self.observed_at = now.isoformat()
-        stated = reset_time(message)
+        # The reset the engine reported (engines.Engine.reset_at, an aware datetime), else the one Codex's
+        # usage-limit words state.
+        stated = _utc(reset_at) if reset_at is not None else reset_time(message)
         self.stated_reset = stated.isoformat() if stated else None
         if stated is not None and now < stated <= now + MAX_WAIT:
             self.resume_at = stated
+        elif delay is not None:   # RATE_LIMITED: the short retry (`rate_limit`)
+            self.resume_at = now + dt.timedelta(seconds=delay)
         elif kind == "api_key_refused":
             self.resume_at = now + dt.timedelta(seconds=KEY_REFUSED_SECONDS)
         else:
@@ -180,6 +230,47 @@ def match_in(text, api=False):
     return (terminal, kind) if kind else None
 
 
+def too_many_requests(message):
+    """True when an error names an HTTP 429 status ("last status: 429 Too Many Requests", "HTTP 429")."""
+    return isinstance(message, str) and bool(_TOO_MANY.search(message))
+
+
+def stated_retry_seconds(message, now=None):
+    """The provider's stated retry time as seconds from `now` ("try again in 20s", "retry after 2 minutes",
+    or an absolute "try again at ..."), else None."""
+    if not isinstance(message, str):
+        return None
+    match = _RETRY_IN.search(message)
+    if match:
+        amount, unit = float(match["amount"]), match["unit"].lower()
+        return amount / 1000 if unit == "ms" else amount * 60 if unit.startswith("m") else amount
+    stated = reset_time(message)
+    if stated is not None:
+        seconds = (stated - _utc(now)).total_seconds()
+        if 0 < seconds <= MAX_WAIT.total_seconds():
+            return seconds
+    return None
+
+
+def rate_limit(message, now=None, command=None, provider=None):
+    """The short wait for a 429 from the provider behind `command` (or the pacing key `provider`), recorded
+    with the pacer."""
+    import provider_pacing
+    stated = stated_retry_seconds(message, now)
+    delay = provider_pacing.rate_limited(provider or provider_pacing.provider_of(command), stated)
+    return ProviderUsageLimit(message, now, kind=RATE_LIMITED, delay=delay)
+
+
+def slot_wait(busy, now=None):
+    """The short rate-limit wait for a session that found no pacing slot within its allowed wait
+    (provider_pacing.SlotWaitTooLong): resume when the pacer expects a slot, at least RETRY 30 s and at most
+    300 s away. Not a 429, so the provider's streak is not raised."""
+    import provider_pacing
+    delay = min(max(busy.left, provider_pacing.RETRY_SECONDS), provider_pacing.MAX_RETRY_SECONDS)
+    return ProviderUsageLimit("PROVIDER_SLOT_WAIT_TOO_LONG: Sidedoor is pacing its AI sessions", now,
+                              kind=RATE_LIMITED, delay=delay)
+
+
 def credit_refusal(message):
     """True when an error names OpenRouter's out-of-credit refusal: a 402 beside "Payment Required"
     or "credit" (e.g. "402 Payment Required: This request requires more credits ...")."""
@@ -251,11 +342,20 @@ def _classify(command, now, texts):
                 return noted(ProviderUsageLimit(plan, now))
             if routed and credit_refusal(terminal):   # Codex pointed at OpenRouter, out of credit
                 return noted(ProviderUsageLimit(terminal, now, kind=OUT_OF_CREDIT))
+            if too_many_requests(terminal):   # 429: slow down and retry shortly (2026-10-27)
+                return rate_limit(terminal, now, command)
             continue
         found = match_in(text, True)
+        if found and found[1] == _api_rate_limit():   # a 429 with the API key: the short wait (2026-10-27)
+            return rate_limit(found[0], now, command)
         if found:
             return _limit(found, now)
     return None
+
+
+def _api_rate_limit():
+    import openai_auth
+    return openai_auth.RATE_LIMIT
 
 
 def wait_of(error, depth=8):
@@ -330,7 +430,8 @@ def _home(home=None):
 def noted(limit, home=None):
     """Record `limit` for the banner when it is the ChatGPT plan limit (kind None) or OpenRouter out of
     credit; returns `limit`. Times only, never the provider's text. Best effort."""
-    name = {None: CHATGPT_WAIT_FILE, OUT_OF_CREDIT: CREDIT_WAIT_FILE, CODEX_NOT_FOUND: CODEX_WAIT_FILE}.get(limit.kind)
+    name = {None: CHATGPT_WAIT_FILE, OUT_OF_CREDIT: CREDIT_WAIT_FILE, CODEX_NOT_FOUND: CODEX_WAIT_FILE,
+            **CLAUDE_WAIT_FILES, **ANTIGRAVITY_WAIT_FILES}.get(limit.kind)
     if name is None:
         return limit
     try:
@@ -347,6 +448,12 @@ def out_of_credit(message, now=None, home=None):
     return noted(ProviderUsageLimit(message, now, kind=OUT_OF_CREDIT), home)
 
 
+def claude_fixed(home=None, kinds=(CLAUDE_SIGNED_OUT, CLAUDE_KEY_REFUSED)):
+    """Claude's sign-in works again (a probe said signed in, or a run worked): those waits end."""
+    for kind in kinds:
+        clear(CLAUDE_WAIT_FILES[kind], home)
+
+
 def clear(name, home=None):
     try:
         (_home(home) / name).unlink(missing_ok=True)
@@ -355,7 +462,13 @@ def clear(name, home=None):
 
 
 def succeeded(command, home=None):
-    """A Codex call exited 0: pointed at OpenRouter, the credit wait ends; otherwise the ChatGPT one."""
+    """A Codex call exited 0: pointed at OpenRouter, the credit wait ends; otherwise the ChatGPT one. The
+    provider's pacer counts one more good session (`provider_pacing.succeeded`)."""
+    try:
+        import provider_pacing
+        provider_pacing.succeeded(provider_pacing.provider_of(command))
+    except Exception:
+        pass
     clear(CREDIT_WAIT_FILE if _openrouter(command) else CHATGPT_WAIT_FILE, home)
 
 
@@ -391,18 +504,43 @@ def codex_fix(finished):
     return CODEX_WORDS, "Open Setup", "/setup#step-6"
 
 
+def claude_fix(kind, finished):
+    """(words, the button's label and link) for a Claude wait: always the Claude section of Settings
+    (U1 3g, R4), during Setup too, so the words name Settings."""
+    return CLAUDE_WORDS[kind][1], "Open Settings", "/settings#connection-claude"
+
+
+def antigravity_fix(kind, finished):
+    """(words, the button's label and link) for an Antigravity wait: always the Antigravity section of
+    Settings, during Setup too, as for Claude (U1 3g R4)."""
+    return ANTIGRAVITY_WORDS[kind][1], "Open Settings", "/settings#connection-antigravity"
+
+
 def out_of_credit_shown(home=None):
     """True while the OpenRouter out-of-credit banner shows."""
     return _recorded(CREDIT_WAIT_FILE, home) is not None
 
 
 def waits(home=None, now=None, finished=False):
-    """The waits in force, from the recorded wait files: {"codex_missing", "out_of_credit", "usage_limit"},
+    """The waits in force, from the recorded wait files: {"codex_missing", "claude", "out_of_credit", "usage_limit"},
     each None or {"banner": the dashboard banner, "health": Overview > Health's words for it}. The banners
     and the Health list both come from here, so they never disagree. A ChatGPT wait whose reset passed is
     over (its file is removed)."""
     now = _utc(now)
-    found = dict.fromkeys(("codex_missing", "out_of_credit", "usage_limit"))
+    found = dict.fromkeys(("codex_missing", "claude", "out_of_credit", "usage_limit"))
+    for kind in CLAUDE_WORDS:   # one Claude wait at a time, the most urgent
+        if _recorded(CLAUDE_WAIT_FILES[kind], home):
+            words, label, href = claude_fix(kind, finished)
+            found["claude"] = {"banner": {"tone": "error", "text": words, "action_label": label, "action_href": href},
+                               "health": CLAUDE_WORDS[kind][2], "kind": kind}
+            break
+    for kind in ANTIGRAVITY_WORDS:   # U1 4: one Antigravity wait at a time, the most urgent
+        if _recorded(ANTIGRAVITY_WAIT_FILES[kind], home):
+            words, label, href = antigravity_fix(kind, finished)
+            found["antigravity"] = {"banner": {"tone": "error", "text": words, "action_label": label,
+                                               "action_href": href},
+                                    "health": ANTIGRAVITY_WORDS[kind][2], "kind": kind}
+            break
     if codex_missing(home):
         words, label, href = codex_fix(finished)
         found["codex_missing"] = {"banner": {"tone": "error", "text": words, "action_label": label, "action_href": href},
@@ -427,11 +565,30 @@ def waits(home=None, now=None, finished=False):
                 "health": "Usage limit reached until %s" % until}
         elif reset is not None:
             clear(CHATGPT_WAIT_FILE, home)   # the reset passed: the wait is over
+    # U1 3g G2: only the chosen engine's waits show; the other engine's files are kept (they show again
+    # after a switch back). The OpenRouter credit wait is engine-independent.
+    chosen = chosen_engine(home)
+    if chosen != "codex":
+        found["codex_missing"] = found["usage_limit"] = None
+    if chosen != "claude":
+        found["claude"] = None
+    if chosen != "antigravity":   # U1 4: Antigravity's waits show only while it is chosen
+        found.pop("antigravity", None)
     return found
+
+
+def chosen_engine(home=None):
+    """The engine chosen in Setup or Settings (setup_steps.chosen_engine), Codex when it can't be read."""
+    try:
+        import setup_steps
+        return setup_steps.chosen_engine(setup_steps.load_state(home))
+    except Exception:
+        return "codex"
 
 
 def banners(home=None, now=None, finished=False, found=None):
     """The dashboard banners for the waits above (`waits`, or `found` when the caller already read
     them), most urgent first. Each clears by itself."""
     found = waits(home, now, finished) if found is None else found
-    return [found[name]["banner"] for name in ("codex_missing", "out_of_credit", "usage_limit") if found[name]]
+    return [found[name]["banner"] for name in ("codex_missing", "claude", "antigravity", "out_of_credit", "usage_limit")
+            if found.get(name)]

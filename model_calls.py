@@ -1,11 +1,11 @@
 """One row per model call (C4, owner-approved cost cut, 2026-10-22).
 
-`text_model.complete` (direct OpenRouter calls) and `reply_worker._execute` (codex runs of the
-text workers) each write one row to `model_calls` in the jobs' database: time, worker, job or
-person key, route, model, provider, prompt / completion / reasoning tokens, cost (when
-OpenRouter reports it, else NULL), seconds, outcome (ok / refused / invalid / timeout) and the
-generation id when present. Codex prints only its total ("tokens used\\n15,582" on stderr), so a
-codex row carries total_tokens and no cost.
+`text_model.complete` (direct OpenRouter calls; every text worker makes them, through
+`reply_worker.execute_text` since 2026-10-27) writes one row per call to `model_calls` in the jobs'
+database: time, worker, job or person key, route, model, provider, prompt / completion / reasoning
+tokens, cost (when OpenRouter reports it, else NULL), seconds, outcome (ok / refused / invalid /
+timeout) and the generation id when present. Older rows of codex text runs carry only
+total_tokens (codex printed "tokens used\\n15,582" on stderr) and no cost.
 
 The database is the one `orchestrator.connect` last opened in this process (`use`), written on a
 connection of its own with a short busy wait. Recording is best effort: a missing database or a
@@ -16,7 +16,6 @@ in-memory database) records nothing.
 import contextlib
 import contextvars
 import datetime as dt
-import re
 import sqlite3
 import sys
 
@@ -86,9 +85,9 @@ def record(route, outcome, *, worker=None, **fields):
 
 
 def codex_tokens(stderr):
-    """Codex's own total ("tokens used" then the number) from its stderr, else None."""
-    found = re.findall(r"tokens used\s*:?\s*\n?\s*([\d,]+)", stderr or "")
-    return int(found[-1].replace(",", "")) if found else None
+    """Codex's own total ("tokens used" then the number) from its stderr, else None (engines.CodexEngine.usage)."""
+    import engines
+    return engines.CODEX.usage(stderr).get("total_tokens")
 
 
 def today(database, now=None, timezone="America/Los_Angeles"):

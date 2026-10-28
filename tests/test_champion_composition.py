@@ -11,6 +11,7 @@ import conversion
 import engagement
 import pipeline_routing as routing
 import reply_worker
+import resources
 import test_pipeline_routing as pipeline_fixtures
 import test_reply_worker as worker_fixtures
 import test_reply_worker_review as review_fixtures
@@ -168,11 +169,11 @@ class ChampionLegacyMigrationTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(socket.socket, "connect", side_effect=AssertionError("No network in migration tests")))
 
-    def fixture(self, legacy=True):
+    def fixture(self, legacy=True, template="Immutable legacy fixture prompt.", schema_sha256="a" * 64, champion=True):
         worker = worker_fixtures.ReplyWorkerTests()
         self.addCleanup(worker.doCleanups)
         worker.setUp()
-        worker.config.update(conversion={"champion_handoff_enabled": True},
+        worker.config.update(conversion={"champion_handoff_enabled": champion},
                              sender_profile="https://www.linkedin.com/in/fixture-candidate")
         task_id = worker.enqueue(MESSAGE, flags={"quoted": None, "forwarded": None})
         conversion.cycle(worker.database, worker.config, pipeline_fixtures.NOW)
@@ -186,12 +187,12 @@ class ChampionLegacyMigrationTests(unittest.TestCase):
                 for field in ("role_context", "candidate_profile", "application_interview_context"):
                     item.pop(field, None)
         reply_worker.initialize(worker.database)
-        template = "Immutable legacy fixture prompt."
         saved_input = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + routing.encoded(request)
-        provenance = {"model": worker.config["model"], "executable": worker.config["codex"],
-                      "auth": "existing_chatgpt_subscription", "model_source": "configured_cli_argument",
+        # A read saved while the reply AI ran through codex (the executable, no route).
+        provenance = {"model": reply_worker.text_model.model(worker.config), "executable": worker.config["codex"],
+                      "auth": reply_worker.text_model.auth(worker.config), "model_source": "configured_cli_argument",
                       "output_version": reply_worker.VERSION, "prompt_sha256": reply_worker.sha(template),
-                      "schema_sha256": "a" * 64}
+                      "schema_sha256": schema_sha256}
         worker.database.execute("INSERT INTO reply_worker_inputs VALUES (?,?,?,?,?)",
             (task_id, reply_worker.sha(saved_input), saved_input, request["source_sha256"], routing.encoded(provenance)))
         worker.database.commit()
@@ -270,7 +271,8 @@ class ChampionLegacyMigrationTests(unittest.TestCase):
             "SELECT * FROM reply_worker_attempts WHERE task_id=?", (task_id,)))
 
     def test_disabled_feature_or_changed_model_does_not_upgrade_legacy_assets(self):
-        for change in ({"conversion": {"champion_handoff_enabled": False}}, {"model": "changed-model"}):
+        # The flag no longer gates an asset-only continuation (review B1, 2026-10-27); a model change still does.
+        for change in ({"text_model": {"model": "changed-model"}},):
             with self.subTest(change=change):
                 worker, task_id, unused_request = self.fixture()
                 worker.config.update(change)
@@ -313,6 +315,29 @@ class ChampionLegacyMigrationTests(unittest.TestCase):
         self.assertEqual("EXHAUSTED", result["items"][0]["state"])
         self.assertEqual(before, worker.database.execute("SELECT COUNT(*) FROM workflow_tasks").fetchone()[0])
         self.assertEqual([], worker.processes)
+
+    def test_a_read_saved_under_codex_continues_once_as_a_direct_call(self, champion=True):
+        # 2026-10-27: same prompt and schema, only the route changed (codex executable -> direct call).
+        schema = resources.read_text("reply-schema.json")
+        template = (resources.read_text("reply-prompt.md") + "\n" + champion_composition.INDEPENDENT_REFERRAL_INSTRUCTIONS
+                    + "\n" + reply_worker.TOOLS_OUTPUT_INSTRUCTIONS + "\n" + schema)
+        worker, task_id, unused_request = self.fixture(legacy=False, template=template,
+                                                       schema_sha256=reply_worker.sha(schema), champion=champion)
+        result = worker.run_cycle()
+        self.assertEqual("CONTEXT_REVISED", result["items"][0]["state"])
+        self.assertEqual([], worker.processes)
+        successor = result["items"][0]["context_revision_task_id"]
+        worker.run_cycle()
+        self.assertEqual("COMPLETE", worker.task(successor)["status"])
+        self.assertEqual(1, len(worker.processes))
+        provenance = worker.handoff(successor)["model_provenance"]
+        self.assertEqual((None, reply_worker.DIRECT_ROUTE), (provenance["executable"], provenance["route"]))
+        worker.run_cycle()
+        self.assertEqual(1, len(worker.processes))   # recomputed once, not again
+
+    def test_a_read_saved_under_codex_continues_with_the_champion_flag_off(self):
+        # Review B1: the route-only continuation does not depend on champion_handoff_enabled.
+        self.test_a_read_saved_under_codex_continues_once_as_a_direct_call(champion=False)
 
     def test_current_format_saved_input_is_upgraded_when_the_assets_change(self):
         # Owner, 2026-09-24: "requeue the 4". Only legacy packets used to be upgraded, so a

@@ -626,6 +626,7 @@ class SettingsPageTest(unittest.TestCase):
         linkedin = response.split('id="connection-linkedin" hx-swap-oob="true"')[1]
         self.assertIn("Connect LinkedIn</button>", linkedin)
         self.assertNotIn("Needs your license first", linkedin)
+        self.assertIn("sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.", linkedin)  # owner, 2026-10-27
 
     def test_e8t3_a_new_key_clears_the_license_pause_at_once_and_keeps_the_users(self):
         import scheduler_control

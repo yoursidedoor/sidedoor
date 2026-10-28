@@ -1,76 +1,23 @@
-"""A failed `codex exec` leaves a diagnosable record (2026-10-02).
+"""Secrets never reach a saved line (`reply_worker.redact_line`, shared with the dashboard's log view).
 
-reply_worker._execute read a failed run's stderr into memory and dropped it, so the outreach
-SUBSCRIPTION_EXECUTOR_FAILED audits of 2026-10-03/04 say only "Held". The posting-judge logs,
-which keep stderr, show OpenRouter 402 Payment Required from 2026-10-03T19:15Z on; the fake
-executor below prints those captured lines (with a URL and the key planted in them) and exits
-1, and the REAL executor path runs.
+The codex text executor whose stderr these lines came from is gone (2026-10-27: the text workers
+are direct OpenRouter calls, whose failure record is the key-free HTTP status and body); the
+line redaction stays for the logs and problem reports that still show program output.
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
-import json
-import stat
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-import outreach_agent
-import outreach_promotion as promotion
 import reply_worker
-import fake_executables
-from tests import test_outreach_composition as composition
-
-KEY = "sk-or-v1-plantedsecretvalue0123456789"
-STDERR = ("OpenAI Codex v0.155.1\nuser\nprompt text\n" + "".join("ERROR: Reconnecting... %d/5\n" % n for n in range(1, 6))
-          + ("ERROR: unexpected status 402 Payment Required: This request requires more credits, or fewer max_tokens. "
-             "You requested up to 131072 tokens, but can only afford 66659. To increase, visit "
-             "https://openrouter.ai/settings/keys?k=" + KEY + " and adjust the key's total limit\n") * 2 + "ERROR: auth header " + KEY + "\n")
-
-
-class ExecutorFailureRecordTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = Path(tempfile.mkdtemp())
-        (self.directory / "stderr.txt").write_text(STDERR)
-        (self.directory / "key").write_text(KEY + "\n")
-        codex = fake_executables.python(self.directory / "fake-codex", (
-            "import sys\nsys.stdin.read()\nsys.stderr.buffer.write(open(%r, 'rb').read())\nsys.exit(1)\n"
-            % str(self.directory / "stderr.txt")))
-        self.config = {"codex": str(codex), "model": "stub",
-                       "text_model": {"model": "z-ai/glm-5.3", "key_file": str(self.directory / "key")}}
-
-    def test_exit_code_duration_and_redacted_stderr_are_kept(self):
-        with self.assertRaises(reply_worker.Held) as raised:
-            reply_worker._execute(self.config, "prompt", "{}", 30)
-        self.assertEqual(raised.exception.code, "SUBSCRIPTION_EXECUTOR_FAILED")
-        record = reply_worker.executor_detail(raised.exception)
-        self.assertEqual(record["exit_code"], 1)
-        self.assertGreaterEqual(record["duration_seconds"], 0)
-        tail = "\n".join(record["stderr_tail"])
-        self.assertIn("402 Payment Required", tail)
-        self.assertNotIn(KEY, json.dumps(record))
-        self.assertNotIn("openrouter.ai", tail)
-        self.assertNotIn("prompt text", tail)  # only the error lines are kept
-        self.assertLessEqual(len(record["stderr_tail"]), 8)
-
-    def test_composition_failure_audit_carries_the_record(self):
-        fixture = composition.CompositionTests("test_a_passed_deadline_never_ends_note_writing")
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        with self.assertRaises(reply_worker.Held):
-            outreach_agent.compose_draft(promotion.ROOT, fixture.database, self.config, fixture.scaffold(),
-                                         reply_worker._execute, composition.NOW)
-        failure = json.loads(fixture.database.execute(
-            "SELECT record FROM outreach_agent_audit WHERE kind='FAILURE'").fetchone()[0])
-        self.assertEqual(failure["executor"]["exit_code"], 1)
-        self.assertIn("402 Payment Required", "\n".join(failure["executor"]["stderr_tail"]))
 
 
 class RedactionTests(unittest.TestCase):
     SECRET = "sk-or-v1-0123456789abcdefSECRET"
 
-    def lines(self, text, prompt=None):
-        return reply_worker._redacted_lines(text, [self.SECRET], prompt)
+    def lines(self, text):
+        fragments = reply_worker.secret_fragments([self.SECRET])
+        kept = (reply_worker.redact_line(line, [self.SECRET], fragments) for line in text.splitlines())
+        return [line for line in kept if line is not None]
 
     def test_authorization_headers_in_any_form(self):
         tail = "\n".join(self.lines("ERROR: Authorization: Bearer abcdefghijkl\nERROR: AUTHORIZATION: basic dXNlcjpwYXNz\n"
@@ -98,30 +45,6 @@ class RedactionTests(unittest.TestCase):
         for value in ("tok1", "tok2", "tok3", "tok4", "tok5", "tok6", jwt, "eyJ"):
             self.assertNotIn(value, tail)
         self.assertIn("next", tail)
-
-    def test_a_partial_first_line_of_the_bounded_tail_is_dropped(self):
-        # 70 KiB of one echoed prompt line with no newline in the tail window: cut mid-line.
-        stderr = "OpenAI Codex v0.155.1\nuser\n" + "secretprompt " * 6000 + "\nERROR: unexpected status 402 Payment Required\n"
-        tail = self.lines(stderr)
-        self.assertEqual(tail, ["ERROR: unexpected status 402 Payment Required"])
-        fallback = self.lines("x" * 70000 + "piece of prompt\nmodel: z-ai/glm-5.3\n")
-        self.assertEqual(fallback, ["model: z-ai/glm-5.3"])
-
-    def test_model_transcript_lines_are_not_codex_errors(self):
-        stderr = ("OpenAI Codex v0.155.1\nuser\nsome prompt\nError: the candidate wrote this\nWarning: also prompt\n"
-                  "ERROR: unexpected status 402 Payment Required: This request requires more credits\n"
-                  "codex\nERROR: the model typed this in its answer\nWarning: model prose\ntokens used\n12345\n")
-        self.assertEqual(self.lines(stderr),
-                         ["ERROR: unexpected status 402 Payment Required: This request requires more credits"])
-
-    def test_the_prompt_is_never_stored(self):
-        prompt = "Private message from Jane\nERROR: she wrote this line"
-        stderr = "OpenAI Codex v0.155.1\nmodel: z-ai/glm-5.3\nuser\nPrivate message from Jane\nERROR: she wrote this line\nmore private text\n"
-        tail = "\n".join(self.lines(stderr, prompt))
-        self.assertNotIn("Jane", tail)
-        self.assertNotIn("she wrote", tail)
-        self.assertNotIn("more private text", tail)  # after the "user" echo, in the no-ERROR fallback
-        self.assertIn("OpenAI Codex v0.155.1", tail)
 
 
 if __name__ == "__main__":

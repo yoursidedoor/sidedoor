@@ -14,9 +14,10 @@ then, for a Codex command that goes to OpenAI (not one `text_model.command` poin
   starts its MCP servers (the browser guard, reply_tools) with a filtered environment (its default
   list: HOME, PATH, LANG, TMPDIR, ... plus the server's own `env`), and no server config here names
   CODEX_API_KEY, so the key reaches codex only (tests/test_openai_auth.py checks the configs);
-- `provider_limits` classifies the terminal error of that call: insufficient_quota and a 429 are
-  the plan limit's capacity wait (no attempt spent). Owner OA2 (revised, option a): when the key
-  is refused (401), out of credit, or rate-limited past ESCALATE_HOURS of waits with no success
+- `provider_limits` classifies the terminal error of that call: insufficient_quota is the plan
+  limit's capacity wait (no attempt spent); a rate limit (429) is the short "too many requests" wait
+  (provider_limits.RATE_LIMITED, owner 2026-10-27), never recorded here. Owner OA2 (revised, option a):
+  when the key is refused (401), or out of credit past ESCALATE_HOURS of waits with no success
   between them, and `codex login status` (local, no network) reports a ChatGPT login, Sidedoor
   falls back to it: `fallback` is recorded (FALLBACK_FILE: reason and time, the audit of the
   switch), and every later call is the ChatGPT call exactly (forced ChatGPT login kept, no
@@ -436,6 +437,8 @@ def local_time(stamp):
         return stamp
 
 
+# RATE_LIMIT's entries below serve the key test (`test_key`) and a wait or hold recorded before 2026-10-27;
+# a run-time 429 is no longer recorded here (provider_limits.RATE_LIMITED).
 HELD_WORDS = {KEY_REFUSED: "OpenAI did not accept your API key and no ChatGPT sign-in works, so Sidedoor is paused "
                            "until you replace the key.",
               OUT_OF_CREDIT: "Your OpenAI API key is out of credit and no ChatGPT sign-in works, so Sidedoor is paused. "

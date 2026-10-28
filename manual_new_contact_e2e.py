@@ -430,7 +430,7 @@ def campaign_scenario(scheduled=False):
 
             with patch("orchestrator.HeyReach", return_value=fixture), \
                     patch("outreach_history_browser.Collector", return_value=fixture.collect), \
-                    patch("reply_worker._execute", side_effect=fixture.judge), \
+                    patch("reply_worker.execute_text", side_effect=fixture.judge), \
                     patch("outreach.dt.datetime", Clock), \
                     patch("orchestrator.utcnow", side_effect=lambda: fixture.now.isoformat()):
                 promoted = orchestrator.draft_promotion_cycle(fixture.database, fixture.config)

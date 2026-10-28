@@ -19,7 +19,6 @@ import user_profile
 def setup():
     fixture = ParallelResearchTests()
     fixture.setUp()
-    fixture.config["research_timeout_seconds"] = 30
     research_workflow.seed_history(fixture.database, fixture.pipeline, history_complete=True)
     fixture.database.commit()
     prior = {}
@@ -178,7 +177,10 @@ def run_scenario(mode="fresh_recovery"):
             cached["result"]["state"] = "FAILED"
             cached["result"]["summary"] = "Synthetic interrupted source investigation"
             path.write_text(json.dumps(cached))
-            fixture.clock_base += dt.timedelta(seconds=60)
+            # Past the saved deadline: each qualification launch extends it to launch + 2 x the
+            # session limit + 5 minutes, at most 2 x 3600 + 300 seconds.
+            fixture.clock_base += dt.timedelta(seconds=2 * parallel_research.SESSION_CEILING_SECONDS
+                                               + parallel_research.RETRY_MARGIN_SECONDS + 60)
             repeated = fixture.run_research("scope-expired")
             assert fixture.states(repeated)["AI"]["recovery_state"] == "ABANDONED"
             assert "deadline exhausted" in fixture.states(repeated)["AI"]["abandonment_reason"]

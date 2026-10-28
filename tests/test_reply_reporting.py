@@ -23,7 +23,7 @@ import synthetic_resume  # noqa: F401 (synthetic designated resume; the owner's 
 
 class ReplyReportingTests(unittest.TestCase):
     setUp = fixtures.ReplyWorkerTests.setUp
-    process = fixtures.ReplyWorkerTests.process
+    complete = fixtures.ReplyWorkerTests.complete
     enqueue = fixtures.ReplyWorkerTests.enqueue
     run_cycle = fixtures.ReplyWorkerTests.run_cycle
 

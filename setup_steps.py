@@ -1320,6 +1320,466 @@ def codex_wait(config, home=None):
         "CODEX_NOT_FOUND: no usable Codex was found", kind=provider_limits.CODEX_NOT_FOUND), home)
 
 
+# --- U1 phase 3c: Claude (dev-only engine, config["engine"] == "claude"; no Setup step until 3g) ----------
+
+CLAUDE_MISSING = "claude_missing"
+CLAUDE_PROBE_SECONDS = 15
+
+
+def claude_install_folders():
+    """`install_folders` plus Claude's own: the native installer's ~/.local/bin (already listed) and the
+    older local install ~/.claude/local."""
+    return install_folders() + [str(Path.home() / ".claude" / "local")]
+
+
+def claude_candidates(saved=None, search_path=None):
+    """Where Claude may be: the saved path, the PATH Sidedoor started with, then the usual install folders
+    (~/.local/bin, Homebrew, npm global, nvm, ~/.claude/local; on Windows %USERPROFILE%\\.local\\bin, npm,
+    WinGet). The launcher path is kept as found: the native installer's ~/.local/bin/claude is a symlink
+    that each auto-update points at a new version."""
+    names = ("claude.exe", "claude.cmd", "claude") if sys.platform.startswith("win") else ("claude",)
+    found = [saved] if saved else []
+    folders = claude_install_folders()
+    for name in names:
+        on_path = shutil.which(name, path=search_path)
+        if on_path:
+            found.append(on_path)
+        found += [str(Path(folder) / name) for folder in folders]
+    return list(dict.fromkeys(found))
+
+
+def find_claude(saved=None, search_path=None):
+    """The first Claude that can run, or None."""
+    return next((candidate for candidate in claude_candidates(saved, search_path) if _usable(candidate)), None)
+
+
+def with_claude(config, home=None):
+    """`config` with a usable Claude as `claude` (the saved `claude_path` first, then `config["claude"]`,
+    then `find_claude`), its folder on this process's PATH; else `config` with CLAUDE_MISSING set, so every
+    launch point stops before starting it as a wait that spends no try (`claude_wait`)."""
+    if not isinstance(config, dict):
+        return config
+    try:
+        saved = load_state(home).get("claude_path")
+    except Exception:
+        saved = None
+    path = next((candidate for candidate in (saved, config.get("claude")) if _usable(candidate)), None) or find_claude()
+    if not path:
+        return dict(config, **{CLAUDE_MISSING: True})
+    import provider_limits
+    provider_limits.clear(provider_limits.CLAUDE_WAIT_FILES[provider_limits.CLAUDE_NOT_FOUND], home)   # found: the banner ends
+    if path != saved and (_home(home) / STATE_FILE).is_file():
+        try:
+            update_state(lambda value: value.update(claude_path=path), home)
+        except Exception as error:
+            LOG.warning("found Claude not saved: %s", type(error).__name__)
+    extend_path(path)
+    return dict(config, claude=path)
+
+
+def claude_wait(config, home=None):
+    """A wait (provider_limits.ProviderUsageLimit, kind CLAUDE_NOT_FOUND) when `with_claude` found no usable
+    Claude, else None: no try spent, nothing abandoned, resumed after the backoff."""
+    if not isinstance(config, dict) or not config.get(CLAUDE_MISSING):
+        return None
+    import provider_limits
+    return provider_limits.noted(provider_limits.ProviderUsageLimit(
+        "CLAUDE_NOT_FOUND: no usable Claude was found", kind=provider_limits.CLAUDE_NOT_FOUND), home)
+
+
+def claude_api_key_mode(home=None):
+    """True when Claude runs on the Anthropic API key saved in Sidedoor (setup-state `claude_auth` ==
+    "api_key", written by 3g's Setup step), else the user's own subscription. Never raises: a state that
+    cannot be read is the subscription."""
+    try:
+        return load_state(home).get("claude_auth") == "api_key"
+    except Exception:
+        return False
+
+
+def claude_auth_status(path, environment, run=subprocess.run):
+    """`claude auth status` (no model turn) run with the job's own `environment`: {"loggedIn": bool,
+    "authMethod": str or None}, or None when it could not run or did not print its JSON. It exits 0 signed
+    in or not, so `loggedIn` is read, never the exit code. The rest of its output (the account's email and
+    organisation) is never kept or shown."""
+    try:
+        finished = run([path, "auth", "status"], env=environment, capture_output=True, text=True,
+                       timeout=CLAUDE_PROBE_SECONDS, stdin=subprocess.DEVNULL)
+        value = json.loads(finished.stdout or "")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("loggedIn"), bool):
+        return None
+    method = value.get("authMethod")
+    return {"loggedIn": value["loggedIn"], "authMethod": method if isinstance(method, str) else None}
+
+
+# --- U1 phase 4: Antigravity (config["engine"] == "antigravity") ------------------------------------------
+
+ANTIGRAVITY_MISSING = "antigravity_missing"
+ANTIGRAVITY_PROBE_SECONDS = 20
+
+
+def antigravity_install_folders():
+    """`install_folders` (~/.local/bin, Homebrew's /opt/homebrew/bin and /usr/local/bin, npm, ...) plus agy's
+    own: the Homebrew cask's Caskroom folders (newest first) and ~/.gemini/antigravity-cli/bin; on Windows the
+    per-user Programs folder."""
+    home = Path.home()
+    folders = install_folders()
+    if sys.platform.startswith("win"):
+        local = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        folders += [str(local / "Programs" / "Antigravity CLI"), str(local / "Programs" / "antigravity-cli")]
+    else:
+        for root in (Path("/opt/homebrew/Caskroom/antigravity-cli"), Path("/usr/local/Caskroom/antigravity-cli")):
+            folders += [str(folder) for folder in sorted(root.glob("*"), reverse=True)]
+    return folders + [str(home / ".gemini" / "antigravity-cli" / "bin")]
+
+
+def antigravity_candidates(saved=None, search_path=None):
+    """Where agy may be: the saved path, the PATH Sidedoor started with (none from the Dock), then every
+    install folder (`antigravity_install_folders`)."""
+    names = ("agy.exe", "agy.cmd", "agy") if sys.platform.startswith("win") else ("agy",)
+    found = [saved] if saved else []
+    folders = antigravity_install_folders()
+    for name in names:
+        on_path = shutil.which(name, path=search_path)
+        if on_path:
+            found.append(on_path)
+        found += [str(Path(folder) / name) for folder in folders]
+    return list(dict.fromkeys(found))
+
+
+def find_antigravity(saved=None, search_path=None):
+    """The first agy that can run, or None."""
+    return next((candidate for candidate in antigravity_candidates(saved, search_path) if _usable(candidate)), None)
+
+
+def with_antigravity(config, home=None):
+    """`config` with a usable agy as `antigravity` (the saved `antigravity_path` first, then
+    `config["antigravity"]`, then `find_antigravity`), saved; else `config` with ANTIGRAVITY_MISSING set, so
+    every launch point stops before starting it, as a wait that spends no try (`antigravity_wait`)."""
+    if not isinstance(config, dict):
+        return config
+    try:
+        saved = load_state(home).get("antigravity_path")
+    except Exception:
+        saved = None
+    path = next((candidate for candidate in (saved, config.get("antigravity")) if _usable(candidate)), None) \
+        or find_antigravity()
+    if not path:
+        return dict(config, **{ANTIGRAVITY_MISSING: True})
+    import provider_limits
+    provider_limits.clear(provider_limits.ANTIGRAVITY_WAIT_FILES[provider_limits.ANTIGRAVITY_NOT_FOUND], home)
+    if path != saved and (_home(home) / STATE_FILE).is_file():
+        try:
+            update_state(lambda value: value.update(antigravity_path=path), home)
+        except Exception as error:
+            LOG.warning("found Antigravity not saved: %s", type(error).__name__)
+    return dict(config, antigravity=path)
+
+
+def antigravity_wait(config, home=None):
+    """A wait (kind ANTIGRAVITY_NOT_FOUND) when `with_antigravity` found no usable agy, else None."""
+    if not isinstance(config, dict) or not config.get(ANTIGRAVITY_MISSING):
+        return None
+    import provider_limits
+    return provider_limits.noted(provider_limits.ProviderUsageLimit(
+        "ANTIGRAVITY_NOT_FOUND: no usable Antigravity was found", kind=provider_limits.ANTIGRAVITY_NOT_FOUND), home)
+
+
+def antigravity_signed_in(path, environment, run=subprocess.run):
+    """`antigravity_probe`'s sign-in answer only: True, False or None."""
+    return antigravity_probe(path, environment, run)[0]
+
+
+def antigravity_probe(path, environment, run=subprocess.run):
+    """`agy models` (lists the account's models, no model turn) with the job's own environment: True when it
+    lists a model, False when it says it is not signed in (it then prints a Google sign-in link and waits, so
+    a timeout that printed one is signed out too), None when it could not run (decides nothing); with the
+    models it listed, [(id, label)] (M2: the model choice offers them). Nothing else it prints is kept."""
+    try:
+        finished = run([path, "models"], env=environment, capture_output=True, text=True,
+                       timeout=ANTIGRAVITY_PROBE_SECONDS, stdin=subprocess.DEVNULL)
+        out, err, code = finished.stdout or "", finished.stderr or "", finished.returncode
+    except subprocess.TimeoutExpired as expired:
+        out = expired.stdout.decode(errors="replace") if isinstance(expired.stdout, bytes) else (expired.stdout or "")
+        err = expired.stderr.decode(errors="replace") if isinstance(expired.stderr, bytes) else (expired.stderr or "")
+        code = None
+    except (OSError, subprocess.SubprocessError):
+        return None, []
+    words = (out + "\n" + err).lower()
+    if any(word in words for word in ("accounts.google.com", "oauth", "not logged in", "sign in", "authentication")):
+        return False, []
+    models = []
+    for line in out.splitlines():
+        identifier, tab, label = line.partition("\t")
+        if tab and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", identifier.strip()):
+            models.append((identifier.strip(), label.strip()[:100] or identifier.strip()))
+    if code == 0 and models:
+        return True, models
+    return None, []
+
+
+def check_antigravity(home=None, run=subprocess.run):
+    """The Setup step for Antigravity (U1 4; 3g calls it): find agy (saved), probe its sign-in (`agy models`)
+    and add Sidedoor's narrow allow rules to the user's global Antigravity settings (A1, idempotent)."""
+    import engines
+    config = with_antigravity({}, home)
+    if config.get(ANTIGRAVITY_MISSING):
+        update_state(lambda value: value.pop("antigravity_path", None), home)
+        return record(home, "antigravity", "failed", "Antigravity is not installed.")
+    update_state(lambda value: value.update(antigravity_path=config["antigravity"]), home)
+    status, models = antigravity_probe(config["antigravity"], engines.ANTIGRAVITY.environment(None), run=run)
+    if models:   # M2: the models the user may pick from
+        update_state(lambda value: value.update(antigravity_models=[list(model) for model in models]), home)
+    if status is None:
+        return record(home, "antigravity", "failed", "Sidedoor couldn't check Antigravity's sign-in. Click Check again.")
+    if status is False:
+        return record(home, "antigravity", "failed", "Antigravity is installed but not signed in.")
+    try:   # Setup is where the user's own uncached servers are asked for their tools (N3a)
+        engines.ANTIGRAVITY.ensure_allow_rules(probe=True)
+    except (OSError, ValueError):
+        return record(home, "antigravity", "failed", "Sidedoor could not update Antigravity's settings file.")
+    import provider_limits
+    provider_limits.clear(provider_limits.ANTIGRAVITY_WAIT_FILES[provider_limits.ANTIGRAVITY_SIGNED_OUT], home)
+    gone = antigravity_models_in_use(load_state(home))[1]   # P3: Check says it too
+    return record(home, "antigravity", "done", " ".join(["Antigravity is installed and signed in."] + gone))
+# --- U1 3g: the engine choice (Setup step 6 and Settings > Connections) ------------------------------
+
+ENGINE_LABELS = {"codex": "Codex", "claude": "Claude", "antigravity": "Antigravity"}   # never "Claude Code"
+ENGINE_TITLES = {"codex": "Codex and ChatGPT", "claude": "Claude", "antigravity": "Antigravity"}
+ANTIGRAVITY_RISK = ("Google's terms don't allow apps like Sidedoor to run Antigravity. If you choose it, Google "
+                    "may suspend your Antigravity or Gemini CLI account.")
+CLAUDE_SUBSCRIPTION, CLAUDE_API_KEY = "subscription", "api_key"
+
+
+def engine_options():
+    """[(name, label)] the choice offers: Codex, Claude, Antigravity, each only once engines.py has it."""
+    import engines
+    known = engines.supported()
+    return [(name, label) for name, label in ENGINE_LABELS.items() if name in known]
+
+
+def chosen_engine(state):
+    """The engine chosen in Setup or Settings (setup-state `engine`), else Codex (the default)."""
+    import engines
+    value = state.get("engine") if isinstance(state, dict) else None
+    return value if value in ENGINE_LABELS and value in engines.supported() else "codex"
+
+
+def with_engine(config, home=None):
+    """`config` with the chosen engine laid over config["engine"] (config.json is bundled and read-only).
+    Nothing chosen yet: unchanged. Never raises."""
+    if not isinstance(config, dict):
+        return config
+    try:
+        state = load_state(home)
+    except Exception:
+        return config
+    # M2: the Antigravity models the user picked, laid over the same way; P3: a pick agy no longer lists gives
+    # way to the default (the one the dashboard shows).
+    used = antigravity_models_in_use(state)[0]
+    picked = {key: used[key] for key in ("antigravity_model", "antigravity_read_model")
+              if isinstance(state.get(key), str) and state[key] and state[key] == used[key]}
+    if "engine" not in state:
+        return dict(config, **picked) if picked else config
+    return dict(config, engine=chosen_engine(state), **picked)
+
+
+def choose_engine(choice, home=None):
+    """Save the engine chosen (Codex, Claude or Antigravity, when supported). Every save removes the
+    Claude wait files (R6): no stale Claude banner stays after a switch; the next Claude run that still
+    waits writes its wait again. An unknown choice changes nothing."""
+    import engines
+    if choice not in ENGINE_LABELS or choice not in engines.supported():
+        return load_state(home)
+    update_state(lambda value: value.update(engine=choice), home)
+    clear_claude_waits(home)
+    clear_antigravity_waits(home)   # U1 4
+    return load_state(home)
+
+
+def clear_claude_waits(home=None):
+    """Remove every Claude wait file (R6 on an engine save; G3 on a Claude sign-in change). A Claude run
+    that still waits writes its wait again."""
+    import provider_limits
+    for name in provider_limits.CLAUDE_WAIT_FILES.values():
+        provider_limits.clear(name, home)
+
+
+def clear_antigravity_waits(home=None):
+    """Remove every Antigravity wait file (on an engine save, as R6 for Claude). A run that still waits
+    writes its wait again."""
+    import provider_limits
+    for name in provider_limits.ANTIGRAVITY_WAIT_FILES.values():
+        provider_limits.clear(name, home)
+
+
+ANTIGRAVITY_MODEL_NOTE = ("In Sidedoor's tests, Gemini 3.8 Flash often froze while reading job pages. "
+                          "A Claude model is the safer choice.")
+
+
+ANTIGRAVITY_MODEL_GONE = "The model you picked is no longer offered by Antigravity, so Sidedoor uses %s."
+
+
+def antigravity_models_in_use(state):
+    """{"antigravity_model": id, "antigravity_read_model": id} actually used, and the notes for picks agy no
+    longer lists (P3): a saved pick missing from the latest `agy models` list falls back to the default; with
+    no list yet the saved pick stands."""
+    import engines
+    listed = {item[0]: item[1] for item in state.get("antigravity_models") or []
+              if isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)}
+    used, notes = {}, []
+    for key, default in (("antigravity_model", engines.AntigravityEngine.MAIN_MODEL),
+                         ("antigravity_read_model", engines.AntigravityEngine.READ_MODEL)):
+        saved = state.get(key) if isinstance(state.get(key), str) and state.get(key) else None
+        if saved and listed and saved not in listed:
+            notes.append(ANTIGRAVITY_MODEL_GONE % listed.get(default, default))
+            saved = None
+        used[key] = saved or default
+    return used, list(dict.fromkeys(notes))
+
+
+def antigravity_model_view(state):
+    """M2: (the models agy listed [(id, label)], the main model in use, the read model in use, the notes for
+    picks no longer offered). A model in use that agy does not list is still shown as an option (P3)."""
+    models = [tuple(item) for item in state.get("antigravity_models") or []
+              if isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)]
+    used, notes = antigravity_models_in_use(state)
+    ids = {identifier for identifier, _ in models}
+    for model in dict.fromkeys(used.values()):
+        if models and model not in ids:
+            models.append((model, model))
+    return models, used["antigravity_model"], used["antigravity_read_model"], notes
+
+
+def choose_antigravity_models(main, read, home=None):
+    """M2: save the Antigravity models picked for main work (and submit) and for reads. Only a model the last
+    `agy models` probe listed is saved; anything else changes nothing."""
+    state = load_state(home)
+    listed = {item[0] for item in state.get("antigravity_models") or [] if isinstance(item, list) and item}
+    picked = {key: value for key, value in (("antigravity_model", main), ("antigravity_read_model", read))
+              if isinstance(value, str) and value in listed}
+    if picked:
+        update_state(lambda value: value.update(picked), home)
+    return load_state(home)
+
+
+def claude_auth_view(state):
+    """The Claude sign-in the step shows: the one picked last, else the one in use."""
+    view = state.get("claude_auth_view")
+    if view in (CLAUDE_SUBSCRIPTION, CLAUDE_API_KEY):
+        return view
+    return CLAUDE_API_KEY if state.get("claude_auth") == CLAUDE_API_KEY else CLAUDE_SUBSCRIPTION
+
+
+def shown_claude_key(home=None):
+    """For display only (masked by the caller): the saved Anthropic API key, or None (also while the
+    store waits). Never logged or printed."""
+    try:
+        return credentials.get("anthropic", _home(home))
+    except OSError:
+        return None
+
+
+def check_claude(home=None, run=subprocess.run):
+    """Is Claude installed, and signed in (subscription) or given an API key? Saves the path it found.
+    The sign-in is read with `claude auth status` (no model call); nothing it prints is kept."""
+    state = load_state(home)
+    path = find_claude(state.get("claude_path"))
+    if not path:
+        update_state(lambda value: value.pop("claude_path", None), home)
+        return record(home, "claude", "failed", "Claude is not installed.")
+    update_state(lambda value: value.update(claude_path=path), home)
+    import provider_limits
+    provider_limits.clear(provider_limits.CLAUDE_WAIT_FILES[provider_limits.CLAUDE_NOT_FOUND], home)
+    extend_path(path)
+    if claude_api_key_mode(home):
+        try:
+            key = credentials.get("anthropic", _home(home))
+        except OSError:   # the keychain waits: nothing recorded
+            return load_state(home)
+        if not key:
+            return record(home, "claude", "failed", "Claude is installed. Save your Anthropic API key to finish.")
+        return record(home, "claude", "done", "Claude is installed and uses your Anthropic API key.")
+    import engines
+    status = claude_auth_status(path, engines.CLAUDE.environment(None, home=home), run)
+    if status is None:
+        return record(home, "claude", "failed", "Sidedoor couldn't check Claude's sign-in. Click Check again.")
+    if status["loggedIn"]:
+        return record(home, "claude", "done", "Claude is installed and signed in.")
+    return record(home, "claude", "failed", "Claude is installed but not signed in.")
+
+
+def choose_claude_auth(choice, home=None, run=subprocess.run):
+    """[Use my Claude subscription] / [Use an Anthropic API key]. The subscription is in use at once and
+    keeps a saved key; the API key is in use only once a key is saved."""
+    if choice not in (CLAUDE_SUBSCRIPTION, CLAUDE_API_KEY):
+        choice = CLAUDE_SUBSCRIPTION
+    clear_claude_waits(home)   # G3: a sign-in change ends the old waits
+    if choice == CLAUDE_SUBSCRIPTION:
+        update_state(lambda value: value.update(claude_auth=CLAUDE_SUBSCRIPTION, claude_auth_view=CLAUDE_SUBSCRIPTION), home)
+        return check_claude(home, run)
+    update_state(lambda value: value.update(claude_auth_view=CLAUDE_API_KEY), home)
+    try:
+        key = credentials.get("anthropic", _home(home))
+    except OSError:
+        return load_state(home)
+    if not key:
+        return record(home, "claude", "failed", "Paste your Anthropic API key and click Save.")
+    update_state(lambda value: value.update(claude_auth=CLAUDE_API_KEY), home)
+    return check_claude(home, run)
+
+
+def save_claude_key(api_key, home=None, to_file=False, run=subprocess.run):
+    """Save the Anthropic API key (kept like the other keys) and use it. No test call: Anthropic's answer
+    on the first run decides (a refused key shows the key-refused banner)."""
+    refusal = keychain_refusal(home, to_file)
+    if refusal:
+        return _refused(home, refusal)
+    api_key = (api_key or "").strip()
+    if not api_key or any(ord(character) < 33 for character in api_key):
+        return record(home, "claude", "failed", "Paste your Anthropic API key into the box first.")
+    try:
+        _save_key("anthropic", api_key, home, to_file)
+    except credentials.Unavailable:
+        return _refused(home, keychain_refusal(home) or credentials.SAVE_BROKEN)
+    except OSError:
+        return record(home, "claude", "failed", KEY_FOLDER_UNWRITABLE % _home(home))
+    update_state(lambda value: value.update(claude_auth=CLAUDE_API_KEY, claude_auth_view=CLAUDE_API_KEY), home)
+    clear_claude_waits(home)   # G3
+    return check_claude(home, run)
+
+
+def remove_claude_key(home=None, run=subprocess.run):
+    """[Remove key]: the key is deleted and the Claude subscription is used again."""
+    try:
+        credentials.delete("anthropic", _home(home))
+    except credentials.Unavailable:
+        return _refused(home, KEY_NOT_REMOVED)
+    except OSError:
+        return record(home, "claude", "failed", KEY_FOLDER_UNWRITABLE % _home(home))
+    update_state(lambda value: value.update(claude_auth=CLAUDE_SUBSCRIPTION, claude_auth_view=CLAUDE_SUBSCRIPTION), home)
+    clear_claude_waits(home)   # G3
+    return check_claude(home, run)
+
+
+def claude_done(state):
+    return state["steps"].get("claude", {}).get("status") == "done" and _usable(state.get("claude_path"))
+
+
+def antigravity_done(state):
+    return state["steps"].get("antigravity", {}).get("status") == "done" and _usable(state.get("antigravity_path"))
+
+
+def engine_done(state):
+    """Step 6 is done once the chosen engine is ready."""
+    chosen = chosen_engine(state)
+    if chosen == "antigravity":
+        return antigravity_done(state)
+    return claude_done(state) if chosen == "claude" else codex_done(state)
+
+
 def use_saved_codex(home=None):
     """At dashboard start: the saved Codex's folders on this process's PATH, so every Codex the dashboard
     starts (the email check, Settings) runs from an app opened from the Dock or Start menu. Never raises."""
@@ -1546,6 +2006,12 @@ def linkedin_status(home=None, relay_url=RELAY_URL, transport=None):
         if (waiting_since and kind != "reconnect") or (
                 statuses and all(value in unipile_port.VALID_STATUSES for value in statuses)):
             _save_sender_from(home, item)   # RL1: the sending identity, also for an install connected earlier
+            if waiting_since or saved_premium(home) is None:
+                # Premium is read when LinkedIn connects (owner, 2026-10-27), and once for an install
+                # connected before this was read. Never fails the connect (check_premium never raises).
+                account_id = item.get("id") if type(item.get("id")) in (int, str) else None
+                check_premium(unipile_port.UnipilePort(transport or unipile_port.RelayTransport(relay_url, key),
+                                                       account_id=account_id), home)
             update_state(lambda value: value.pop("linkedin_link_started_at", None), home)
             return record(home, "linkedin", "done", "LinkedIn connected: %s." % name, offer="reconnect")
         # Reconnect (E6.T0 3.3): the account stays listed throughout, so being listed is not success;
@@ -1573,6 +2039,45 @@ def linkedin_status(home=None, relay_url=RELAY_URL, transport=None):
         return record(home, "linkedin", "needs_you", "LinkedIn is not connected.", offer="connect")
     return record(home, "linkedin", "failed", "Sidedoor's LinkedIn service answered HTTP %s. Try again in a few "
                   "minutes." % status, offer="retry")
+
+
+# --- LinkedIn Premium (owner, 2026-10-27) ------------------------------------------------------
+# A free account can add a note to only a few invitations a month; Premium has no such limit. The
+# account's `premium` flag is read when LinkedIn connects (`linkedin_status`) and before every
+# invitation (`sequence._attempt`). The last value read and when are kept in setup-state.json
+# ("linkedin_premium": {"premium", "checked_at"}), beside the rest of the LinkedIn state, and shown on
+# Settings > LinkedIn. A read that fails or says nothing uses the last known value, else not Premium;
+# the check never fails or holds an invitation.
+
+PREMIUM_KEY = "linkedin_premium"
+
+
+def saved_premium(home=None):
+    """{"premium": bool, "checked_at": iso} last read, or None when it was never read."""
+    try:
+        value = load_state(home).get(PREMIUM_KEY)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) and type(value.get("premium")) is bool else None
+
+
+def check_premium(port, home=None):
+    """True / False: the account is Premium now. Reads `port.own_premium()` and saves a boolean
+    answer; any error, a missing method or a None answer uses the last saved value, else False.
+    Never raises."""
+    try:
+        read = getattr(port, "own_premium", None)
+        value = read() if read is not None else None
+    except Exception:
+        value = None
+    if type(value) is bool:
+        try:
+            update_state(lambda state: state.update({PREMIUM_KEY: {"premium": value, "checked_at": now_iso()}}), home)
+        except Exception:
+            pass
+        return value
+    saved = saved_premium(home)
+    return saved["premium"] if saved else False
 
 
 # --- The sending identity (RL1) ----------------------------------------------------------------
@@ -1621,7 +2126,12 @@ def save_sender(home, account_id, own_profile):
 def with_sender(config, home=None):
     """`config` with the saved sender laid over `sender_id` / `sender_profile` on a Unipile install
     (`linkedin_provider` "unipile"); unchanged otherwise or while none is saved."""
+    config = with_engine(config, home)   # U1 3g: the engine chosen in Setup or Settings
     config = with_codex(config, home)   # every job's config reader comes through here (orchestrator)
+    if isinstance(config, dict) and config.get("engine") == "claude":
+        config = with_claude(config, home)   # U1 3d: jobs on Claude start the Claude found (dev-only engine)
+    if isinstance(config, dict) and config.get("engine") == "antigravity":
+        config = with_antigravity(config, home)   # U1 4: jobs on Antigravity start the agy found
     if not isinstance(config, dict) or config.get("linkedin_provider") != "unipile":
         return config
     saved = saved_sender(home)
@@ -1949,14 +2459,17 @@ def read_signed_in_account(webmail_url, codex_path, profile, config=None, execut
     import browser_runtime
     import outreach_history_browser
     if config is None:
-        config = resources.read_json("config.json")
+        config = with_engine(resources.read_json("config.json"))
     driver = dict(browser_runtime.settings(config), profile=str(profile))
     config = dict(config, browser_driver=driver, _browser_operation="webmail")
-    if codex_path:
+    import engines
+    if engines.engine(config).judged_by_stream:
+        codex_path = None   # Claude (U1 3e), Antigravity (U1 4): found and probed by the session itself (engine.wait)
+    elif codex_path:
         config["codex"] = codex_path
         if _usable(codex_path):
             extend_path(codex_path)
-    if not _usable(codex_path):
+    if not engines.engine(config).judged_by_stream and not _usable(codex_path):
         # The jobs' own lookup (saved, bundled, found); none usable: say so, never launch a missing Codex.
         config = with_codex(config)
         if config.get(CODEX_MISSING):
@@ -1985,8 +2498,9 @@ def read_signed_in_account(webmail_url, codex_path, profile, config=None, execut
     # The read's own trace, checked after the session as the application reads are (review fix 8): no
     # code, no typing, keys, fills, uploads or drags; every click is recorded beside the check.
     try:
+        import engines
         clicks = email_check_trace((directory / "trace.jsonl").read_text(errors="replace")
-                                   if (directory / "trace.jsonl").exists() else "")
+                                   if (directory / "trace.jsonl").exists() else "", engines.for_run(directory))
         refused = None
     except ValueError as refusal:
         clicks, refused, address = [], str(refusal), None
@@ -1999,28 +2513,32 @@ EMAIL_CHECK_WRITES = ("browser_type", "browser_press_key", "browser_fill_form", 
                       "browser_file_upload", "browser_drag", "browser_drop", "browser_evaluate", "browser_run_code_unsafe")
 
 
-def email_check_trace(trace):
-    """The email check's Codex trace, read-only by the application reads' rules
-    (application_browser.tool_item) plus no page writes; returns its clicks [{"target", "element"}].
-    Raises ValueError (APPLICATION_UNAUTHORIZED_TOOL, APPLICATION_UNSUPPORTED_BROWSER_CODE or
-    EMAIL_CHECK_NOT_READ_ONLY)."""
+def email_check_trace(trace, engine):
+    """The email check's trace, as written by `engine` (engines.for_run of its folder), read-only by the
+    application reads' rules (application_browser.tool_event) plus no page writes; returns its clicks
+    [{"target", "element"}]. Raises ValueError (APPLICATION_UNAUTHORIZED_TOOL,
+    APPLICATION_UNSUPPORTED_BROWSER_CODE or EMAIL_CHECK_NOT_READ_ONLY)."""
     import application_browser
+    import engines
     clicks = []
+    reader = engine.trace_reader()
     for line in trace.splitlines():
         try:
-            event = json.loads(line)
+            events = reader.feed(line)
         except ValueError:
             continue
-        item = event.get("item") if isinstance(event, dict) else None
-        if not isinstance(item, dict) or event.get("type") != "item.completed":
-            continue
-        if not application_browser.tool_item(item, False):
-            continue
-        if item.get("tool") in EMAIL_CHECK_WRITES:
-            raise ValueError("EMAIL_CHECK_NOT_READ_ONLY")
-        if item.get("tool") == "browser_click":
-            arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
-            clicks.append({"target": arguments.get("target"), "element": str(arguments.get("element") or "")[:200]})
+        for event in events:
+            if event.kind == "error" and event.raw_kind == engines.ClaudeEngine.FORBIDDEN_TOOL:
+                raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")   # Claude: a tool outside the run's list
+            if event.phase != "completed" or event.kind in {None, "malformed"}:
+                continue
+            if not application_browser.tool_event(event, False):
+                continue
+            if event.call.tool in EMAIL_CHECK_WRITES:
+                raise ValueError("EMAIL_CHECK_NOT_READ_ONLY")
+            if event.call.tool == "browser_click":
+                arguments = event.call.args
+                clicks.append({"target": arguments.get("target"), "element": str(arguments.get("element") or "")[:200]})
     return clicks
 
 
@@ -2168,7 +2686,7 @@ def step_done(number, state, home=None):
     if number == 5:
         return license_done(home)
     if number == 6:
-        return codex_done(state)
+        return engine_done(state)
     if number == 7:
         return steps.get("linkedin", {}).get("status") == "done"
     if number == 8:

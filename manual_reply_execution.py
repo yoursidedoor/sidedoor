@@ -297,7 +297,7 @@ class Fixture:
             yield
 
     def classify(self):
-        with self.clock(), patch.object(reply_worker, "_execute", side_effect=self.execute):
+        with self.clock(), patch.object(reply_worker, "execute_text", side_effect=self.execute):
             result = orchestrator.reply_classification_cycle(self.root, self.database, self.config)
         require(self.database.execute("SELECT COUNT(*) FROM reply_worker_results").fetchone()[0] > 0,
                 "Fixture did not produce an actual immutable reply worker result: " + repr(result))
@@ -308,7 +308,7 @@ class Fixture:
         with self.clock(), contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(orchestrator, "ROOT", self.root))
             stack.enter_context(patch.object(orchestrator, "HeyReach", return_value=self))
-            stack.enter_context(patch.object(reply_worker, "_execute", side_effect=self.execute))
+            stack.enter_context(patch.object(reply_worker, "execute_text", side_effect=self.execute))
             stack.enter_context(patch.object(orchestrator.decision_transport, "cycle", return_value={"state": "MOCK_UNRELATED"}))
             stack.enter_context(patch.object(orchestrator, "conversion_cycle", return_value={"state": "MOCK_UNRELATED"}))
             stack.enter_context(patch.object(orchestrator, "draft_promotion_cycle", return_value={"state": "MOCK_UNRELATED"}))

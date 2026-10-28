@@ -402,6 +402,7 @@ class FakePort:
         self.own_profile = own_profile
         self.page_size = page_size
         self.session_valid = True
+        self.premium = True          # own_premium(): the account's Premium flag (True, False or None)
         self.people = {}             # profile key -> dict(profile, provider_id, distance)
         self.invitations = []        # dicts: invitation_id, invitee_provider_id, invitee_profile, note, sent_at
         self.chat_log = {}           # chat_id -> dict(attendee, activity, messages[list of dict])
@@ -509,6 +510,14 @@ class FakePort:
         self._enter("account")
         return AccountState(valid=self.session_valid, account_id="fake-account",
                             own_profile=self.own_profile, raw={"valid": self.session_valid})
+
+    def own_premium(self):
+        """The account's Premium flag (UnipilePort.own_premium). Not logged in `calls`; a scripted
+        "timeout" in `failures["own_premium"]` raises TimeoutError, as a read that failed."""
+        kinds = self.failures.get("own_premium") or []
+        if kinds and kinds.pop(0) == "timeout":
+            raise TimeoutError("read timed out")
+        return self.premium
 
     def lookup(self, profile_url):
         self._enter("lookup")

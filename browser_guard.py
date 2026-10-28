@@ -99,6 +99,12 @@ TOOLS = ("browser_click", "browser_close", "browser_console_messages", "browser_
          "browser_take_screenshot", "browser_type", "browser_wait_for")
 ARM_TOOL = "arm"
 HUMAN_CHECK_TOOL = "wait_for_human_check"
+# Claude browser jobs only (U1 3e, owner pick E4 b): Claude 2.1.301 saves a tool result over 50,000 characters
+# under ~/.claude/projects and shows the model a 2 KB preview. Given --piece-chars, the guard cuts a longer
+# text answer into pieces at line ends, answers with the first and a CONTINUATION_TITLE section, and hands out
+# the rest through this read-only tool (no arguments, touches no page). Codex sessions never get either.
+CONTINUE_TOOL = "browser_continue"
+CONTINUATION_TITLE = "Sidedoor continuation"
 OWN_TOOLS = (ARM_TOOL, HUMAN_CHECK_TOOL)
 # Live rule 1's refusal code (linkedin_contacts.validate refused the read with it after the session).
 CONTACT_CONTROL_CODE = "LINKEDIN_CONTACTS_CONTACT_CONTROL_CLICKED"
@@ -406,6 +412,70 @@ def arm_tool():
                                            "observed_candidate_email": {"type": "string"}}}}
 
 
+def continue_tool():
+    return {"name": CONTINUE_TOOL,
+            "description": "Read the next piece of the last browser answer that was cut into pieces (its last "
+                           "section says so). Read-only: it touches no page. Call it until the last piece.",
+            "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}}
+
+
+def pieces(text, size):
+    """`text` cut into pieces of at most `size` characters, at line ends (a longer line is cut at `size`)."""
+    found, current = [], ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > size:
+            if current:
+                found.append(current)
+                current = ""
+            found.append(line[:size])
+            line = line[size:]
+        if len(current) + len(line) > size:
+            found.append(current)
+            current = ""
+        current += line
+    if current or not found:
+        found.append(current)
+    return found
+
+
+PAGE_LINE = re.compile(r"^- Page URL: (\S+)", re.M)   # @playwright/mcp's own page line (application_browser.PAGE_URL)
+
+
+def answer_page(text):
+    """The page an answer is about, as application_browser.normalize binds a whole answer: its last
+    "- Page URL:" line, else None."""
+    found = PAGE_LINE.findall(text or "")
+    return found[-1] if found else None
+
+
+def continuation(number, total, answer, page, dropped=0):
+    """The guard's note at the END of every piece of cut answer `answer` (a counter, 1 for the session's
+    first cut answer): which answer and piece this is and, structurally, the page the whole answer is about
+    ("- Page URL:", so every piece binds that page as the whole answer does; review E4 b fix 1)."""
+    lines = ["- Cut answer: %d" % answer, "- Piece: %d of %d" % (number, total)]
+    if page:
+        lines.append("- Page URL: %s" % page)
+    note = ("This answer was cut into pieces to fit; this is piece %d of %d, the last." % (number, total)
+            if number == total else
+            "This answer was cut into pieces to fit; this is piece %d of %d. The rest of this answer (the rest "
+            "of the page) is in the next pieces: call %s for piece %d before you judge the page."
+            % (number, total, CONTINUE_TOOL, number + 1))
+    if dropped:
+        note += (" %d unread pieces of the earlier cut answer %d were dropped: %s now returns this answer's "
+                 "pieces only." % (dropped[0], dropped[1], CONTINUE_TOOL))
+    return "\n### %s\n%s\n%s" % (CONTINUATION_TITLE, "\n".join(lines), note)
+
+
+def continuation_page(text):
+    """The page a piece's guard note names (its "- Page URL:" line inside the CONTINUATION_TITLE section,
+    the last section of every piece), else None."""
+    head = "\n### %s\n" % CONTINUATION_TITLE
+    if head not in (text or ""):
+        return None
+    found = PAGE_LINE.findall(text.rsplit(head, 1)[1])
+    return found[-1] if found else None
+
+
 def human_check_tool():
     """The CAPTCHA wait's listing (name, description and input schema as live listed it)."""
     return {"name": HUMAN_CHECK_TOOL,
@@ -620,7 +690,8 @@ class Proxy:
                  stdin=None, stdout=None, arm_binding=None, human_check_wait=None, uploads=None,
                  call_timeout=CALL_TIMEOUT_SECONDS, background_chrome=None, launch_background=None,
                  offscreen=False, clock=None, sleep=None, focus_keeper=None, headless_user_agent=None,
-                 launch_headless=None, relaunch_headed=None, stop_chrome=None, client_hints=None, screen=None):
+                 launch_headless=None, relaunch_headed=None, stop_chrome=None, client_hints=None, screen=None,
+                 piece_chars=None):
         self.operation = operation
         self.offscreen = offscreen
         # Headless (owner, 2026-10-24, option A): given --headless-user-agent with --background-chrome the
@@ -683,6 +754,9 @@ class Proxy:
         self.issued = set()  # every id the guard itself sent: a late answer to one is never relayed (fix 12)
         self.expired = set()  # forwarded call ids the guard answered on timeout: their late answers are dropped
         self.uploads = uploads  # the read-only upload folder announced as the browser's one root (fix 4)
+        self.piece_chars = piece_chars   # Claude only (CONTINUE_TOOL); None: answers pass whole, as for Codex
+        self.waiting_pieces, self.piece_count, self.piece_page, self.cut_answers = [], 0, None, 0
+        self.piece_lock = threading.Lock()
         self.call_timeout = call_timeout
         self.closing = False
         self.listing = set()  # ids of the client's tools/list requests, answered with the guard's tools added
@@ -775,7 +849,49 @@ class Proxy:
         if self.human_check_wait is not None:
             listing = getattr(self.human_check_wait, "listing", None)
             tools.append(listing() if callable(listing) else human_check_tool())
+        if self.piece_chars:
+            tools.append(continue_tool())
         return tools
+
+    def in_pieces(self, message):
+        """A tools/call answer whose text is longer than piece_chars, cut (`pieces`): the first piece with its
+        note (`continuation`); the rest wait for CONTINUE_TOOL. A new cut answer replaces the pieces still
+        waiting, and its note says so. Any other message is returned as it is."""
+        result = message.get("result")
+        content = result.get("content") if isinstance(result, dict) else None
+        if not (isinstance(content, list) and content and all(
+                isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+                for block in content)):
+            return message
+        text = "\n".join(block["text"] for block in content)
+        if len(text) <= self.piece_chars:
+            return message
+        page = answer_page(text)
+        reserve = len(continuation(10 ** 6, 10 ** 6 + 1, 10 ** 6, page, (10 ** 6, 10 ** 6)))   # the longest note
+        found = pieces(text, max(1000, self.piece_chars - reserve))
+        with self.piece_lock:
+            dropped = (len(self.waiting_pieces), self.cut_answers) if self.waiting_pieces else 0
+            self.cut_answers += 1
+            self.waiting_pieces, self.piece_count, self.piece_page = found[1:], len(found), page
+            first = found[0] + continuation(1, len(found), self.cut_answers, page, dropped)
+        self.log(decision="IN_PIECES", answer=self.cut_answers, pieces=len(found), chars=len(text),
+                 dropped=dropped[0] if dropped else 0)
+        return dict(message, result=dict(result, content=[{"type": "text", "text": first}]))
+
+    def call_continue(self, message):
+        """The next piece of the latest cut answer, after every forwarded call has been answered (so a cut
+        answer still on its way is the one continued)."""
+        with self.idle:
+            self.idle.wait_for(lambda: not self.in_flight, timeout=self.call_timeout)
+        with self.piece_lock:
+            if self.waiting_pieces:
+                number = self.piece_count - len(self.waiting_pieces) + 1
+                text = self.waiting_pieces.pop(0) + continuation(number, self.piece_count, self.cut_answers,
+                                                                 self.piece_page)
+            else:
+                number, text = None, "No piece is waiting: the last answer was not cut, or every piece was read."
+        self.log(decision="CONTINUED", answer=self.cut_answers, piece=number)
+        self.answer(message, text, False)
 
     def spawn_child(self):
         return subprocess.Popen(self.child_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
@@ -803,6 +919,8 @@ class Proxy:
                 self.to_child({"jsonrpc": "2.0", "id": ident, "result": {"roots": [
                     {"uri": pathlib.Path(self.uploads).resolve().as_uri(), "name": "uploads"}]}})
                 continue
+            if "method" not in message and self.piece_chars and ident not in self.listing:
+                message = self.in_pieces(message)   # before the call counts as answered (call_continue waits)
             if "method" not in message:
                 with self.idle:
                     self.in_flight.discard(ident)
@@ -1184,6 +1302,9 @@ class Proxy:
         if name == HUMAN_CHECK_TOOL and self.human_check_wait is not None:
             self.call_human_check(message)
             return
+        if name == CONTINUE_TOOL and self.piece_chars:
+            self.call_continue(message)
+            return
         self.label = None
         with self.idle:
             if not self.idle.wait_for(lambda: not self.in_flight, timeout=600):
@@ -1326,6 +1447,8 @@ def main(argv=None):
     parser.add_argument("--headless-screen", help="with --headless-user-agent: the display to report, WxH@scale")
     parser.add_argument("--offscreen", action="store_true",
                         help="keep the session's Chrome windows minimized, and the front with the user's app")
+    parser.add_argument("--piece-chars", type=int,
+                        help="Claude only: cut a longer text answer into pieces of this size (browser_continue)")
     parser.add_argument("child", nargs=argparse.REMAINDER, help="-- then the @playwright/mcp command")
     options = parser.parse_args(argv)
     child = options.child[1:] if options.child[:1] == ["--"] else options.child
@@ -1337,7 +1460,7 @@ def main(argv=None):
                  uploads=options.uploads, background_chrome=options.background_chrome,
                  offscreen=options.offscreen, headless_user_agent=options.headless_user_agent,
                  client_hints=json.loads(options.headless_client_hints) if options.headless_client_hints else None,
-                 screen=parse_screen(options.headless_screen)).run()
+                 screen=parse_screen(options.headless_screen), piece_chars=options.piece_chars).run()
 
 
 if __name__ == "__main__":

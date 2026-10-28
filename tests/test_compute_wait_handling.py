@@ -47,6 +47,12 @@ class ComputeWaitTests(unittest.TestCase):
     maxDiff = None
 
     def setUp(self):
+        # Compute arithmetic below is written in 120-second sessions; the session sizes themselves
+        # (300 s discovery, 120 + 1.5 x slow end x companies) are tested in test_parallel_research.
+        for name, value in (("DISCOVERY_SECONDS", 120), ("qualification_seconds", lambda database, companies: 120)):
+            sizes = patch.object(parallel_research, name, value)
+            sizes.start()
+            self.addCleanup(sizes.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

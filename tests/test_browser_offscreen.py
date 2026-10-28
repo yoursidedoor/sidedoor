@@ -55,7 +55,12 @@ class OffscreenLaunch(unittest.TestCase):
             with mock.patch.object(browser_runtime.sys, "platform", "darwin"):
                 argv = browser_runtime.guard_command(other, directory, "inspect")
             self.assertNotIn("--offscreen", argv)
-            self.assertEqual(json.loads((directory / "browser-config.json").read_text()), browser_runtime.LAUNCH_CONFIG)
+            launch = json.loads((directory / "browser-config.json").read_text())
+            if other["browser_driver"].get("isolated"):   # a test session (review E1): host block, mock keychain
+                self.assertEqual(launch["browser"]["launchOptions"]["args"], list(browser_runtime.TEST_SWITCHES))
+                launch["browser"]["launchOptions"].pop("args")
+                launch["browser"]["launchOptions"]["ignoreDefaultArgs"].append("--use-mock-keychain")
+            self.assertEqual(launch, browser_runtime.LAUNCH_CONFIG)
         with mock.patch.object(browser_runtime.sys, "platform", "win32"):
             self.assertNotIn("--offscreen", browser_runtime.guard_command(config, directory, "inspect"))
         self.assertIsNot(browser_runtime.launch_config(config), browser_runtime.LAUNCH_CONFIG)   # never mutated

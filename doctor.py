@@ -262,7 +262,8 @@ def check_openrouter(home, config, online=False, transport=None):
                  "Click Test saved key in Settings > Connections, or run doctor --online.")
 
 
-CREDENTIAL_LABELS = {"openrouter": "OpenRouter key", "license": "license key", "openai": "OpenAI API key"}
+CREDENTIAL_LABELS = {"openrouter": "OpenRouter key", "license": "license key", "openai": "OpenAI API key",
+                     "anthropic": "Anthropic API key"}
 
 
 def check_credentials(home):

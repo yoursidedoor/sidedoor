@@ -196,7 +196,7 @@ class ReplyRepairTests(unittest.TestCase):
             actions = fixture.actions()
             self.assertEqual(1, len(actions))
             self.assertEqual(1, len(fixture.requests))
-            self.assertEqual("Happy to talk , which part matters most to you?",
+            self.assertEqual("Happy to talk, which part matters most to you?",
                              fixture.requests[0]["arguments"]["message"])
 
 

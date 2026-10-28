@@ -1,0 +1,23 @@
+<h3>Claude: your Claude subscription or an Anthropic API key</h3>
+<p>Claude works with either: your <strong>Claude subscription</strong> (Pro or Max) or an <strong>Anthropic API key</strong>.</p>
+<h3>With your Claude subscription</h3>
+<ol>
+  <li>You need a Claude account on a paid plan: Pro or Max. Buy or upgrade at <a href="https://claude.ai/upgrade" target="_blank" rel="noopener noreferrer">claude.ai/upgrade</a>.</li>
+  <li>Install Claude in Terminal. On a Mac or Linux, open Terminal and paste:
+    <pre class="copy">curl -fsSL https://claude.ai/install.sh | bash</pre>
+    On Windows, open PowerShell and paste:
+    <pre class="copy">irm https://claude.ai/install.ps1 | iex</pre>
+    Press Return (Enter on Windows).</li>
+  <li>Open a <strong>new</strong> Terminal (or PowerShell) window. The installer puts Claude in <code>~/.local/bin</code> and only adds it for new windows, so in the same window <code>claude</code> gives "command not found". In the new window type <code>claude</code> and press Return.</li>
+  <li>Claude asks how to sign in. Choose your Claude account with a subscription; a browser window opens; sign in. When Claude shows its prompt, type <code>/exit</code> and press Return.</li>
+  <li>Back in Sidedoor, click <strong>Use my Claude subscription</strong>. Sidedoor checks the sign-in.</li>
+</ol>
+<h3>With an Anthropic API key</h3>
+<p>Anthropic then bills that key for everything Sidedoor does, so watch your usage.</p>
+<ol>
+  <li>Install Claude as in step 2 above. Signing in is not needed for this way.</li>
+  <li>Sign in at <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>, add credit under Billing, then open API keys and click Create Key. Copy the key (it starts with <code>sk-ant-</code>); Anthropic shows it only once.</li>
+  <li>In Sidedoor, click <strong>Use an Anthropic API key</strong>, paste the key and click Save. Sidedoor keeps the key on this computer and never shows it in full again.</li>
+  <li>If Anthropic refuses the key, Sidedoor pauses its AI work and shows a banner until you save a key that works.</li>
+</ol>
+<p class="muted">What is Terminal? On a Mac: Applications &gt; Utilities &gt; Terminal. What is PowerShell? On Windows: open the Start menu, type PowerShell and press Enter.</p>
