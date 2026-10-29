@@ -280,7 +280,11 @@ def test_key(key, config, transport=None, timeout=30):
         chosen = config["model"] if config.get("model") in needed else needed[0]
         payload = json.dumps({"model": chosen, "input": "Reply with the single word OK.", "max_output_tokens": 16}).encode()
         status, body = send("POST", API_URL + "/responses", payload, headers, timeout)
-    except (OSError, TimeoutError):
+    except (OSError, TimeoutError) as error:
+        import tls_setup
+        if tls_setup.is_certificate_error(error):   # T7: not the internet
+            return False, "network", ("Sidedoor couldn't verify OpenAI's secure connection on this computer. Run "
+                                      "Report a problem so we can see why.")
         return False, "network", "Could not reach OpenAI. Check your internet and try again."
     if status == 200:
         return True, None, "Key works."

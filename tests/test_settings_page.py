@@ -336,6 +336,17 @@ class SettingsPageTest(unittest.TestCase):
         usable.start()
         self.addCleanup(usable.stop)
 
+    def test_a_030_email_mismatch_message_names_the_profile_step_by_its_new_number(self):
+        # U2: a 0.3.0 setup-state.json saved this text when the profile was step 3 (S1a made it step 4).
+        self.ready_for_email_check()
+        old = ("Your browser is signed in to a@example.com, but your application email is alex@example.com. Sign in to "
+               "alex@example.com in Sidedoor's browser, or change your application email in step 3.")
+        setup_steps.record(self.home, "email", "failed", old, reason="mismatch")
+        step = self.client.get("/setup").text.split('id="step-9"')[1].split("</li>")[0]
+        self.assertIn("or change your application email in step 4.", step)
+        self.assertNotIn("in step 3.", step)
+        self.assertIn("or change your application email in Profile and search.", self.client.get("/settings").text)
+
     def test_browser_open_while_a_job_holds_the_lock_is_busy_and_does_nothing_else(self):
         with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):
             response = self.client.post("/settings/browser/open", headers=HTMX).text
@@ -616,6 +627,21 @@ class SettingsPageTest(unittest.TestCase):
             again = self.client.post("/settings/openrouter/test", headers=HTMX).text
         self.assertNotIn('id="resume"', again)  # nothing changed there: not sent
 
+    def test_a_license_key_pasted_for_openrouter_points_to_license_and_keeps_the_old_key(self):
+        # S2 in Settings: Setup's "It goes in step 1." said with Settings' own section name.
+        with mock.patch.object(setup_steps.text_model, "_post", return_value=(200, OK_ANSWER)):
+            self.client.post("/settings/openrouter", data={"key": OPENROUTER_KEY}, headers=HTMX)
+        with mock.patch.object(setup_steps.text_model, "_post") as post:
+            response = self.client.post("/settings/openrouter", data={"key": "SD-SECRETKEY"}, headers=HTMX).text
+        post.assert_not_called()
+        self.assertIn("That&#39;s your Sidedoor license key. It goes in License, below.", response)
+        self.assertEqual(setup_steps.saved_openrouter_key(self.home), OPENROUTER_KEY)
+        self.assertEqual(setup_steps.load_state(self.home)["steps"]["openrouter"]["status"], "done")   # U1: nothing changed
+        self.assertNotIn("Key works.", response)   # the notice is shown in place of the saved message
+        page = self.client.get("/settings").text
+        self.assertIn("<h3>Codex</h3>", page)   # L2
+        self.assertIn("<legend>Which AI Sidedoor uses</legend>", page)   # L1
+
     def test_an_activated_license_unlocks_linkedin_out_of_band(self):
         # T4
         signed = relay_answer(self.home)
@@ -684,13 +710,13 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual("I built X", next(claim["invitation_mapping"]["text"] for claim in claims if claim["text"] == "Built X."))
 
     def test_every_sentence_removed_offers_a_new_upload_not_try_again(self):
-        # T16: Settings and Setup step 2.
+        # T16: Settings and Setup step 3 (the résumé).
         setup_steps.record(self.home, "openrouter", "done", "Key works.")
         (self.home / "profile.json").write_text(json.dumps({"resume_raw": {"file_name": "cv.pdf", "path": "/x", "sha256": RAW_SHA}}))
         raw = {"path": "/x", "file_name": "cv.pdf", "kind": "PDF"}
         setup_steps.record(self.home, "resume", "failed", resume_intake.ALL_REMOVED, code="ALL_CLAIMS_REMOVED", raw=raw)
         settings = self.client.get("/settings").text.split('id="resume"')[1].split("</section>")[0]
-        setup = self.client.get("/setup").text.split('id="step-2"')[1].split("</li>")[0]
+        setup = self.client.get("/setup").text.split('id="step-3"')[1].split("</li>")[0]
         for page in (settings, setup):
             self.assertNotIn("/resume/retry", page)
             self.assertIn("Upload a different résumé", page)

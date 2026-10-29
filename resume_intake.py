@@ -64,7 +64,7 @@ ALL_REMOVED = ("Every sentence Sidedoor found in this résumé was removed in Se
                "résumé to find new ones.")
 
 
-# profile.json is also written by the Setup page's step 3 (setup_steps.save_profile) in the same
+# profile.json is also written by the Setup page's step 4 (setup_steps.save_profile) in the same
 # process; both read-modify-write it under this lock so neither loses the other's keys.
 PROFILE_LOCK = threading.RLock()
 

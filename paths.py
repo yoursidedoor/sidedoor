@@ -79,7 +79,24 @@ WAIT_SECONDS_SHOWN = 2 * 3600              # a wait older than this is no longer
 MOVING, DONE, CONFLICT, NONE = "MOVING", "DONE", "CONFLICT", "NONE"
 COPY_SUFFIX = ".sidedoor-move"
 ASIDE = ".set-aside-"
-DASHBOARD_PORT = 47823   # dashboard.PORT
+USUAL_DASHBOARD_PORT = 47823
+# C4, for release checks only (never a user setting): a second copy of a built app, tested while the owner's
+# own Sidedoor holds 47823, listens on this port instead and skips the Move-to-Applications offer. Unset or not
+# a port from 1024 to 65535: the usual port, as for every user.
+RELEASE_CHECK_PORT_VARIABLE = "SIDEDOOR_RELEASE_CHECK_PORT"
+
+
+def _dashboard_port(environment=None):
+    value = (os.environ if environment is None else environment).get(RELEASE_CHECK_PORT_VARIABLE, "")
+    try:
+        port = int(value.strip())
+    except (AttributeError, ValueError):
+        return USUAL_DASHBOARD_PORT
+    return port if 1024 <= port <= 65535 else USUAL_DASHBOARD_PORT
+
+
+DASHBOARD_PORT = _dashboard_port()   # dashboard.PORT
+RELEASE_CHECK = DASHBOARD_PORT != USUAL_DASHBOARD_PORT
 # A job that cannot start because the data is not moved yet exits with this code (EX_TEMPFAIL): the
 # scheduler shows it as a wait, never as a failure.
 HOLD_EXIT = 75

@@ -161,7 +161,7 @@ def stored_mode(database):
 def file_mode(home=None):
     """setup-state.json's mode: None when the file does not exist, or exists but cannot be read or
     parsed, or names no known mode (an unreadable store decides nothing, G4). A file without a mode
-    (Setup started, step 4 not reached) is the default, Automatic (D23)."""
+    (Setup started, step 5 not reached) is the default, Automatic (D23)."""
     value = _from_file(home)
     return None if value == UNREADABLE else value
 
@@ -233,7 +233,7 @@ def set_mode(database, value, *, home=None, now=None):
 
 
 def set_install_mode(value, *, root, home=None, now=None):
-    """The dashboard's Setup step 4 and Settings > Mode. An unknown value raises ModeError before
+    """The dashboard's Setup step 5 and Settings > Mode. An unknown value raises ModeError before
     anything is written. The database row is written first, creating the install's database (and
     its approval_mode table) when no cycle has made it yet (GL2: Review never lives only in the
     file), then the file. A setup file that cannot be read raises StateFileUnreadable before the

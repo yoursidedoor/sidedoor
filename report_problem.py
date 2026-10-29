@@ -1,10 +1,14 @@
-"""Report a problem (owner pick F3 a, 2026-10-23): the button on the Failures page and in Settings.
+"""Report a problem (owner pick F3 a, 2026-10-23): the button on the Failures page, in Settings and on
+Setup (0.4.0 T1: it works before the profile is saved).
 
 `POST /report-problem` builds a privacy-safe diagnostic summary: the Sidedoor version and the
 computer's platform, every `sidedoor doctor` check (name, OK/WARN/FAIL and its short line, already
-redacted by `doctor.redacted`), and the codes of the latest failures the Failures page lists (codes
-only, never their words). The page copies it to the clipboard and opens GitHub's bug-report form
-(`issue_url`: only the version and the platform go in the address). Nothing is sent anywhere.
+redacted by `doctor.redacted`; Secure connection is tested now, with one keyless GET of OpenRouter's
+public model list, and adds its trust mode, error class and error: T2), the saved message, error
+class and error of every Setup step that failed (T2), and the codes of the latest failures the
+Failures page lists (codes only, never their words). The page copies it to the clipboard and opens
+GitHub's bug-report form (`issue_url`: only the version and the platform go in the address). The
+summary itself is sent nowhere.
 
 Never in the summary: keys, tokens, the license key (not even masked), the dashboard token, email
 addresses, names, phone numbers, LinkedIn or any other web address, company or job names (failure
@@ -95,7 +99,7 @@ def personal_values(home):
                 walk(item)
         elif isinstance(value, str):
             found.append(value)
-    walk(doctor._profile(home))   # raises when the profile is missing or unreadable (RP1)
+    walk(_profile_or_empty(home))   # raises when the profile is unreadable (RP1); none yet: nothing in it
     words = set()
     for value in found:
         value = value.strip()
@@ -104,6 +108,18 @@ def personal_values(home):
             words.update(part for part in re.split(r"[\s,]+", value)
                          if len(part) >= 3 and part.casefold() not in COMMON_WORDS)
     return sorted(words, key=len, reverse=True)
+
+
+def _profile_or_empty(home):
+    """The saved profile, or {} before Setup's profile step has saved one (T1: Report a problem works
+    from Setup step 1; doctor's Profile line then says there is no profile yet). A profile that is
+    there but can't be read still raises (RP1: fail closed)."""
+    import doctor
+    import user_profile
+    try:
+        return doctor._profile(home)
+    except user_profile.ProfileMissing:
+        return {}
 
 
 _WORD = re.compile(r"[^\W_]+")
@@ -188,8 +204,23 @@ def failure_codes(database, config, loop, limit=CODE_LIMIT):
     return codes
 
 
-def summary(version, label, checks, codes, personal=(), homes=(), hidden=None, resume=()):
-    """The text pasted into the issue."""
+DETAIL_KEYS = {"Secure connection": ("trust", "error_class", "error")}   # T2: the doctor detail shown
+STEP_KEYS = ("error_class", "error")   # T2: a failed Setup step's saved cause (setup_steps.record extras)
+
+
+def setup_errors(state):
+    """[(step key, message, {error_class, error})] for every Setup step whose saved status is failed."""
+    steps = state.get("steps") if isinstance(state, dict) else None
+    found = []
+    for key, step in (steps.items() if isinstance(steps, dict) else ()):
+        if isinstance(step, dict) and step.get("status") == "failed":
+            found.append((str(key), str(step.get("message") or ""),
+                          {name: step[name] for name in STEP_KEYS if step.get(name) not in (None, "")}))
+    return found
+
+
+def summary(version, label, checks, codes, personal=(), homes=(), hidden=None, resume=(), steps=()):
+    """The text pasted into the issue. `steps`: `setup_errors`."""
     out = ["Sidedoor diagnostic summary", "Version: %s" % version, "Platform: %s (%s)" % (label, platform.machine() or "unknown"), ""]
     if hidden:
         out += [hidden, ""]
@@ -200,6 +231,16 @@ def summary(version, label, checks, codes, personal=(), homes=(), hidden=None, r
             if check.get("name") == "LinkedIn":   # RP2: never the account's display name
                 line = "connected" if check.get("status") == "OK" else "not connected"
             out.append("%s  %s: %s" % (check.get("status"), scrub(check.get("name"), personal, homes, resume), line))
+            detail = check.get("detail") if isinstance(check.get("detail"), dict) else {}
+            for key in DETAIL_KEYS.get(check.get("name"), ()):
+                if detail.get(key) not in (None, ""):
+                    out.append("    %s: %s" % (key, scrub(detail[key], personal, homes, resume)))
+        if steps:
+            out += ["", "Setup steps that failed:"]
+            for key, message, cause in steps:
+                out.append("  %s: %s" % (scrub(key, personal, homes, resume), scrub(message, personal, homes, resume)))
+                for name, value in cause.items():
+                    out.append("    %s: %s" % (name, scrub(value, personal, homes, resume)))
         codes = [code for code in codes if scrub(code, personal, homes, resume) == code]   # a code is shown whole or not at all
         out += ["", "Recent failure codes: %s" % (", ".join(codes) or "none")]
     return "\n".join(out) + "\n"
@@ -224,10 +265,22 @@ def build(home, root, config, token):
         return summary(current, label, [], [], hidden=failures_page.DETAILS_HIDDEN), issue_url(current, label)
     running = setup_steps.scheduler_running(home)
     loop = overview_page.loop_state(running)
-    checks = doctor.run(home=home, root=root, config=config, running=running, loop=loop)
+    # T2: the Secure connection line tests HTTPS now (one keyless GET of OpenRouter's public model list),
+    # so a computer whose certificate check fails never reports "OK" from the start-up mode alone.
+    checks = doctor.run(home=home, root=root, config=config, running=running, loop=loop, secure_online=True)
     secrets = failures_page.secrets_of(home, config, token)
-    checks = [{key: failures_page.redact_text(value, secrets) if key in ("name", "line") and value else value
-               for key, value in check.items()} for check in checks]
+
+    def redacted(key, value):
+        if key in ("name", "line") and value:
+            return failures_page.redact_text(value, secrets)
+        if key == "detail" and isinstance(value, dict):
+            return {name: failures_page.redact_text(str(item), secrets) if item not in (None, "") else item
+                    for name, item in value.items()}
+        return value
+    checks = [{key: redacted(key, value) for key, value in check.items()} for check in checks]
+    steps = [(key, failures_page.redact_text(message, secrets),
+              {name: failures_page.redact_text(str(value), secrets) for name, value in cause.items()})
+             for key, message, cause in setup_errors(setup_steps.load_state(home))]
     database = paths.database(root)
 
     def read(connection):
@@ -237,7 +290,7 @@ def build(home, root, config, token):
     try:   # RP1: a read the scrubs need that fails refuses the whole summary
         codes, names = overview_page.snapshot(database, read,
                                               lambda: overview_page._connect(database.resolve().as_uri() + "?mode=ro"))
-        profile = doctor._profile(home)
+        profile = _profile_or_empty(home)
         resume = set()
         if profile.get("resume_raw"):   # no résumé saved: nothing of it to keep out
             import reply_resume
@@ -249,7 +302,7 @@ def build(home, root, config, token):
     personal = mine + [name.strip() for name in names if len(name.strip()) >= 3] \
         + [value for value in secrets if isinstance(value, str) and len(value) >= 3]
     personal = sorted(set(personal), key=len, reverse=True)
-    text = summary(current, label, checks, codes, personal, homes, resume=resume)
+    text = summary(current, label, checks, codes, personal, homes, resume=resume, steps=steps)
     return text, issue_url(current, label)
 
 

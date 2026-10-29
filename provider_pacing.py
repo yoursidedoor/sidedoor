@@ -38,6 +38,7 @@ MIN_GAP_SECONDS = 3.0
 GAP_VARIABLE = "SIDEDOOR_PACING_GAP_SECONDS"   # the tests' homes set 0 (tests/profile_home.py)
 RETRY_SECONDS = 30
 MAX_RETRY_SECONDS = 300
+LONG_WAIT_SECONDS = 3600       # G2: a cool-down past this (a stated reset hours or days away) is not re-tried every 300 s
 CALM_SECONDS = 3600            # an hour with no 429: unlimited again
 LEASE_MARGIN_SECONDS = 600     # a lease outlives its session's own limit by this much
 DEFAULT_LEASE_SECONDS = 4 * 3600
@@ -204,9 +205,32 @@ def acquire(provider, lease_seconds=None, stop=None, sleep=time.sleep, max_wait=
             return lease
         if max_wait is not None and waited >= max_wait:
             raise SlotWaitTooLong(provider, wait)
+        # G2 (2026-10-29): a cool-down past the longest short retry is a stated reset hours or days away (agy's
+        # weekly quota, 166 h): the work goes back to its scheduler, which holds it until then, instead of
+        # sleeping here. Every engine (Claude's resetsAt, Codex's "try again at") takes this same path.
+        if wait > MAX_RETRY_SECONDS:
+            raise SlotWaitTooLong(provider, wait)
+        if not in_use(provider):   # the user chose another engine meanwhile: stop waiting for this one
+            raise SlotWaitTooLong(provider, RETRY_SECONDS)
         step = min(wait, POLL_SECONDS)
         sleep(step)
         waited += step
+
+
+def in_use(provider):
+    """False when `provider` is the pacing key of engines the user no longer has chosen (Setup or Settings,
+    re-read on each poll of a wait); True for a key no engine owns (OpenRouter's direct calls) or when the
+    choice cannot be read."""
+    try:
+        import engines
+        import setup_steps
+        owners = {name for name, engine in engines.ENGINES.items() if engine.pacing_provider == provider}
+        if not owners:
+            return True
+        state, readable = setup_steps._read_state(setup_steps._home(None) / setup_steps.STATE_FILE)
+        return not readable or setup_steps.chosen_engine(state) in owners   # unreadable (a sharing violation): keep waiting
+    except Exception:
+        return True
 
 
 def release(provider, lease):

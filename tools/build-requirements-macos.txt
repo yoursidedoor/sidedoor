@@ -1,0 +1,38 @@
+# Exact build pins for both Mac builds (tools/build_macos.py; AGENTS.md, "Mac builds use python.org's Python").
+# Python: python.org 3.13.17 universal2 installer, extracted and relocated (tools/relocate_framework.py):
+#   https://www.python.org/ftp/python/3.13.17/python-3.13.17-macos11.pkg
+#   sha256 3053592af66128269efab37fe7851a4894920b27c442aeec99ce4d34d17c07e3
+# Install: arch -<arm64|x86_64> <venv>/bin/python -m pip install -r tools/build-requirements-macos.txt
+# (the pip freeze of the arm64 proof venv, 2026-10-29).
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+defusedxml==0.7.1
+fastapi==0.158.1
+fonttools==4.67.0
+fpdf2==2.8.9
+h11==0.16.0
+idna==3.20
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+Nuitka==4.3.1
+opentelemetry-api==1.45.1
+ordered-set==4.1.0
+pillow==13.0.0
+pydantic==2.14.1
+pydantic_core==2.50.1
+pyobjc-core==12.2.2
+pyobjc-framework-Cocoa==12.2.2
+pyobjc-framework-Quartz==12.2.2
+pypdf==6.21.2
+pystray==0.19.5
+python-multipart==0.0.32
+six==1.17.0
+starlette==1.9.0
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.54.0
+zstandard==0.25.0

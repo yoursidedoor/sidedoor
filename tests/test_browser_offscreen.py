@@ -40,8 +40,24 @@ class OffscreenLaunch(unittest.TestCase):
         self.assertIn("--window-size=1280,900", command)
         self.assertEqual(command[-1], "about:blank")
 
+    def test_the_fallback_launch_names_the_chrome_setup_found_on_a_mac_only(self):
+        # E7: Playwright's channel "chrome" looks only in /Applications; a Chrome in ~/Applications is named.
+        import setup_steps
+        found = str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        with mock.patch.object(setup_steps, "chrome_path", return_value=found):
+            for platform, expected in (("darwin", found), ("win32", None), ("linux", None)):
+                with mock.patch.object(browser_runtime.sys, "platform", platform):
+                    options = browser_runtime.launch_config({"browser_driver": {"profile": "/p"}}, "inspect")
+                self.assertEqual(options["browser"]["launchOptions"].get("executablePath"), expected, platform)
+        with mock.patch.object(setup_steps, "chrome_path", return_value=None), \
+                mock.patch.object(browser_runtime.sys, "platform", "darwin"):
+            options = browser_runtime.launch_config({"browser_driver": {"profile": "/p"}}, "inspect")
+        self.assertNotIn("executablePath", options["browser"]["launchOptions"])   # Playwright's own lookup then
+
     def test_playwright_fallback_launch_and_guard_flag_on_macos_only(self):
         # The headed fallback (owner, 2026-10-24): an operation left out of headless_operations.
+        import setup_steps
+        self.enterContext(mock.patch.object(setup_steps, "chrome_path", return_value=None))   # E7 has its own test
         directory = scratch(self)
         config = {"browser_driver": {"profile": str(directory / "profile"), "headless_operations": []}}
         with mock.patch.object(browser_runtime.sys, "platform", "darwin"):

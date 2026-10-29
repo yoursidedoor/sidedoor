@@ -7,10 +7,10 @@ every network call takes an injectable transport so tests stay offline.
 What is stored, all in the Sidedoor home (`user_profile.home()`), each file mode 0600:
 - `setup-state.json`: progress of every step, the review/automatic mode, the saved Codex path, the
   "Your webmail" choice, the uploaded résumé's record, the email-check lock, the LinkedIn wait.
-- the OpenRouter key (step 1) and the license key (step 5) through `credentials` (E2.T4): the OS
-  store (Keychain / Credential Manager), else the 0600 files `openrouter.key` / `license.key`;
-  `license-entitlement.json` (step 5), `machine-id` (step 5's machine), `resume/` (step 2).
-- `profile.json` (step 3), through the same answer shape `profile.example.json` shows.
+- the license key (step 1) and the OpenRouter key (step 2) through `credentials` (E2.T4): the OS
+  store (Keychain / Credential Manager), else the 0600 files `license.key` / `openrouter.key`;
+  `license-entitlement.json` (step 1), `machine-id` (step 1's machine), `resume/` (step 3).
+- `profile.json` (step 4), through the same answer shape `profile.example.json` shows.
 
 Secrets (OpenRouter key, license key) are saved through `credentials.put` and never put in the state, a
 message, a log line or an exception text.
@@ -74,13 +74,17 @@ LOCKED_LINE = "Locked after your email check passed. To use a different email, c
 BUSY_LINE = "Busy with a scheduled task. Try again in a few minutes."
 
 # The eleven steps, in the spec's order (E6.T0 3.2). Step 10 is optional and never counted.
-STEPS = ((1, "openrouter", "OpenRouter key"), (2, "resume", "Résumé"), (3, "profile", "Your profile"),
-         (4, "mode", "Review or automatic"), (5, "license", "License key"), (6, "codex", "Codex and ChatGPT"),
+# 0.4.0 (S1a, owner 2026-10-28): the license moved first, people buy before they set up. Saved
+# progress is keyed by the step's name (state["steps"]["license"]), never its number, so a 0.3.0
+# setup-state.json still shows the same steps done.
+STEPS = ((1, "license", "License key"), (2, "openrouter", "Create your OpenRouter key"), (3, "resume", "Résumé"),
+         (4, "profile", "Your profile"), (5, "mode", "Review or automatic"), (6, "codex", "Codex"),
          (7, "linkedin", "Connect LinkedIn"), (8, "browser", "Sign in to the browser Sidedoor uses"),
          (9, "email", "Email check"), (10, "login", "Start at login (optional)"), (11, "start", "Start"))
 REQUIRED = tuple(number for number, _, _ in STEPS if number <= 9)
 # The order the code forces (E6.T0 3.2): step -> the steps it needs first.
-NEEDS = {2: (1,), 7: (5,), 9: (3, 6, 8), 11: REQUIRED}
+NEEDS = {3: (2,), 7: (1,), 9: (4, 6, 8), 11: REQUIRED}
+NUMBER = {key: number for number, key, _ in STEPS}   # step name -> its number on the page
 
 
 def now_iso():
@@ -205,7 +209,7 @@ REDERIVED_MESSAGE = "Found again after the setup file was reset."
 def _rederived_steps(home, root, run=subprocess.run):
     """What can be read back from the files Sidedoor keeps (GL-M2), with no network or AI call:
     openrouter (the saved key, only when its last test passed: `openrouter_tested`, GM2), resume
-    (the résumé read on file in profile.json), profile (profile.json passing step 3's checks), codex
+    (the résumé read on file in profile.json), profile (profile.json passing step 4's checks), codex
     (an installed Codex whose local `codex login status` says ChatGPT, the check step 6 runs; GM3),
     the finished latch (the install's database shows hourly rounds ran) and, with it, the email
     lock (GL1: the email check's result lives only in setup-state.json, so a finished install keeps
@@ -307,7 +311,7 @@ def email_locked(state):
     return bool(state.get("email_check_passed_at"))
 
 
-# --- Step 1: OpenRouter key ------------------------------------------------------------------------
+# --- Step 2: OpenRouter key ------------------------------------------------------------------------
 
 def keys_waiting(home=None):
     """E2.T4 (KR1, KR4): the line shown in place of the key UI while the saved keys can't be read
@@ -351,6 +355,11 @@ def save_and_test_openrouter(api_key, config, home=None, transport=None, to_file
     one tiny test call with it (text_model.complete). While the keychain can't take it
     (`keychain_refusal`) nothing is saved or recorded; the refusal comes back as
     state["keychain_refused"] for this response only."""
+    if is_license_key(api_key):
+        # S2: the license key's own format. Nothing is saved, sent or recorded (a working key stays
+        # working); the notice is for this response only. First, so a keychain that can't take a key
+        # never stands in front of it (a key that would not be saved anyway).
+        return dict(load_state(home), license_key_notice=LICENSE_KEY_IN_OPENROUTER)
     refusal = keychain_refusal(home, to_file)
     if refusal:
         return _refused(home, refusal)
@@ -375,8 +384,17 @@ def save_and_test_openrouter(api_key, config, home=None, transport=None, to_file
         else:
             message = "OpenRouter refused the test call (HTTP %s). Try again in a few minutes." % error.status
         return record(home, "openrouter", "failed", message)
-    except (TimeoutError, text_model.TextModelResponseError):
-        return record(home, "openrouter", "failed", "Could not reach OpenRouter. Check your internet and try again.")
+    except text_model.TextModelResponseError as error:
+        # The cause is kept in the step record (redacted by text_model) so a support report shows it.
+        cause = {"error_class": error.transport_error or type(error).__name__, "error": str(error)}
+        if error.certificate_error:
+            LOG.warning("OpenRouter key test: secure connection failed (%s)", cause["error"])
+            return record(home, "openrouter", "failed", CERTIFICATE_FAILED % "OpenRouter's", **cause)
+        return record(home, "openrouter", "failed", "Could not reach OpenRouter. Check your internet and try again.",
+                      **cause)
+    except TimeoutError:
+        return record(home, "openrouter", "failed", "Could not reach OpenRouter. Check your internet and try again.",
+                      error_class="TimeoutError")
     except ValueError:
         return record(home, "openrouter", "failed", "Sidedoor has no OpenRouter model configured (config.json text_model).")
     try:
@@ -387,6 +405,33 @@ def save_and_test_openrouter(api_key, config, home=None, transport=None, to_file
     return record(home, "openrouter", "done", "Key works.")
 
 
+LICENSE_KEY_PREFIX = "SD-"   # every Sidedoor license key starts with it (activate_license)
+LICENSE_KEY_IN_OPENROUTER = "That's your Sidedoor license key. It goes in step 1."
+
+
+def is_license_key(text):
+    """True for text in the license key's format: SD- at the start, in any case, once surrounding
+    spaces and quotes are taken off (S2: a structured prefix check, not a reading of prose)."""
+    return str(text or "").strip().strip("\"'").strip().upper().startswith(LICENSE_KEY_PREFIX)
+
+
+# Setup messages a 0.3.0 setup-state.json may hold that name a step by its old number (S1a moved
+# the profile from step 3 to step 4): the old words -> today's. Applied where a saved message is shown.
+RENUMBERED_WORDS = (("or change your application email in step 3.", "or change your application email in step 4."),)
+
+
+def current_words(message):
+    """A saved Setup message with an old step number said with today's (`RENUMBERED_WORDS`)."""
+    if not isinstance(message, str):
+        return message
+    for old, new in RENUMBERED_WORDS:
+        message = message.replace(old, new)
+    return message
+
+
+# A certificate failure is not a missing internet connection (hotfix 2026-10-28).
+CERTIFICATE_FAILED = ("Sidedoor couldn't verify %s secure connection on this computer. Run Report a problem so "
+                      "we can see why.")
 KEY_FOLDER_UNWRITABLE = ("Sidedoor couldn't save your key: it can't write to its folder (%s). Check the folder's "
                          "permissions, then try again.")
 TESTED_NOT_SAVED = "Key works, but Sidedoor couldn't save that it was tested."
@@ -411,6 +456,8 @@ def test_saved_openrouter(config, home=None, transport=None):
     key = saved_openrouter_key(home)
     if not key:
         return record(home, "openrouter", "failed", "No OpenRouter key is saved yet. Paste yours and click Save and test.")
+    if is_license_key(key):   # S2: a saved license key really doesn't work here; recorded, as any failed test
+        return record(home, "openrouter", "failed", LICENSE_KEY_IN_OPENROUTER)
     return save_and_test_openrouter(key, config, home, transport)
 
 
@@ -425,7 +472,7 @@ def openrouter_tested(home=None):
     return bool(key) and isinstance(marker, dict) and marker.get("key_sha256") == hashlib.sha256(key.encode()).hexdigest()
 
 
-# --- Step 2: Résumé (E4.T2: resume_intake.ingest, run in the background) -------------------------
+# --- Step 3: Résumé (E4.T2: resume_intake.ingest, run in the background) -------------------------
 
 READING_MESSAGE = "Reading your résumé... This can take a few minutes. You can fill in the other steps meanwhile."
 STILL_READING = "Sidedoor is still reading your résumé. Wait until it finishes, then upload again."
@@ -439,7 +486,7 @@ def _spawn(target):
 
 
 def resume_state(home=None):
-    """Step 2's saved state, with a read this process is not running turned into "interrupted"
+    """Step 3's saved state, with a read this process is not running turned into "interrupted"
     (the dashboard restarted mid-read): the file is kept and [Try again] reads it again."""
     state = load_state(home)
     saved = state["steps"].get("resume", {})
@@ -492,7 +539,7 @@ def save_resume(file_name, data, config, home=None):
 
 
 def record_keep(home, message):
-    """Refuse an action on step 2 with a notice, keeping its state (a read in progress, or the
+    """Refuse an action on step 3 with a notice, keeping its state (a read in progress, or the
     résumé already read) as it is."""
     def change(state):
         state["steps"].setdefault("resume", {})["notice"] = message
@@ -501,7 +548,7 @@ def record_keep(home, message):
 
 def start_resume_read(config, home=None, raw=None, ingest=None):
     """Read the saved upload (`raw`, else the last one) with resume_intake.ingest in the
-    background; the request returns at once and step 2 polls `resume_state`."""
+    background; the request returns at once and step 3 polls `resume_state`."""
     saved = resume_state(home)["steps"].get("resume", {})
     if saved.get("status") == "reading":
         return record_keep(home, STILL_READING)
@@ -542,7 +589,7 @@ def start_resume_read(config, home=None, raw=None, ingest=None):
     return state
 
 
-# --- Step 3: Your profile --------------------------------------------------------------------------
+# --- Step 4: Your profile --------------------------------------------------------------------------
 
 PICKLISTS_FILE = resources.path("dashboard_assets/picklists.json")
 _picklists = None
@@ -588,7 +635,7 @@ def matches(name, query, limit=20):
     return [label for label in options(name) if label.casefold().startswith(query)][:limit]
 
 
-# Profile fields that are picked, not typed (E6.T0 step 3): field -> (pick list, several allowed).
+# Profile fields that are picked, not typed (E6.T0 step 4): field -> (pick list, several allowed).
 PICK_FIELDS = {"current_location": ("locations", False), "roles": ("roles", True), "levels": ("levels", True),
                "industries": ("industries", True), "countries": ("countries", True),
                "minimum_salary": ("salaries", False), "desired_salary": ("salaries", False),
@@ -602,7 +649,7 @@ SETUP_PICKS = ("roles", "levels", "work_modes", "places", "current_location", "f
 # codes or numbers and stay pick-only.
 CUSTOM_FIELDS = ("current_location", "roles", "industries", "places")
 CUSTOM_LIMIT = 120
-# The authorization answers step 3 derives from its work-authorization picks; every save rewrites them.
+# The authorization answers step 4 derives from its work-authorization picks; every save rewrites them.
 AUTHORIZATION_ANSWERS = ("work_authorization_by_jurisdiction", "us_work_authorized", "requires_visa_sponsorship_us",
                          "eu_work_authorized", "uk_work_authorized", "requires_visa_sponsorship_outside_us")
 # The same answers by semantic, so a pre-existing profile.json that recorded one under another key
@@ -676,15 +723,15 @@ def read_profile(home=None):
 
 
 def profile_form(home=None):
-    """What step 3's form shows, read back from profile.json (and the step's saved picks)."""
+    """What step 4's form shows, read back from profile.json (and the step's saved picks)."""
     state = load_state(home)
     saved = state["steps"].get("profile", {}).get("form")
     return saved if isinstance(saved, dict) else form_from_profile(read_profile(home))
 
 
 def form_from_profile(profile):
-    """Step 3's form prefilled from an existing profile.json, so saving it does not silently drop
-    what is there. Roles, levels, work modes and places come from `setup_picks` (what step 3
+    """Step 4's form prefilled from an existing profile.json, so saving it does not silently drop
+    what is there. Roles, levels, work modes and places come from `setup_picks` (what step 4
     saved); `levels` and `location_priority` are never parsed back."""
     answers = profile.get("answers") if isinstance(profile.get("answers"), dict) else {}
 
@@ -900,14 +947,14 @@ def profile_document(clean, existing):
         profile.pop("desired_base_salary_usd", None)
     modes = "/".join(mode.lower() for mode in clean["work_modes"])
     profile["location_priority"] = [place + " " + modes for place in clean["places"]]
-    # The raw picks, kept only so step 3 can show them again (levels and location_priority above
+    # The raw picks, kept only so step 4 can show them again (levels and location_priority above
     # are combined and never parsed back).
     profile["setup_picks"] = {field: clean[field] for field in SETUP_PICKS}
     return profile
 
 
 def save_profile(form, home=None):
-    """Validate step 3's form and write profile.json. Returns (state, errors)."""
+    """Validate step 4's form and write profile.json. Returns (state, errors)."""
     state = load_state(home)
     clean, errors = validate_profile(form, state)
     if errors:
@@ -1099,7 +1146,7 @@ def remove_owner_answer(key, home=None):
     return _change_answers(change, home)
 
 
-# --- Step 4: Review or automatic -------------------------------------------------------------------
+# --- Step 5: Review or automatic -------------------------------------------------------------------
 
 MODES = ("automatic", "review")
 
@@ -1112,7 +1159,7 @@ def set_mode(mode, home=None):
     return update_state(lambda state: state.update(mode=mode), home)
 
 
-# --- Step 5: License key ---------------------------------------------------------------------------
+# --- Step 1: License key ---------------------------------------------------------------------------
 
 def machine_id(home=None):
     """This computer's id for `/license/activate` and the heartbeat (E8.T2 `license_clock.machine_id`:
@@ -1194,13 +1241,15 @@ def activate_license(key, home=None, relay_url=RELAY_URL, post=None, to_file=Fal
                    "starting with SD-.")
     elif outcome == "activation_limit":
         message = "This key is already used on 2 computers. Email %s to free a computer." % SUPPORT_EMAIL
+    elif outcome == "certificate":   # T7: not the internet (license_clock.activate)
+        message = CERTIFICATE_FAILED % "the license server's"
     else:
         message = "Could not reach the license server. Check your internet and try again."
     return record(home, "license", "failed", message)
 
 
 def license_done(home=None, now=None):
-    """Step 5 is done: a signed, valid entitlement before its valid_until by server time, with a
+    """Step 1 is done: a signed, valid entitlement before its valid_until by server time, with a
     right clock (`license_clock.view`'s "usable")."""
     import license_clock
     return license_clock.view(home, now)["usable"]
@@ -1212,7 +1261,7 @@ def license_chip(home=None):
     return license_clock.chip(home)
 
 
-# --- Step 6: Codex and ChatGPT ---------------------------------------------------------------------
+# --- Step 6: Codex -------------------------------------------------------------------------------
 
 def _windows_user_path():
     """The PATH Windows keeps for this user and the machine, read fresh from the registry: an app opened
@@ -1250,6 +1299,12 @@ def install_folders():
                home / "Library" / "pnpm", home / ".local" / "share" / "pnpm"]
     # nvm keeps one folder per Node version; the newest first.
     folders += sorted((home / ".nvm" / "versions" / "node").glob("*/bin"), reverse=True)
+    if sys.platform == "darwin":
+        # E8: the Codex desktop app (bundle com.openai.codex, named ChatGPT.app on the owner's Mac,
+        # 2026-10-29) carries its own CLI in Contents/Resources/codex-cli/bin; last, so a CLI install wins.
+        folders += [applications / app / "Contents" / "Resources" / "codex-cli" / "bin"
+                    for applications in (Path("/Applications"), home / "Applications")
+                    for app in ("Codex.app", "ChatGPT.app")]
     return [str(folder) for folder in folders]
 
 
@@ -1275,7 +1330,8 @@ def find_codex(saved=None, search_path=None):
 def with_codex(config, home=None):
     """`config` with the Codex setup found (`codex_path`) as `codex`, and that Codex's folder and its node's
     on this process's PATH, so every job starts the Codex the user installed, wherever it is. config.json is
-    bundled and names /opt/homebrew/bin/codex; it is kept only when nothing was saved and it can run."""
+    bundled with an empty `codex` (0.4.0: it named /opt/homebrew/bin/codex, a folder `install_folders`
+    searches anyway); a configured path is kept only when nothing was saved and it can run."""
     if not isinstance(config, dict):
         return config
     try:
@@ -1547,7 +1603,7 @@ def check_antigravity(home=None, run=subprocess.run):
 # --- U1 3g: the engine choice (Setup step 6 and Settings > Connections) ------------------------------
 
 ENGINE_LABELS = {"codex": "Codex", "claude": "Claude", "antigravity": "Antigravity"}   # never "Claude Code"
-ENGINE_TITLES = {"codex": "Codex and ChatGPT", "claude": "Claude", "antigravity": "Antigravity"}
+ENGINE_TITLES = {"codex": "Codex", "claude": "Claude", "antigravity": "Antigravity"}
 ANTIGRAVITY_RISK = ("Google's terms don't allow apps like Sidedoor to run Antigravity. If you choose it, Google "
                     "may suspend your Antigravity or Gemini CLI account.")
 CLAUDE_SUBSCRIPTION, CLAUDE_API_KEY = "subscription", "api_key"
@@ -1970,6 +2026,22 @@ def codex_done(state):
 
 # --- Step 7: Connect LinkedIn ----------------------------------------------------------------------
 
+def _linkedin_unreachable(error):
+    """The LinkedIn step's words when the relay gave no answer: a certificate failure is not the
+    internet (T7, `tls_setup.is_certificate_error`)."""
+    import tls_setup
+    if tls_setup.is_certificate_error(error):
+        return CERTIFICATE_FAILED % "the LinkedIn service's"
+    return "Could not reach Sidedoor's LinkedIn service. Check your internet and try again."
+
+
+def _network_cause(error):
+    """A certificate failure's class for the step record (Report a problem shows it, T2); nothing for a
+    plain network error, as before."""
+    import tls_setup
+    return {"error_class": type(error).__name__} if tls_setup.is_certificate_error(error) else {}
+
+
 def _relay_error(parsed):
     return parsed.get("error") if isinstance(parsed, dict) and isinstance(parsed.get("error"), str) else None
 
@@ -1983,9 +2055,9 @@ def linkedin_status(home=None, relay_url=RELAY_URL, transport=None):
         return record(home, "linkedin", "needs_you", "Needs your license first.", offer="none")
     try:
         status, parsed = (transport or unipile_port.RelayTransport(relay_url, key))("GET", "/accounts")
-    except (OSError, TimeoutError, ValueError):
-        return record(home, "linkedin", "failed", "Could not reach Sidedoor's LinkedIn service. Check your internet "
-                      "and try again.", offer="retry")
+    except (OSError, TimeoutError, ValueError) as error:
+        return record(home, "linkedin", "failed", _linkedin_unreachable(error), offer="retry",
+                      **_network_cause(error))
     state = load_state(home)
     waiting_since = state.get("linkedin_link_started_at")
     kind = state.get("linkedin_link_kind")
@@ -2175,9 +2247,9 @@ def linkedin_link(kind, home=None, relay_url=RELAY_URL, make_link=None):
         else:
             message = "The LinkedIn service refused the link: %s." % (error.detail or "HTTP %s" % error.status)
         return record(home, "linkedin", "failed", message, offer="connect" if kind == "create" else "reconnect"), None
-    except (OSError, TimeoutError, ValueError):
-        return record(home, "linkedin", "failed", "Could not reach Sidedoor's LinkedIn service. Check your internet "
-                      "and try again.", offer="retry"), None
+    except (OSError, TimeoutError, ValueError) as error:
+        return record(home, "linkedin", "failed", _linkedin_unreachable(error), offer="retry",
+                      **_network_cause(error)), None
     update_state(lambda value: value.update(linkedin_link_started_at=now_iso(), linkedin_link_kind=kind), home)
     return record(home, "linkedin", "checking", "Waiting for LinkedIn... (this link is valid for about an hour)",
                   offer="waiting", kind=kind), url
@@ -2580,7 +2652,7 @@ def run_email_check(home=None, read=None):
         return record(home, "email", "done", "Sign in to %s in Sidedoor's browser." % state["locked_email"],
                       mismatch=True)
     return record(home, "email", "failed", "Your browser is signed in to %s, but your application email is %s. "
-                  "Sign in to %s in Sidedoor's browser, or change your application email in step 3."
+                  "Sign in to %s in Sidedoor's browser, or change your application email in step 4."
                   % (signed_in, application_email, application_email), reason="mismatch")
 
 
@@ -2676,15 +2748,15 @@ def start_scheduler(home=None):
 def step_done(number, state, home=None):
     steps = state["steps"]
     if number == 1:
-        return steps.get("openrouter", {}).get("status") == "done"
-    if number == 2:
-        return steps.get("resume", {}).get("status") == "done"
-    if number == 3:
-        return steps.get("profile", {}).get("status") == "done"
-    if number == 4:
-        return True
-    if number == 5:
         return license_done(home)
+    if number == 2:
+        return steps.get("openrouter", {}).get("status") == "done"
+    if number == 3:
+        return steps.get("resume", {}).get("status") == "done"
+    if number == 4:
+        return steps.get("profile", {}).get("status") == "done"
+    if number == 5:
+        return True
     if number == 6:
         return engine_done(state)
     if number == 7:

@@ -102,9 +102,9 @@ class UserProfileTest(unittest.TestCase):
     def test_profile_and_default_settings_merge_in_the_old_key_order(self):
         (self.home / "profile.json").write_text(user_profile.EXAMPLE_PROFILE.read_text())
         policy = user_profile.load()
-        self.assertEqual(tuple(policy), user_profile.KEY_ORDER)
+        self.assertEqual(tuple(policy), user_profile.KEY_ORDER + ("setup_picks",))   # a key KEY_ORDER doesn't name goes last
         self.assertEqual(policy["max_attempts"], 3)
-        self.assertEqual(len(policy["answers"]), 31)
+        self.assertEqual(len(policy["answers"]), 34)
 
     def test_user_settings_override_single_keys(self):
         (self.home / "profile.json").write_text(user_profile.EXAMPLE_PROFILE.read_text())

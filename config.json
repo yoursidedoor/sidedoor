@@ -1,7 +1,7 @@
 {
   "source_root": null,
   "credential_config": "~/.codex/config.toml",
-  "codex": "/opt/homebrew/bin/codex",
+  "codex": "",
   "model": "gpt-6-astra",
   "browser_read_model": "gpt-6-sol",
   "browser_driver": {

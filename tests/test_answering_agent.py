@@ -1141,6 +1141,12 @@ class ExplicitSelfIdentificationTests(ResumeFixture):
                      "semantic": "gender", "label": "Gender"}
     GENDER_TEXT = {"id": "q-gender-text", "required": True, "answer_type": "text", "choices": [],
                    "semantic": "gender_identity", "label": "What is your gender identity?"}
+
+    def setUp(self):
+        super().setUp()
+        # A recorded value that is not every menu's wording ("Male" against Man/Woman); the example
+        # profile records Setup's own option, "Man" (C5).
+        self.policy["answers"]["gender_self_identification"]["value"] = "Male"
     def gender_reader(self, q, packet):
         """A model that answers from the owner's recorded gender in its packet, as the prompt says."""
         recorded = next(saved["value"] for saved in packet["policy"]["answers"].values()

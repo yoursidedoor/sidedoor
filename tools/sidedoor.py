@@ -13,6 +13,11 @@ import sys
 # signed), and a user's replacement of those folders is read as they left it.
 sys.dont_write_bytecode = True
 
+# HTTPS trust first (hotfix 2026-10-28): the bundled OpenSSL's default certificate paths are the
+# build machine's, so every process (the app, each job, each MCP server child) sets it at start.
+import tls_setup  # noqa: E402
+tls_setup.configure()
+
 import orchestrator  # noqa: E402
 
 orchestrator.cli()

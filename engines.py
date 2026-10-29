@@ -131,6 +131,23 @@ class Engine:
         """True when this engine built `command` (for_command). Codex is the default and never claims."""
         return False
 
+    def record_timed_out(self, trace, command=None, worker=None, home=None, seconds=None):
+        """A5: a run stopped at its time limit writes its model_calls row as a finished run does
+        (`finish_run`), with the usage its stream showed so far (the reader's, as finish_run records it),
+        the outcome "timeout" and, when the stream stated no duration, `seconds` (how long it ran). Only
+        the engines judged by their stream write rows for their runs (Claude, Antigravity); Codex writes
+        none. `trace`: the run's stream file, read here. Best effort: never raises (a read that fails too)."""
+        if not self.judged_by_stream:
+            return
+        try:
+            text = Path(trace).read_text(encoding="utf-8", errors="replace")
+            record = self.read_trace(text, allowed=self._allowed(None, command), strict=False)
+            if getattr(record, "seconds", None) is None and seconds is not None:
+                record.seconds = seconds
+            self.record_model_call(record, worker=worker, home=home, outcome="timeout")
+        except Exception:
+            pass
+
     def trace_reader(self):
         """A fresh stateful reader of one run's step log: `feed(line)` returns the line's TraceEvents."""
         raise NotImplementedError
@@ -945,6 +962,7 @@ class ClaudeEngine(Engine):
             self.write_answer(Path(output).parent, record, path=output)
         if outcome is None:
             provider_limits.claude_fixed(home)
+            provider_limits.clear(provider_limits.CLAUDE_USAGE_WAIT_FILE, home)   # L4: the usage limit is over
             try:
                 import provider_pacing
                 provider_pacing.succeeded(self.pacing_provider)
@@ -952,6 +970,8 @@ class ClaudeEngine(Engine):
                 pass
         elif isinstance(outcome, provider_limits.ProviderUsageLimit):
             provider_limits.noted(outcome, home)
+            if outcome.kind == provider_limits.RATE_LIMITED and outcome.stated_reset:
+                provider_limits.claude_usage_noted(outcome, home)   # L4: the banner with the stated reset (resetsAt)
         try:
             self.record_model_call(record, worker=worker, home=home, outcome="ok" if outcome is None else (
                 "wait" if isinstance(outcome, provider_limits.ProviderUsageLimit) else "refused"))
@@ -1249,8 +1269,10 @@ class AntigravityTraceReader:
     `feed(line)` returns the line's TraceEvents, under the same failure codes as Claude's reader:
     - a call_mcp_tool step is kind "tool" (server mapped back to Sidedoor's neutral name, `neutral_server`), id
       "<tool name>_<step index>" (call_mcp_tool_2); its result is the full output from the brain folder (`outputs`) when it is there.
-    - search_web is "web_search"; finish (the schema answer) and a read of an allowed server's tool
-      descriptor (agy's own mcp/<server>/ cache, which the model may look at before a call) are not calls.
+      The same call by the tool's direct name ("mcp_<server>_<tool>", its arguments as the parameters) is read alike (A4).
+    - search_web is "web_search"; finish (the schema answer), a read of an allowed server's tool
+      descriptor (agy's own mcp/<server>/ cache, which the model may look at before a call) and a read of a tool
+      output agy saved for this run (brain/<conversation>/.system_generated/steps/<n>/output.txt, A2) are not calls.
     - FORBIDDEN_TOOL: any other tool, or a tool of a server outside the list (the hook denies it too).
     - PERMISSION_DENIED: a soft-denied step ("permission check failed") or result.denied_actions.
     - TOOL_TIMEOUT: an MCP step that failed with a timeout.
@@ -1287,6 +1309,16 @@ class AntigravityTraceReader:
             return False
         parts = relative.parts
         return len(parts) == 2 and parts[1].endswith(".json") and self._mcp_allowed(parts[0], parts[1][:-5])
+
+    def _saved_output(self, path, conversation=None):
+        """True for a read of a tool output agy saved for THIS run (A2, 2026-10-29): agy keeps a large tool result
+        in brain/<conversation>/.system_generated/steps/<n>/output.txt and shows the model only that path, so the
+        model may read exactly those files of its own conversation (symlinks resolved, no "..")."""
+        return self.engine.saved_output(path, conversation or self.conversation)
+
+    def _direct(self, name):
+        """(server, tool) for an allowed MCP tool called by its direct name ("mcp_<server>_<tool>", A4), else None."""
+        return self.engine.direct_mcp(name, self.allowed)
 
     def feed(self, line):
         event = json.loads(line)
@@ -1327,13 +1359,17 @@ class AntigravityTraceReader:
         words = str((error or {}).get("message") or "")
         if name == "finish":
             return [TraceEvent(None, None, raw_kind="finish")]
-        if name == "read_file" and self._descriptor(parameters.get("Path")):
+        if name == "read_file" and (self._descriptor(parameters.get("Path")) or self._saved_output(parameters.get("Path"))):
             return [TraceEvent(None, "other", raw_kind="read_file")]   # no call: never refused, never counted
         found = []
+        direct = self._direct(name)
         if name == "call_mcp_tool":
             raw_server, tool = parameters.get("ServerName"), parameters.get("ToolName")
             arguments = parameters.get("Arguments") if isinstance(parameters.get("Arguments"), dict) else {}
             allowed, server, call_kind = self._mcp_allowed(raw_server, tool), self.engine.neutral_server(raw_server), "tool"
+        elif direct is not None:   # A4: the same call by the tool's direct name, its arguments as the parameters
+            (raw_server, tool), arguments = direct, parameters
+            allowed, server, call_kind = True, self.engine.neutral_server(raw_server), "tool"
         else:
             raw_server, tool, arguments, server = None, name, parameters, None
             call_kind = "web_search" if name == "search_web" else "shell" if name == "run_command" else "other"
@@ -1447,6 +1483,54 @@ class AntigravityEngine(Engine):
 
     def neutral_server(self, name):
         return {value: key for key, value in self.SERVER_NAMES.items()}.get(name, name)
+
+    def direct_mcp(self, name, allowed):
+        """(server, tool) when `name` is an MCP tool's direct name, "mcp_<server>_<tool>" (A4: a model called
+        mcp_sidedoor_research_tools_save_role instead of call_mcp_tool, 2026-10-28), of a tool `allowed` lets
+        through ("server/tool", or any tool of "server/*"; unbound, Sidedoor's own servers); else None."""
+        if not isinstance(name, str) or not name.startswith("mcp_"):
+            return None
+        entries = allowed if allowed is not None else {"%s/*" % server for server in self.SERVER_NAMES.values()}
+        # G3: every server name the run knows (and Sidedoor's own), so a shorter user server "sidedoor/*" never
+        # takes a name that belongs to a longer one ("mcp_sidedoor_research_tools_delete_role").
+        servers = {entry.partition("/")[0] for entry in entries} | set(self.SERVER_NAMES.values())
+        for entry in sorted(entries, key=lambda entry: (entry.endswith("/*"), -len(entry))):
+            server, _, tool = entry.partition("/")
+            if not server or not tool:
+                continue
+            if tool != "*" and name == "mcp_%s_%s" % (server, tool):
+                return server, tool
+            prefix = "mcp_%s_" % server
+            if tool == "*" and name.startswith(prefix) and len(name) > len(prefix) and not any(
+                    len(other) > len(server) and name.startswith("mcp_%s_" % other) for other in servers):
+                return server, name[len(prefix):]
+        return None
+
+    def saved_output(self, path, conversation):
+        """True when `path` (a plain path or a file:// URL) is agy's saved output of a step of `conversation`:
+        <agy home>/brain/<conversation>/.system_generated/steps/<n>/output.txt, after resolving symlinks and
+        with no ".." in it (A2)."""
+        if not isinstance(path, str) or not isinstance(conversation, str) or not re.fullmatch(
+                r"[0-9A-Za-z-]{1,80}", conversation):
+            return False
+        if "?" in path or "#" in path:   # G1: nothing a URL parser would drop from the path
+            return False
+        if path.startswith("file://"):
+            from urllib.parse import unquote, urlparse
+            parsed = urlparse(path)
+            if parsed.netloc not in ("", "localhost") or parsed.params or parsed.query or parsed.fragment:
+                return False
+            path = unquote(parsed.path)
+            if re.match(r"^/[A-Za-z]:[/\\]", path):   # file:///C:/... on Windows
+                path = path[1:]
+        if ".." in re.split(r"[/\\]", path) or not os.path.isabs(path):
+            return False
+        steps = Path(os.path.realpath(self.agy_home() / "brain" / conversation / ".system_generated" / "steps"))
+        try:
+            parts = Path(os.path.realpath(path)).relative_to(steps).parts
+        except ValueError:
+            return False
+        return len(parts) == 2 and re.fullmatch(r"[0-9]+", parts[0]) is not None and parts[1] == "output.txt"
 
     # --- finding, signing in, A1 ---
 
@@ -1588,8 +1672,9 @@ class AntigravityEngine(Engine):
                     worker.kill()
                     output = ""
             finally:
-                if worker.poll() is None:
-                    portable.kill_tree(worker.pid)
+                # W1: always, also for a server that exited by itself: on Windows this closes its Job Object
+                # (a handle that otherwise stays open until Sidedoor exits) and ends anything it left behind.
+                portable.kill_tree(worker.pid)
         names = set()
         for line in (output or "").splitlines():
             try:
@@ -1969,6 +2054,7 @@ class AntigravityEngine(Engine):
             self.write_answer(Path(output).parent, record, path=output)
         if outcome is None:
             provider_limits.clear(provider_limits.ANTIGRAVITY_WAIT_FILES[provider_limits.ANTIGRAVITY_SIGNED_OUT], home)
+            provider_limits.clear(provider_limits.ANTIGRAVITY_USAGE_WAIT_FILE, home)   # A1: the usage limit is over
             try:
                 import provider_pacing
                 provider_pacing.succeeded(self.pacing_provider)
@@ -1976,6 +2062,8 @@ class AntigravityEngine(Engine):
                 pass
         elif isinstance(outcome, provider_limits.ProviderUsageLimit):
             provider_limits.noted(outcome, home)
+            if outcome.kind == provider_limits.RATE_LIMITED and outcome.stated_reset:
+                provider_limits.antigravity_usage_noted(outcome, home)   # A1: the banner with the stated reset
         try:
             self.record_model_call(record, worker=worker, home=home, outcome="ok" if outcome is None else (
                 "wait" if isinstance(outcome, provider_limits.ProviderUsageLimit) else "refused"))
@@ -1994,10 +2082,14 @@ class AntigravityEngine(Engine):
         codes = dict(reversed(record.errors))
         if self.RATE_LIMITED in codes:
             import provider_pacing
+            reset = self.reset_at(codes[self.RATE_LIMITED], now)   # A1: agy's stated reset, as Claude's resetsAt
             stated = provider_limits.stated_retry_seconds(codes[self.RATE_LIMITED], now)
+            if reset is not None:
+                seconds = (reset - provider_limits._utc(now)).total_seconds()
+                stated = seconds if 0 < seconds <= provider_limits.MAX_WAIT.total_seconds() else stated
             delay = provider_pacing.rate_limited(self.pacing_provider, stated)
             return provider_limits.ProviderUsageLimit(codes[self.RATE_LIMITED], now, kind=provider_limits.RATE_LIMITED,
-                                                      delay=delay)
+                                                      delay=delay, reset_at=reset)
         signed_out = returncode and not record.answer and any(
             word in (stderr or "").lower() for word in ("authentication failed", "accounts.google.com/o/oauth2"))
         if self.SIGNED_OUT in codes or signed_out:
@@ -2024,8 +2116,20 @@ class AntigravityEngine(Engine):
         import provider_limits
         return self.limit_output(returncode, *[provider_limits._read(path) or "" for path in paths], command=command)
 
-    def reset_at(self, message):
-        return None   # agy states no reset time (the CLI itself waits out retry delays of 30 s or less)
+    # agy's quota error states its reset only in its words, as a Go duration ("Individual quota reached. ...
+    # Resets in 166h8m9s."; its AGY_ERROR line has status/error_code/retryable but no reset field, 2026-10-28).
+    RESETS_IN = re.compile(r"\bResets in (?=\d)(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m(?!s))?(?:(?P<s>\d+(?:\.\d+)?)s)?(?![0-9A-Za-z])")
+
+    def reset_at(self, message, now=None):
+        """The reset agy's error words state ("Resets in 166h8m9s", from `now`) as an aware UTC datetime, else
+        None (then the short wait, as before)."""
+        import datetime as dt
+        import provider_limits
+        match = self.RESETS_IN.search(message) if isinstance(message, str) else None
+        if not match or not any(match.group(unit) for unit in ("h", "m", "s")):
+            return None
+        seconds = int(match["h"] or 0) * 3600 + int(match["m"] or 0) * 60 + float(match["s"] or 0)
+        return provider_limits._utc(now) + dt.timedelta(seconds=seconds) if seconds > 0 else None
 
     def usage(self, record):
         return dict(record.usage) if isinstance(record, RunRecord) else {}
@@ -2039,7 +2143,10 @@ class AntigravityEngine(Engine):
                            worker=worker or model_calls.caller(), model=getattr(record, "model", None),
                            provider=self.pacing_provider,
                            prompt_tokens=(tokens.get("input_tokens", 0) + tokens.get("cache_read_tokens", 0)) if tokens else None,
-                           completion_tokens=tokens.get("output_tokens"), total_tokens=tokens.get("total_tokens"),
+                           completion_tokens=tokens.get("output_tokens"),
+                           # A6: agy's total_tokens leaves out cache reads; with them, as Claude's total does
+                           total_tokens=(tokens["total_tokens"] + tokens.get("cache_read_tokens", 0))
+                           if "total_tokens" in tokens else None,
                            cost=None, seconds=getattr(record, "seconds", None))
 
     pre_model_rejection = staticmethod(lambda text, rejections: None)
@@ -2061,8 +2168,9 @@ class AntigravityEngine(Engine):
 
 def agy_hook(policy_path, payload):
     """The PreToolUse decision for one agy tool call ({"decision": "allow"} or "deny"), from the run's policy
-    (AntigravityEngine.write_workspace): an MCP call of an allowed server tool, an allowed built-in (search_web),
-    finish, or a read of an allowed server's tool descriptor in agy's own cache. Everything else is denied."""
+    (AntigravityEngine.write_workspace): an MCP call of an allowed server tool (through call_mcp_tool or by the
+    tool's direct name), an allowed built-in (search_web), finish, a read of an allowed server's tool descriptor
+    in agy's own cache, or a read of a tool output agy saved for this run's conversation. Everything else is denied."""
     deny = {"decision": "deny", "reason": "Sidedoor runs allow only their own tools."}
     try:
         policy = json.loads(Path(policy_path).read_text(encoding="utf-8"))
@@ -2074,6 +2182,8 @@ def agy_hook(policy_path, payload):
         return deny
     if name == "finish" or (name in allowed and "/" not in name):
         return {"decision": "allow"}
+    if AntigravityEngine().direct_mcp(name, allowed) is not None:   # A4: an allowed tool by its direct name
+        return {"decision": "allow"}
     if name == "call_mcp_tool":
         server, tool = arguments.get("ServerName"), arguments.get("ToolName")
         if isinstance(server, str) and ("%s/%s" % (server, tool) in allowed or "%s/*" % server in allowed):
@@ -2082,7 +2192,9 @@ def agy_hook(policy_path, payload):
     if name == "read_file":
         engine = AntigravityEngine().bound(allowed)
         engine.agy_home = lambda home=None: Path(policy.get("agy_home") or AntigravityEngine.agy_home())
-        if AntigravityTraceReader(engine, allowed)._descriptor(arguments.get("Path")):
+        conversation = payload.get("conversationId")   # the run's own conversation (A2)
+        reader = AntigravityTraceReader(engine, allowed)
+        if reader._descriptor(arguments.get("Path")) or reader._saved_output(arguments.get("Path"), conversation):
             return {"decision": "allow"}
     return deny
 

@@ -238,6 +238,7 @@ def nuitka_command(output, ico, jobs=None, compiler="zig", python=None):
     command += ["--include-module=" + name for name in build_macos.product_modules() + list(build_macos.STRING_IMPORTS)
                 + sorted({name for package in UNCOMPILED for name in build_macos.foreign_imports(package)})]
     command += resources.nuitka_arguments(REPO)
+    command += list(build_macos.TLS_ARGUMENTS)   # truststore + certifi (tls_setup.py)
     # Windows has no system time-zone database: zoneinfo reads the tzdata package's files.
     command += ["--include-package=tzdata", "--include-package-data=tzdata"]
     return command + [str(ENTRY)]
@@ -734,6 +735,10 @@ def main(argv=None):
     if settings:
         signed = sign(app, settings)
         print("signed %d files" % len(signed))
+    # The TLS release gate (0.4.0 T5, tools/check_release_tls_windows.py) on the finished (signed) build,
+    # before packing: no zip or installer is made from a build whose HTTPS fails.
+    import check_release_tls_windows
+    check_release_tls_windows.check(app)
     archive, digest = pack(app, output, arch)
     print("built %s (version %s, %s, %.1f MB); %s %.1f MB sha256 %s" % (
         app, version.current(), arch, size(app) / 1e6, archive.name, archive.stat().st_size / 1e6, digest))

@@ -62,6 +62,18 @@ class ResearchToolsTests(unittest.TestCase):
         self.assertIn("its source link was not a public web address", bad["content"][0]["text"])
         self.assertEqual([entry["company"] for entry in self.journal("discovery")], ["Real Discovery Co"])
 
+    def test_a_time_a_few_minutes_ahead_is_saved_as_now_and_a_later_one_is_refused(self):
+        # C3: Claude guesses observed_at slightly ahead of now; that guess is saved, stamped as now.
+        ahead = lambda minutes: (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=minutes)).isoformat()
+        replies = self.serve("discovery", [("save_company", {"company": company("Near Co", observed_at=ahead(2))}),
+                                           ("save_company", {"company": company("Far Co", observed_at=ahead(30))})])
+        self.assertFalse(replies[2]["result"]["isError"])
+        self.assertTrue(replies[3]["result"]["isError"])
+        self.assertIn("in the future", replies[3]["result"]["content"][0]["text"])
+        [saved] = self.journal("discovery")
+        self.assertEqual(saved["company"], "Near Co")
+        self.assertLessEqual(dt.datetime.fromisoformat(saved["observed_at"]), dt.datetime.now(dt.timezone.utc))
+
     def test_save_company_holds_to_the_session_allowance_and_a_resave_replaces(self):
         replies = self.serve("discovery", [("save_company", {"company": company("One Co")}),
                                            ("save_company", {"company": company("One Co", excerpt="One Co, fixed.")}),

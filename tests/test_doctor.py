@@ -96,8 +96,8 @@ class HealthyHomeTest(DoctorBase):
             lines = self.run_doctor()
         names = [line["name"] for line in lines]
         self.assertEqual(names, ["Python and Sidedoor", "Home folder", "Setup file", "Profile", "Résumé", "Credentials", "OpenRouter",
-                                 "Codex", "Google Chrome", "Browser runtime", "License", "LinkedIn", "Database",
-                                 "Recent failures", "Model cost", "Scheduler", "Tray icon", "PDF writer", "App location",
+                                 "Codex", "Google Chrome", "Browser runtime", "Secure connection", "License", "LinkedIn",
+                                 "Database", "Recent failures", "Model cost", "Scheduler", "Tray icon", "PDF writer", "App location",
                                  "Disk space", "Computer"])
         self.assertEqual({line["name"]: line["status"] for line in lines if line["status"] != "OK"}, {})
         found = self.by_name(lines)
@@ -342,3 +342,84 @@ class RunChecksPageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def answered(stdout, returncode=0):
+    return mock.Mock(return_value=mock.Mock(returncode=returncode, stdout=stdout, stderr=""))
+
+
+class ChosenEngineTest(DoctorBase):
+    """C1: doctor checks the engine chosen in Setup, with Setup's own probes, and no other engine."""
+
+    def choose(self, engine, **saved):
+        self.healthy()
+        program = self.home / engine
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+        state = json.loads((self.home / "setup-state.json").read_text())
+        state.pop("codex_path")
+        state.update(engine=engine, **{engine + "_path": str(program)}, **saved)
+        (self.home / "setup-state.json").write_text(json.dumps(state))
+        return program
+
+    def engine_lines(self, run):
+        with mock.patch.object(setup_steps, "find_codex", side_effect=AssertionError("Codex was checked")):
+            lines = self.run_doctor(codex_run=run)
+        return [line for line in lines if line["name"] in ("Codex", "Claude", "Antigravity")]
+
+    def test_claude_signed_in(self):
+        program = self.choose("claude")
+        run = answered(json.dumps({"loggedIn": True, "authMethod": "claude.ai"}))
+        self.assertEqual(self.engine_lines(run), [{"status": "OK", "name": "Claude", "line": "Installed and signed in.",
+                                                   "todo": ""}])
+        self.assertEqual(run.call_args[0][0], [str(program), "auth", "status"])
+
+    def test_claude_signed_out_and_missing(self):
+        self.choose("claude")
+        [line] = self.engine_lines(answered(json.dumps({"loggedIn": False})))
+        self.assertEqual((line["status"], line["line"]), ("FAIL", "Claude is installed but not signed in."))
+        with mock.patch.object(setup_steps, "find_claude", return_value=None):
+            [line] = self.engine_lines(answered(""))
+        self.assertEqual((line["name"], line["line"]), ("Claude", "Claude is not installed."))
+
+    def test_claude_with_an_api_key_runs_nothing(self):
+        credential_fixtures.use_fake(self)
+        self.choose("claude", claude_auth="api_key")
+        credentials.put("anthropic", "sk-ant-fake-0123456789abcdWXYZ", self.home)
+        run = answered("")
+        [line] = self.engine_lines(run)
+        self.assertEqual((line["status"], line["line"]), ("OK", "Installed; uses Anthropic API key ...WXYZ."))
+        run.assert_not_called()
+
+    def test_antigravity(self):
+        program = self.choose("antigravity")
+        run = answered("claude-sonnet\tClaude Sonnet\n")
+        self.assertEqual(self.engine_lines(run), [{"status": "OK", "name": "Antigravity",
+                                                   "line": "Installed and signed in.", "todo": ""}])
+        self.assertEqual(run.call_args[0][0], [str(program), "models"])
+        [line] = self.engine_lines(answered("Open https://accounts.google.com/o/oauth2 to sign in"))
+        self.assertEqual((line["status"], line["line"]), ("FAIL", "Antigravity is installed but not signed in."))
+
+
+class AppLocationRedactionTest(DoctorBase):
+    def test_the_app_path_is_shown_and_web_addresses_are_still_hidden(self):
+        # C2/D1: Sidedoor's own program path stays readable on the App location line; the URL rule itself
+        # is unchanged, so a web address elsewhere on that line, or on any other line, is still hidden.
+        import scheduler_loop
+        program = "/Applications/Sidedoor.app/Contents/MacOS/sidedoor"
+        lines = [doctor._line(doctor.OK, "App location", "Fine for start at login (Sidedoor runs from %s)." % program,
+                              "See openrouter.ai/settings/keys?k=abc"),
+                 doctor._line(doctor.OK, "Computer", "Ran %s." % program)]
+        with mock.patch("failures_page.secrets_of", return_value=[TOKEN]), \
+                mock.patch.object(scheduler_loop, "program", return_value=program):
+            app, other = doctor.redacted(lines, self.home, {})
+        self.assertEqual(app["line"], "Fine for start at login (Sidedoor runs from %s)." % program)
+        self.assertEqual(app["todo"], "See <url>")
+        self.assertNotIn(program, other["line"])
+
+
+class ExampleProfileTest(DoctorBase):
+    def test_the_example_profile_is_complete(self):
+        # C5: profile.example.json carries every field Setup's profile form needs.
+        shutil.copy(user_profile.EXAMPLE_PROFILE, self.home / "profile.json")
+        self.assertEqual(doctor.check_profile(self.home)["status"], "OK", doctor.check_profile(self.home))

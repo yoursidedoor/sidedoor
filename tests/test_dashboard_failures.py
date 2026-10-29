@@ -446,6 +446,17 @@ class ReviewFixTest(GatherBase):
         self.assertTrue(rows["owner"]["needs_you"])
         self.assertEqual(listing["counts"]["needs_you"], len(view["needs_you"]))
 
+    def test_l3_waiting_for_confirmation_after_a_lost_observation_shows_no_reason_line(self):
+        # Owner, 2026-10-29 (L3): no "lost track" sentence, and never the raw code in its place.
+        import applications_page
+        self.job_row("lost", "RECONCILE", "SUBMISSION_OBSERVATION_LOST")
+        self.job_row("unknown", "RECONCILE", "SUBMISSION_OUTCOME_UNKNOWN")
+        rows = {row["key"]: row for row in applications_page.gather(self.database, CONFIG, None, now=self.now)["list"]["jobs"]}
+        self.assertEqual((rows["lost"]["state"], rows["lost"]["problem"]), ("Waiting for confirmation", None))
+        self.assertIsNotNone(rows["unknown"]["problem"])   # only the owner's named code loses its line
+        self.assertNotIn("SUBMISSION_OBSERVATION_LOST", json.dumps(rows["lost"], default=str))
+        self.assertNotIn("lost", [item["href"].split("=")[-1] for item in self.items(self.gather(), "applications")])
+
     def test_f6_an_interrupted_write_says_what_is_true(self):
         task(self.database, "w", "message_writer", "UNCERTAIN", self.now - dt.timedelta(hours=1), "INTERRUPTED_ATTEMPT",
              events=("UNCERTAIN",), effect="WRITE")

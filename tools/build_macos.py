@@ -22,8 +22,20 @@ release's title and tag and inside the app. A signed build keeps every data file
 folder below in Contents/Resources with a symlink at the Contents/MacOS path named here (codesign takes
 every file in Contents/MacOS as code); the program sees the same paths.
 
-The build venv holds the project's runtime dependencies (`pip install -e .`) plus nuitka,
-ordered-set and zstandard. The result is <output>/Sidedoor.app:
+Both builds use one Python: python.org's universal2 Python 3.13.17 framework (E3, E9; installer URL and
+SHA-256 in tools/build-requirements-macos.txt), extracted and made to run in place with
+tools/relocate_framework.py. Any other Python is refused (`refuse_non_python_org`): Homebrew's is built
+for the build Mac's own macOS (minos 15.0), so every Mach-O Nuitka makes from it would be too, and it
+puts Homebrew paths into the bundle. The arm64 venv is `arch -arm64 <framework>/bin/python3.13 -m venv`,
+the Intel one `arch -x86_64 ... -m venv`, from the same framework, each with
+`pip install -r tools/build-requirements-macos.txt`. Nuitka compiles for the minimum macOS it reads from
+the interpreter binary (python.org's: 11.0 on arm64, 10.13 on x86_64; it overrides any
+MACOSX_DEPLOYMENT_TARGET), so the interpreter is the control. The app declares LSMinimumSystemVersion
+MINIMUM_MACOS (`--macos-app-macos-min-version`), and the build fails when any Mach-O in the bundle needs
+a newer macOS than that (`check_release_tls.above_minimum`).
+
+The build venv holds exactly tools/build-requirements-macos.txt (the project's runtime dependencies
+plus nuitka, ordered-set and zstandard). The result is <output>/Sidedoor.app:
 
     Contents/MacOS/sidedoor            the `sidedoor` command (tools/sidedoor.py -> orchestrator.cli);
                                        a double-click runs `sidedoor serve` (orchestrator.main). A
@@ -60,6 +72,7 @@ import importlib.util
 import ast
 import platform
 import re
+import sysconfig
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -89,6 +102,9 @@ PACKAGE_FILES = ("package.json", "package-lock.json")
 STRING_IMPORTS = ("uvicorn.loops.auto", "uvicorn.loops.asyncio", "uvicorn.protocols.http.auto",
                   "uvicorn.protocols.http.h11_impl", "uvicorn.protocols.websockets.auto",
                   "uvicorn.lifespan.on", "uvicorn.lifespan.off", "anyio._backends._asyncio")
+# HTTPS trust (hotfix 2026-10-28, tls_setup.py): truststore (the OS trust store) and certifi with its
+# cacert.pem (the fallback), compiled in whole on both builds; tools/check_release_tls.py gates the result.
+TLS_ARGUMENTS = ("--include-package=truststore", "--include-package=certifi")   # certifi's cacert.pem comes with it (Nuitka's package config)
 # Nuitka is pinned: the frozen-mode facts this build relies on (`__compiled__.process_exe`, the
 # excluded-module-usage flag) were observed with this version.
 NUITKA_VERSION = "4.3.1"
@@ -130,21 +146,13 @@ From Pillow's wheel (their full licence texts are in Pillow's licence above):
 
 From the Python build ({python_build}):
 {python_dylibs}"""
-# What each Python build ships as dylibs: Homebrew's python@3.13 (the arm64 build) links OpenSSL, xz,
-# mpdecimal and sqlite as shared libraries; python.org's framework (the Intel build) links OpenSSL and
-# ncurses as shared libraries and sqlite, mpdecimal and xz into its modules (Pillow's wheel brings liblzma).
-PYTHON_DYLIBS = {
-    "homebrew": """- OpenSSL 3 (libssl, libcrypto): Apache License 2.0.
-- liblzma (XZ Utils): 0BSD.
-- libmpdec (mpdecimal): BSD-2-Clause.
-- sqlite (libsqlite3): public domain.
-""",
-    "python.org": """- OpenSSL 3 (libssl, libcrypto): Apache License 2.0.
+# What python.org's framework (both builds) ships as dylibs: OpenSSL and ncurses as shared libraries,
+# sqlite, mpdecimal and xz linked into its modules (Pillow's wheel brings liblzma).
+PYTHON_DYLIBS = """- OpenSSL 3 (libssl, libcrypto): Apache License 2.0.
 - ncurses (libncurses): MIT (X11 style).
 - linked into Python's own modules: sqlite (public domain), mpdecimal (BSD-2-Clause), XZ Utils (0BSD).
 - liblzma (XZ Utils, from Pillow's wheel): 0BSD.
-""",
-}
+"""
 # Their licence texts on the build machine, appended when present.
 DYLIB_TEXTS = (("OpenSSL 3", "/opt/homebrew/opt/openssl@3/LICENSE.txt"),
                ("XZ Utils (liblzma)", "/opt/homebrew/opt/xz/COPYING.0BSD"),
@@ -154,6 +162,16 @@ PERSONAL = ("/private/tmp/claude-501", "/Users/")
 # Mach-O CPU types (mach/machine.h) for the two macOS targets.
 CPU_TYPES = {0x01000007: "x86_64", 0x0100000C: "arm64"}
 ARCHES = ("arm64", "x86_64")
+# The oldest macOS the app runs on (E4), Info.plist's LSMinimumSystemVersion: the highest minimum of the
+# bundled pieces, read from their LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX (otool -l), 2026-10-29:
+#   Node v24.22.1 (darwin-arm64 and darwin-x64)         13.5   <- the highest
+#   python.org Python 3.13 framework, its modules        11.0 arm64, 10.13 x86_64
+#   wheels (Pillow, PyObjC, pydantic-core, ...)          11.0 arm64
+#   Nuitka's compiled binary                             the interpreter's (11.0 arm64, 10.13 x86_64)
+#   @playwright/mcp                                      JavaScript only, no native addon
+MINIMUM_MACOS = "13.5"
+# python.org's framework build, as its sysconfig records it (an extracted, relocated copy still does).
+PYTHON_ORG_FRAMEWORK = "/Library/Frameworks/Python.framework/"
 
 def product_modules():
     """Every top-level product module (pyproject's py-modules) except the manual_* developer tools,
@@ -233,6 +251,19 @@ def check_arch(app, arch):
     return found
 
 
+def refuse_non_python_org():
+    """SystemExit unless the build interpreter is python.org's framework build: sysconfig's PYTHONFRAMEWORK
+    is "Python" and its configured prefix is under /Library/Frameworks/Python.framework. Homebrew, pyenv,
+    MacPorts, conda and uv Pythons are refused (E3: Homebrew's binaries need the build Mac's macOS)."""
+    framework = sysconfig.get_config_var("PYTHONFRAMEWORK")
+    prefix = str(sysconfig.get_config_var("prefix") or "")
+    if framework != "Python" or not (prefix + "/").startswith(PYTHON_ORG_FRAMEWORK):
+        raise SystemExit("the build Python is not python.org's framework build (prefix %s, framework %r; this "
+                         "is %s): build from a venv on python.org's universal2 Python 3.13.17 "
+                         "(tools/build-requirements-macos.txt, AGENTS.md \"Mac builds\")"
+                         % (prefix or "unknown", framework, sys.base_prefix))
+
+
 def nuitka_command(output, icns, jobs=None, arch=None):
     arch = arch or host_arch()
     python = sys.executable
@@ -251,6 +282,7 @@ def nuitka_command(output, icns, jobs=None, arch=None):
                "--report=" + str(Path(output) / "compilation-report.xml"),
                "--macos-app-name=" + APP, "--macos-app-version=" + version.current(),
                "--macos-app-icon=" + str(icns), "--macos-app-mode=gui",
+               "--macos-app-macos-min-version=" + MINIMUM_MACOS,   # Info.plist LSMinimumSystemVersion
                "--output-dir=" + str(output), "--output-filename=" + BINARY,
                "--nofollow-import-to=tests", "--nofollow-import-to=spikes", "--nofollow-import-to=manual_*",
                # The LGPL libraries are not compiled and are imported from their folders at run time:
@@ -263,6 +295,7 @@ def nuitka_command(output, icns, jobs=None, arch=None):
     command += ["--include-module=" + name for name in product_modules() + list(STRING_IMPORTS)
                 + sorted({name for package in UNCOMPILED for name in foreign_imports(package)})]
     command += resources.nuitka_arguments(REPO)
+    command += list(TLS_ARGUMENTS)
     if sys.platform == "win32":
         # Windows has no system time-zone database: zoneinfo reads the tzdata package's files
         # (pyproject.toml, win32 only), which Nuitka must carry as data.
@@ -409,12 +442,10 @@ def third_party_notices(app, report):
             "-" * 40, "\n\n".join("[%s]\n%s" % (file_name, text) for file_name, text in files)))
     if missing:
         raise SystemExit("compiled-in distributions with no licence file: " + ", ".join(missing))
-    flavour = "homebrew" if "/opt/homebrew/" in str(Path(sys.base_prefix).resolve()) else "python.org"
-    parts.append(DYLIBS.format(python_build="Homebrew python@3.13" if flavour == "homebrew"
-                               else "python.org Python %s framework" % sys.version.split()[0],
-                               python_dylibs=PYTHON_DYLIBS[flavour]))
+    parts.append(DYLIBS.format(python_build="python.org Python %s framework" % sys.version.split()[0],
+                               python_dylibs=PYTHON_DYLIBS))
     for label, where in DYLIB_TEXTS:
-        if Path(where).is_file() and (flavour == "python.org" or "python.org build" not in label):
+        if Path(where).is_file():
             parts.append("%s\n%s\n%s" % (label, "-" * 40, Path(where).read_text(encoding="utf-8", errors="replace")))
     parts.append("Node.js and @playwright/mcp: see Contents/MacOS/browser-runtime (node/LICENSE and each "
                  "package's LICENSE under node_modules).\n")
@@ -502,6 +533,7 @@ def main(argv=None):
         raise SystemExit("--notarize needs --sign")
     if sys.platform != "darwin":
         raise SystemExit("build_macos.py builds on macOS only")
+    refuse_non_python_org()
     if importlib.metadata.version("nuitka") != NUITKA_VERSION:
         raise SystemExit("Nuitka %s is pinned; this venv has %s" % (NUITKA_VERSION, importlib.metadata.version("nuitka")))
     output = args.output.expanduser().resolve()
@@ -521,17 +553,29 @@ def main(argv=None):
                  args.node.expanduser().resolve() if args.node else None, args.arch)
     copy_uncompiled(app)
     print("architecture: %d Mach-O files, all %s only" % (check_arch(app, args.arch), args.arch))
+    sys.path.insert(0, str(REPO / "tools"))
+    import check_release_tls
+    newer = check_release_tls.above_minimum(app)
+    if newer:
+        raise SystemExit("Mach-O files that need a newer macOS than LSMinimumSystemVersion %s: %s"
+                         % (MINIMUM_MACOS, "; ".join("%s (%s)" % item for item in newer)))
+    print("macOS minimum: LSMinimumSystemVersion %s; no Mach-O needs a newer one" % MINIMUM_MACOS)
     smoke_uncompiled(app, args.arch)
     clean_and_check(app)
     compiled = third_party_notices(app, output / "compilation-report.xml")
     print("compiled-in distributions: " + ", ".join(compiled))
     print("built %s (version %s, %s, %.1f MB)" % (app, version.current(), args.arch, size(app) / 1e6))
     if args.sign:
-        # Last: nothing may be written into the bundle after it is sealed.
-        sys.path.insert(0, str(REPO / "tools"))
+        # Last: nothing may be written into the bundle after it is sealed. The TLS release gate runs on
+        # the signed app before it is notarized.
         import sign_macos
-        sign_macos.finish(app, args.sign, args.notarize, output)
+        sign_macos.finish(app, args.sign, args.notarize, output,
+                          gate=lambda signed: check_release_tls.check(signed, args.arch))
         print("architecture after signing: %d Mach-O files, all %s only" % (check_arch(app, args.arch), args.arch))
+    else:
+        print("NOT RELEASE-CHECKED: this unsigned build did not run the TLS release gate (it needs codesign "
+              "--verify to pass). It is a development build only: never publish it. A release build uses "
+              "--sign (and --notarize), which runs the gate before notarizing.")
     return 0
 
 

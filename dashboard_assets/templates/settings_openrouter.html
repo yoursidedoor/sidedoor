@@ -6,7 +6,8 @@
   {% if x.keychain_wait and x.keychain_wait != x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_wait }}</p>{% endif %}
   {% if not x.keychain_wait or x.offer_file %}
   {% if x.keychain_wait %}{% elif x.openrouter_key %}<p>Key saved, ending in <code>{{ x.openrouter_key }}</code>.{% if x.openrouter_untested %} It hasn't been tested yet.{% endif %}</p>{% else %}<p class="muted">No key saved yet.</p>{% endif %}
-  {% if o.message %}<p class="note note-{{ 'success' if o.status == 'done' else 'error' }}" role="status">{{ x.say(o.message) }}</p>{% endif %}
+  {% if x.license_key_notice %}<p class="note note-error" role="status">{{ x.license_key_notice }}</p>
+  {% elif o.message %}<p class="note note-{{ 'success' if o.status == 'done' else 'error' }}" role="status">{{ x.say(o.message) }}</p>{% endif %}
   {% if x.openrouter_key and not x.keychain_wait %}
   <form method="post" action="/settings/openrouter/test" hx-post="/settings/openrouter/test" hx-target="#connection-openrouter" hx-swap="outerHTML" hx-disabled-elt="find button">
     <button class="button {{ 'button-highlight' if x.openrouter_untested else 'button-quiet' }}" type="submit">{{ "Test saved key" if x.openrouter_untested else "Test" }}</button> <span class="htmx-indicator muted">Checking...</span></form>

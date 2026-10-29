@@ -7,9 +7,11 @@ import importlib.util
 import json
 import shutil
 import sqlite3
+import ssl
 import tempfile
 import os
 import unittest
+import urllib.error
 import urllib.parse
 from pathlib import Path
 from unittest import mock
@@ -171,8 +173,7 @@ class SummaryTest(unittest.TestCase):
     # RP1: a read the scrubs need that fails refuses the summary (fail closed).
     def test_refuses_when_a_scrub_input_cannot_be_read(self):
         base.database_with_schema(self.root).close()
-        cases = {"profile missing": lambda: (self.home / "profile.json").unlink(),
-                 "profile unreadable": lambda: (self.home / "profile.json").write_text("{not json"),
+        cases = {"profile unreadable": lambda: (self.home / "profile.json").write_text("{not json"),
                  "database": lambda: mock.patch.object(report_problem, "recorded_names",
                                                        side_effect=sqlite3.DatabaseError("malformed")).start(),
                  "résumé": lambda: mock.patch("reply_resume.context", side_effect=ValueError("REPLY_RESUME_UNAVAILABLE")).start()}
@@ -190,6 +191,41 @@ class SummaryTest(unittest.TestCase):
                             report_problem.build(self.home, self.root, base.CONFIG, base.SECRET)
                 finally:
                     mock.patch.stopall()
+
+    def test_builds_before_the_profile_is_saved(self):
+        # T1 (0.4.0): Setup step 1's "Run Report a problem" works: no profile yet is not a refusal. The
+        # Setup form's personal values (saved in the setup file) are still scrubbed.
+        (self.home / "profile.json").unlink()
+        checks = [line("FAIL", "Profile", "There is no profile yet."),
+                  line("OK", "Home folder", "Hello %s %s at %s." % (NAME, SURNAME, EMAIL))]
+        with mock.patch.object(Path, "home", return_value=FAKE_USER_HOME):
+            text = self.summary_of(checks)
+        self.assertIn("FAIL  Profile: There is no profile yet.", text)
+        for planted in (NAME, SURNAME, EMAIL):
+            self.assertNotIn(planted.lower(), text.lower(), planted)
+
+    def test_secure_connection_detail_and_failed_setup_steps_are_in_the_summary_redacted(self):
+        # T2 (0.4.0): the certificate cause shows (trust mode, error class, error) and so does Setup's
+        # saved step error; both through the same redaction as every line.
+        def change(state):
+            state["steps"]["openrouter"] = {
+                "status": "failed", "message": setup_steps.CERTIFICATE_FAILED % "OpenRouter's",
+                "error_class": "URLError", "at": "2026-10-29T00:00:00Z", "raw": {"path": str(self.home / "x")},
+                "error": "transport URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify "
+                         "failed: unable to get local issuer certificate> for %s key %s in %s" % (EMAIL, OPENROUTER, self.home)}
+        setup_steps.update_state(change, self.home)
+        secure = dict(line("FAIL", "Secure connection", doctor.SECURE_FAILED),
+                      detail={"trust": "truststore", "error_class": "URLError",
+                              "error": "transport URLError: [SSL: CERTIFICATE_VERIFY_FAILED] at %s %s" % (self.home, LICENSE)})
+        with mock.patch.object(Path, "home", return_value=FAKE_USER_HOME):
+            text = self.summary_of([secure])
+        self.assertIn("FAIL  Secure connection: " + doctor.SECURE_FAILED, text)
+        self.assertIn("    trust: truststore\n    error_class: URLError\n", text)
+        self.assertIn("    error: transport URLError: [SSL: CERTIFICATE_VERIFY_FAILED] at [path]", text)
+        self.assertIn("Setup steps that failed:\n  openrouter: Sidedoor couldn't verify OpenRouter's secure connection", text)
+        self.assertIn("unable to get local issuer certificate", text)
+        for planted in (EMAIL, OPENROUTER, LICENSE, "7Q2W", str(self.home), "raw"):
+            self.assertNotIn(planted, text, planted)
 
     # Every string leaf of the profile is personal, whatever its key or length (confirming check).
     def test_every_profile_string_is_scrubbed(self):
@@ -292,6 +328,10 @@ class EndpointTest(unittest.TestCase):
         chrome = mock.patch.object(setup_steps, "chrome_path", return_value="/chrome")
         chrome.start()
         self.addCleanup(chrome.stop)
+        # The summary's Secure connection test (T2) never reaches the network in tests.
+        self.secure = mock.patch("text_model.check_connection", return_value=200)
+        self.secure.start()
+        self.addCleanup(self.secure.stop)
 
     def tearDown(self):
         self.directory.cleanup()
@@ -312,16 +352,48 @@ class EndpointTest(unittest.TestCase):
 
     def test_refusal_says_so_and_carries_no_summary_or_address(self):
         self.client.get("/", params={"t": base.SECRET})
-        (self.home / "profile.json").unlink()
+        (self.home / "profile.json").write_text("{not json")
         with mock.patch.object(failures_page, "_redaction_complete", return_value=True):
             response = self.client.post("/report-problem", headers=ORIGIN)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {"error": report_problem.REFUSED})
         self.assertEqual(report_problem.REFUSED, "Sidedoor couldn't build a safe summary right now. Try again in a minute.")
 
+    def test_setup_step_one_reports_a_certificate_failure_through_the_app_defaults(self):
+        # T1 + T2 through the app's entry point with its defaults (home=None, SIDEDOOR_HOME set): a new
+        # install on Setup step 1 (no profile, no database), truststore loaded but verification failing.
+        import text_model
+        import tls_setup
+        fresh = self.root / "fresh"
+        fresh.mkdir()
+        setup_steps.record(fresh, "openrouter", "failed", setup_steps.CERTIFICATE_FAILED % "OpenRouter's",
+                           error_class="URLError", error="transport URLError: [SSL: CERTIFICATE_VERIFY_FAILED]")
+        failure = text_model._transport_failure(urllib.error.URLError(ssl.SSLCertVerificationError(
+            1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate")), None)
+        tls_setup.reset()
+        self.addCleanup(tls_setup.reset)
+        tls_setup.configure({}, inject=lambda: None)   # truststore loaded fine
+        with mock.patch.dict(os.environ, {"SIDEDOOR_HOME": str(fresh)}), \
+                mock.patch.object(failures_page, "_redaction_complete", return_value=True), \
+                mock.patch("text_model.check_connection", side_effect=failure):
+            app = dashboard.create_app(base.SECRET, base.PORT, root=self.root / "fresh-data", config=base.CONFIG)
+            client = TestClient(app, base_url=f"http://127.0.0.1:{base.PORT}", follow_redirects=False)
+            client.get("/", params={"t": base.SECRET})
+            page = client.get("/setup").text
+            response = client.post("/report-problem", headers=ORIGIN)
+        self.assertIn('id="report-problem-button"', page)
+        self.assertIn('<script src="/static/report_problem.js?v=%s" defer></script>' % version.current(), page)
+        self.assertEqual(response.status_code, 200, response.text)
+        text = response.json()["summary"]
+        self.assertIn("FAIL  Profile: There is no profile yet.", text)
+        self.assertIn("FAIL  Secure connection: " + doctor.SECURE_FAILED, text)
+        self.assertNotIn("OK  Secure connection", text)
+        self.assertIn("    trust: truststore\n    error_class: URLError\n", text)
+        self.assertIn("  openrouter: Sidedoor couldn't verify OpenRouter's secure connection", text)
+
     def test_button_renders_on_failures_and_settings(self):
         self.client.get("/", params={"t": base.SECRET})
-        for path in ("/failures", "/settings"):
+        for path in ("/failures", "/settings", "/setup"):
             page = self.client.get(path).text
             self.assertIn('id="report-problem-button"', page, path)
             self.assertIn('<script src="/static/report_problem.js?v=%s" defer></script>' % version.current(), page, path)

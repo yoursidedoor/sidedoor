@@ -117,6 +117,7 @@ def _execute(config, prompt, directory, timeout):
     engine = engines.engine(config)
     environment = engine.base_environment()
     worker = arguments = None
+    timed_out = False
     with tempfile.TemporaryDirectory(prefix="agent-web-") as working, (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
             missing = engine.wait(config)
@@ -126,12 +127,19 @@ def _execute(config, prompt, directory, timeout):
             arguments = _command(config, directory)
             # Which engine wrote this attempt's trace (U1 3a), with a Claude run's allowed tools (3c C3).
             engines.record_run(directory, engine, command=arguments)
-            worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
-                                      stderr=errors, text=True, encoding="utf-8",
+            child_environment = engine.environment(arguments, environment)
+            # E10: a .cmd shim (npm, pnpm, yarn) is started as the program it runs, never through cmd.exe.
+            launch, child_environment = portable.direct_command(arguments, child_environment)
+            worker = subprocess.Popen(launch, stdin=subprocess.PIPE,
+                                      stdout=trace, stderr=errors, text=True, encoding="utf-8",
                                       cwd=getattr(arguments, "cwd", None) or working,
-                                      env=engine.environment(arguments, environment), **portable.worker_spawn_options())
+                                      env=child_environment, **portable.worker_spawn_options())
             portable.contain(worker)
-            worker.communicate(engine.prompt_input(prompt), timeout=timeout)
+            try:
+                worker.communicate(engine.prompt_input(prompt), timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                raise
             if engine.judged_by_stream:   # Claude, Antigravity (U1 4)
                 # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the exit
                 # code; a clean run's answer is written to output.json.
@@ -158,6 +166,9 @@ def _execute(config, prompt, directory, timeout):
             for stream in (trace, errors):
                 stream.flush()
                 os.fsync(stream.fileno())
+            if timed_out:   # A5: stopped at its time limit, its model_calls row all the same
+                engine.record_timed_out(directory / "trace.jsonl", command=arguments,
+                                        worker=WORKER, seconds=timeout)
 
 
 def _read(path, limit=MAX_BYTES):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidedoor"
-version = "0.3.0"
+version = "0.4.0"
 description = "Referral-first job-search agent for engineers that runs on your machine."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -38,6 +38,11 @@ dependencies = [
     # Windows has no system time-zone database: every zoneinfo call needs tzdata there (E2.T2 report,
     # VM pass 2026-10-23). Same pin as .github/requirements-ci.txt.
     "tzdata==2025.2; sys_platform == 'win32'",
+    # HTTPS trust (hotfix 2026-10-28, tls_setup.py): the built app's OpenSSL looks for certificates in
+    # the build machine's folders, so every process verifies against the OS trust store (truststore,
+    # MIT) with certifi's CA file (MPL-2.0) as the fallback. Both released at least two weeks before.
+    "truststore==0.10.4",
+    "certifi==2026.7.22",
 ]
 
 [project.optional-dependencies]
@@ -171,6 +176,7 @@ py-modules = [
     "strategy_execution",
     "support_email",
     "text_model",
+    "tls_setup",
     "tray",
     "unipile_port", "sequence", "pacing",
     "user_profile",

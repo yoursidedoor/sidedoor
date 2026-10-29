@@ -206,6 +206,153 @@ def no_window():
     return {"creationflags": CREATE_NO_WINDOW} if WINDOWS else {}
 
 
+def direct_command(argv, environment=None):
+    """E10, Windows: (argv, environment) to start when `argv[0]` is a package manager's .cmd shim
+    (`claude.cmd`, `agy.cmd`, `codex.cmd` from npm, pnpm or yarn). A .cmd or .bat runs through cmd.exe,
+    which reads quotes, %, &, ^ and ! in the arguments again and stops at 8,191 characters, and Sidedoor
+    passes JSON schemas and long tool lists. Each manager writes its shims from a fixed template: npm's
+    cmd-shim, and @zkochan/cmd-shim for pnpm and yarn (`_shim_program`). The program a recognised shim runs
+    (node.exe next to it, else node on the PATH, with the package's script; or the package's own .exe) is
+    started directly with `argv[1:]`, and the variables the shim sets (pnpm's and yarn's NODE_PATH) are set
+    the same way on the child's `environment`. Anything else (POSIX, an .exe, a shim shape not recognised,
+    no node found) is returned unchanged, so it runs as before. `environment`: the child's variables, whose
+    PATH is searched for node (then the usual install folders, as for Codex's node)."""
+    if not WINDOWS or not argv or not isinstance(argv[0], str) or not argv[0].lower().endswith((".cmd", ".bat")):
+        return argv, environment
+    found = _shim_program(argv[0], dict(environment if environment is not None else os.environ))
+    if found is None:
+        return argv, environment
+    program, variables = found
+    return program + list(argv[1:]), variables
+
+
+def direct_argv(argv, environment=None):
+    """The argv of `direct_command` alone."""
+    return direct_command(argv, environment)[0]
+
+
+# Every line of npm's cmd-shim .cmd before its last ones (cmd-shim 8, npm 11).
+_NPM_HEAD = ["@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL",
+             "CALL :find_dp0"]
+_SAFE_ARGUMENTS = r'[^"%^&!|<>]*?'
+_PATHEXT = "SET PATHEXT=%PATHEXT:;.JS;=;%"
+
+
+def _shim_program(shim, environment, depth=0):
+    """([program, script...], environment) that the shim at `shim` runs, or None when it is not one of the
+    templates. Every line must be the template's own: a shim that does anything else is left to cmd.exe."""
+    import re
+    try:
+        with open(shim, encoding="utf-8", errors="replace") as stream:
+            text = stream.read(64 * 1024)
+    except OSError:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    folder = os.path.dirname(os.path.abspath(shim))
+
+    def place(quoted):
+        """A quoted path of the shim: under %dp0% (its folder), or absolute; None if it holds a variable."""
+        relative = re.fullmatch(r"%~?dp0%?\\(.+)", quoted)
+        if relative:
+            quoted = os.path.normpath(os.path.join(folder, *[part for part in relative.group(1).split("\\") if part]))
+        return None if "%" in quoted else quoted
+
+    if lines[:len(_NPM_HEAD)] == _NPM_HEAD:   # npm
+        rest = lines[len(_NPM_HEAD):]
+        if len(rest) == 1:   # no shebang: the package's own program
+            found = re.fullmatch(r'"(%dp0%\\[^"]+)"\s*%\*', rest[0])
+            return _own_program(place(found.group(1)) if found else None, environment, depth)
+        named = re.fullmatch(r'IF EXIST "%dp0%\\([A-Za-z0-9_.-]+)\.exe" \(', rest[0]) if len(rest) == 7 else None
+        if named is None:
+            return None
+        name = named.group(1)
+        if rest[1:6] != ['SET "_prog=%%dp0%%\\%s.exe"' % name, ") ELSE (", 'SET "_prog=%s"' % name, _PATHEXT, ")"]:
+            return None
+        found = re.fullmatch(r'endLocal & goto #_undefined_# 2>NUL \|\| title %COMSPEC% & "%_prog%"\s+('
+                             + _SAFE_ARGUMENTS + r')\s*"(%dp0%\\[^"]+)"\s*%\*', rest[6])
+        if found is None:
+            return None
+        return _node_program(name, found.group(1), place(found.group(2)), "", folder, environment)
+
+    # pnpm and yarn (@zkochan/cmd-shim): [@SETLOCAL] [NODE_PATH] then the long or the short form.
+    if lines[:1] == ["@SETLOCAL"]:
+        lines = lines[1:]
+    if lines[:1] == ["@IF NOT DEFINED NODE_PATH ("] and len(lines) >= 5:
+        value = re.fullmatch(r'@SET "NODE_PATH=([^"%]+)"', lines[1])
+        if value is None or lines[2:5] != [") ELSE (", '@SET "NODE_PATH=%s;%%NODE_PATH%%"' % value.group(1), ")"]:
+            return None
+        before = environment.get("NODE_PATH")
+        environment["NODE_PATH"] = value.group(1) + (";" + before if before else "")
+        lines = lines[5:]
+    elif lines[:1] and lines[0].startswith("@SET NODE_PATH="):   # yarn's older line
+        value = lines[0][len("@SET NODE_PATH="):]
+        if not value or "%" in value or '"' in value:
+            return None
+        environment["NODE_PATH"] = value
+        lines = lines[1:]
+    if len(lines) == 1:
+        short = re.fullmatch(r'@"([^"]+)"\s*(.*?)\s*%\*', lines[0])
+        if short is None:
+            return None
+        if not short.group(2):   # no shebang: the package's own program (or yarn's next shim)
+            return _own_program(place(short.group(1)), environment, depth)
+        found = re.fullmatch("(" + _SAFE_ARGUMENTS + r')\s*"([^"]+)"\s*(' + _SAFE_ARGUMENTS + ")", short.group(2))
+        program = place(short.group(1))   # pnpm's nodeExecPath: node's own full path
+        if found is None or program is None or not os.path.isfile(program):
+            return None
+        target = place(found.group(2))
+        if target is None:
+            return None
+        return [program] + found.group(1).split() + [target] + found.group(3).split(), environment
+    if len(lines) not in (6, 7):
+        return None
+    named = re.fullmatch(r'@IF EXIST "%~dp0\\([A-Za-z0-9_.-]+)\.exe" \(', lines[0])
+    if named is None:
+        return None
+    name = named.group(1)
+    tail = r'\s+(' + _SAFE_ARGUMENTS + r')\s*"([^"]+)"\s*(' + _SAFE_ARGUMENTS + r')\s*%\*'
+    first = re.fullmatch(r'"%~dp0\\' + re.escape(name) + r'\.exe"' + tail, lines[1])
+    other = re.fullmatch(re.escape(name) + tail, lines[-2])
+    middle = lines[2:-2]
+    if (first is None or other is None or first.groups() != other.groups() or lines[-1] != ")"
+            or middle not in ([") ELSE (", "@" + _PATHEXT], [") ELSE (", "@SETLOCAL", "@" + _PATHEXT])):
+        return None
+    arguments, target, after = first.groups()
+    return _node_program(name, arguments, place(target), after, folder, environment)
+
+
+def _own_program(target, environment, depth):
+    """The no-shebang form: the package's .exe, or (yarn's global bin) the next shim, read in turn."""
+    if target is None or not os.path.isfile(target):
+        return None
+    if target.lower().endswith(".exe"):
+        return [target], environment
+    if target.lower().endswith((".cmd", ".bat")) and depth < 3:
+        return _shim_program(target, environment, depth + 1)
+    return None
+
+
+def _node_program(name, arguments, target, after, folder, environment):
+    """[<name>.exe next to the shim, else on the PATH, then the shebang's arguments, the script, the extra
+    arguments], as the shim's `IF EXIST "%dp0%\\<name>.exe"` chooses."""
+    import shutil
+    if target is None:
+        return None
+    program = os.path.join(folder, name + ".exe")
+    if not os.path.isfile(program):
+        path = environment.get("PATH", environment.get("Path", ""))
+        try:
+            import setup_steps
+            folders = setup_steps.install_folders()
+        except Exception:
+            folders = []
+        search = os.pathsep.join([part for part in path.split(os.pathsep) if part] + folders)
+        program = shutil.which(name + ".exe", path=search) or shutil.which(name, path=search)
+        if not program:
+            return None
+    return [program] + arguments.split() + [target] + after.split(), environment
+
+
 _jobs = {}
 _jobs_lock = threading.Lock()
 
@@ -255,7 +402,8 @@ def kill_tree(pid):
         import signal
         try:
             os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # macOS: EPERM for a group whose only member is its leader, exited but not yet reaped (R1)
             pass
         return
     with _jobs_lock:

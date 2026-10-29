@@ -70,6 +70,11 @@ class SetupPageTest(unittest.TestCase):
         page = self.client.get("/setup").text
         positions = [page.index('id="step-%d"' % number) for number in range(1, 12)]
         self.assertEqual(positions, sorted(positions))
+        # S1a: the license key comes first; L2: the engine step is titled "Codex".
+        titles = [page.split('id="step-%d"' % number)[1].split("<h2>")[1].split("</h2>")[0] for number in (1, 2, 6)]
+        self.assertEqual(titles, ["License key", "Create your OpenRouter key", "Codex"])
+        self.assertIn("<legend>Which AI Sidedoor uses</legend>", page)   # L1
+        self.assertNotIn("Codex and ChatGPT", page)
         self.assertIn('href="/setup"', page)
         self.assertIn("Setup is not finished: 8 steps left.", page)
         self.assertIn("Needs OpenRouter first", page)
@@ -83,10 +88,55 @@ class SetupPageTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(post.call_args[0][2]["Authorization"], "Bearer " + OPENROUTER_KEY)
         self.assertIn("Key works.", response.text)
-        self.assertIn('id="step-2" hx-swap-oob="true"', response.text)
+        self.assertIn('id="step-3" hx-swap-oob="true"', response.text)   # the résumé, step 3 since S1a
         self.assertIn('name="resume"', response.text)
         page = self.client.get("/setup").text
         self.assertNotIn(OPENROUTER_KEY, page + response.text)
+
+    def test_openrouter_step_shows_how_to_create_a_key_and_names_a_pasted_license_key(self):
+        page = self.client.get("/setup").text
+        step = page[page.index('id="step-2"'):page.index('id="step-3"')]
+        # S1b: three short instructions, a button to OpenRouter's keys page, then the paste box.
+        self.assertEqual(step.split('<ol class="key-how">')[1].split("</ol>")[0].count("<li>"), 3)
+        self.assertLess(step.index('href="https://openrouter.ai/keys"'), step.index('name="key"'))
+        with mock.patch.object(setup_steps.text_model, "_post") as post:
+            response = self.client.post("/setup/openrouter", data={"key": "SD-SECRETKEY"}, headers=HTMX)
+        post.assert_not_called()   # S2: never sent to OpenRouter
+        self.assertIn("That&#39;s your Sidedoor license key. It goes in step 1.", response.text)
+        self.assertIn('<a href="#step-1"', page)   # step 1 is the license, as the message says
+        self.assertIn("License key", page.split('id="step-1"')[1].split("</h2>")[0])
+
+    def test_a_license_key_pasted_over_a_working_openrouter_key_changes_nothing(self):
+        # U1: step 2 stays done, the résumé and Start keep their locks as they were, the saved key is shown.
+        with mock.patch.object(setup_steps.text_model, "_post", return_value=(200, OK_ANSWER)):
+            self.client.post("/setup/openrouter", data={"key": OPENROUTER_KEY}, headers=HTMX)
+        before = setup_steps.progress(self.home)
+        with mock.patch.object(setup_steps.text_model, "_post") as post:
+            response = self.client.post("/setup/openrouter", data={"key": "SD-ABC"}, headers=HTMX).text
+        post.assert_not_called()
+        after = setup_steps.progress(self.home)
+        self.assertEqual((after["done"], after["locked"]), (before["done"], before["locked"]))
+        self.assertEqual(setup_steps.saved_openrouter_key(self.home), OPENROUTER_KEY)
+        step = response.split('id="step-2"')[1].split('id="step-3"')[0]
+        notice = step.index("That&#39;s your Sidedoor license key. It goes in step 1.")
+        # Next to the saved key and its Test button, not in the top message slot above the instructions.
+        self.assertLess(step.index("A key is saved, ending in <code>"), step.index(">Test saved key</button>"))
+        self.assertLess(step.index(">Test saved key</button>"), notice)
+        self.assertLess(notice, step.index('name="key"'))
+        self.assertNotIn("Key works.", step)
+        self.assertIn('<span class="chip chip-success">Done</span>', step)
+        self.assertNotIn(OPENROUTER_KEY, response)
+
+    def test_test_saved_key_on_a_saved_license_key_says_so_on_setup_and_settings(self):
+        # A 0.3.0 user whose saved OpenRouter key is their SD- key: [Test saved key] must answer.
+        setup_steps._save_key("openrouter", "SD-SAVEDLICENSE", self.home, False)
+        with mock.patch.object(setup_steps.text_model, "_post") as post:
+            setup_page = self.client.post("/setup/openrouter/test", headers=HTMX).text
+            settings = self.client.post("/settings/openrouter/test", headers=HTMX).text
+        post.assert_not_called()
+        self.assertIn("That&#39;s your Sidedoor license key. It goes in step 1.", setup_page.split('id="step-3"')[0])
+        self.assertIn("That&#39;s your Sidedoor license key. It goes in License, below.", settings)
+        self.assertEqual(setup_steps.load_state(self.home)["steps"]["openrouter"]["status"], "failed")
 
     def test_gr1_a_saved_untested_key_is_tested_without_retyping(self):
         # A key saved before the tested mark existed (e.g. after [Reset setup file]).
@@ -180,7 +230,7 @@ class SetupPageTest(unittest.TestCase):
     def test_license_step_with_buy_link_and_guide(self):
         page = self.client.get("/setup").text
         self.assertIn('id="buy-license" href="https://yoursidedoor.com" target="_blank"', page)
-        step7 = page[page.index('id="step-7"'):page.index('id="step-8"')]   # locked until the license (step 5)
+        step7 = page[page.index('id="step-7"'):page.index('id="step-8"')]   # locked until the license (step 1)
         self.assertIn("sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.", step7)
         guide = self.client.get("/setup/guide/license", headers={"hx-request": "true"}).text
         self.assertIn("CLAIM_NOT_FOUND", guide)
@@ -335,7 +385,7 @@ class SetupPageTest(unittest.TestCase):
 
     def test_plain_form_post_redirects_back_to_its_step(self):
         response = self.client.post("/setup/mode", data={"mode": "automatic"}, headers=ORIGIN)
-        self.assertEqual((response.status_code, response.headers["location"]), (303, "/setup#step-4"))
+        self.assertEqual((response.status_code, response.headers["location"]), (303, "/setup#step-5"))
         self.assertEqual(self.client.post("/setup/mode", data={"mode": "automatic"}).status_code, 403)
 
     def test_guides(self):

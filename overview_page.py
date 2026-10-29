@@ -825,7 +825,9 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     import provider_limits  # the waits the banners show, read through the same function (never disagree)
     waits = provider_limits.waits(home, now, finished=bool(progress.get("finished")))
 
-    def wait_fix(wait):
+    def wait_fix(wait):   # None for a wait with nothing to do but wait (Antigravity's usage limit, A1)
+        if not wait["banner"].get("action_href"):
+            return None
         return {"label": wait["banner"]["action_label"], "href": wait["banner"]["action_href"]}
 
     openrouter = steps.get("openrouter", {})

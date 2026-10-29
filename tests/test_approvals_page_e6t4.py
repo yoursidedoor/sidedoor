@@ -773,7 +773,7 @@ if DEPENDENCIES:
                 identifier = decision_transport.request_fact(self.database, self.job(job["job_key"]), question, self.policy, fixtures.NOW)
                 # The fixture's clock is in the past; the question is still open today.
                 self.database.execute("UPDATE user_decisions SET expires_at=? WHERE id=?",
-                                      (int(NOW.timestamp() * 1000) + 7 * 86400000, identifier))
+                                      (int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000) + 7 * 86400000, identifier))
             return identifier
 
         def row(self, identifier):

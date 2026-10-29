@@ -17,8 +17,7 @@
     "Series A",
     "Series B",
     "Series C",
-    "Series D",
-    "Series E"
+    "Series D+"
   ],
   "industries": [
     "FinTech and Finance",
@@ -149,6 +148,33 @@
     "platform",
     "data engineering"
   ],
+  "setup_picks": {
+    "roles": [
+      "Backend Engineering",
+      "Software Engineering"
+    ],
+    "levels": [
+      "Senior",
+      "Staff / Principal"
+    ],
+    "work_modes": [
+      "Remote",
+      "Hybrid",
+      "Onsite"
+    ],
+    "places": [
+      "Anywhere in United States",
+      "Anywhere in Europe"
+    ],
+    "current_location": "Springfield, Illinois, United States",
+    "funding_stages": [
+      "Seed",
+      "Series A",
+      "Series B",
+      "Series C",
+      "Series D+"
+    ]
+  },
   "resume": {
     "path": "tests/fixtures/resume/alex-example-resume.pdf",
     "sha256": "a5e98aa094e1d7f307b17691a02b7c57403543ab472573549b9165a4d6c72b39"
@@ -334,9 +360,24 @@
       "source": "Example user's rule: if a role requires presence in Europe, the user relocates to a country from relocation_destinations, with authorization there absent and sponsorship required; otherwise the work is performed from the recorded current_location. Recorded as a rule (semantic ending in _rule) so it is never submitted verbatim as an answer."
     },
     "gender_self_identification": {
-      "value": "Male",
+      "value": "Man",
       "semantic": "gender_self_identification",
       "source": "Example user's voluntary self-identification. It answers a gender question and nothing else; the answering AI receives it to choose the matching option."
+    },
+    "race_ethnicity_self_identification": {
+      "value": "Prefer not to say",
+      "semantic": "race_ethnicity_self_identification",
+      "source": "Example user's voluntary self-identification. It answers a race or ethnicity question and nothing else."
+    },
+    "veteran_status_self_identification": {
+      "value": "I am not a protected veteran",
+      "semantic": "veteran_status_self_identification",
+      "source": "Example user's voluntary self-identification. It answers a veteran status question and nothing else."
+    },
+    "disability_status_self_identification": {
+      "value": "Prefer not to say",
+      "semantic": "disability_status_self_identification",
+      "source": "Example user's voluntary self-identification. It answers a disability question and nothing else."
     },
     "notice_period": {
       "value": "2 weeks",

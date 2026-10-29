@@ -207,6 +207,8 @@ def execute(config, prompt, directory, timeout):
     # Claude needs its own allowlist (USER finds its sign-in); Codex's is unchanged.
     environment = engine.base_environment() if engine.judged_by_stream else reply_worker._environment()
     worker = paced = arguments = None
+    timed_out = False
+    started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="history-work-", dir=directory) as working, \
             (directory / "trace.jsonl").open("w") as trace, (directory / "stderr.log").open("w") as errors:
         try:
@@ -220,12 +222,19 @@ def execute(config, prompt, directory, timeout):
                 paced = provider_pacing.take(arguments, timeout, max_wait=reply_worker.SLOT_WAIT_SECONDS)
             except provider_limits.ProviderUsageLimit as limit:
                 raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED") from limit
-            worker = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=trace,
-                stderr=errors, text=True, encoding="utf-8", cwd=getattr(arguments, "cwd", None) or working,
-                env=engine.environment(arguments, environment),
+            child_environment = engine.environment(arguments, environment)
+            # E10: a .cmd shim (npm, pnpm, yarn) is started as the program it runs, never through cmd.exe.
+            launch, child_environment = portable.direct_command(arguments, child_environment)
+            worker = subprocess.Popen(launch, stdin=subprocess.PIPE,
+                stdout=trace, stderr=errors, text=True, encoding="utf-8", cwd=getattr(arguments, "cwd", None) or working,
+                env=child_environment,
                 **portable.worker_spawn_options())
             portable.contain(worker)
-            communicate(worker, engine.prompt_input(prompt), timeout, directory, arguments)
+            try:
+                communicate(worker, engine.prompt_input(prompt), timeout, directory, arguments)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                raise
             if engine.judged_by_stream:   # Claude, Antigravity (U1 4)
                 # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the exit code
                 # (a tool outside the run's list, a browser server that did not start, a limit); a clean
@@ -254,6 +263,11 @@ def execute(config, prompt, directory, timeout):
             if worker is not None:
                 portable.kill_tree(worker.pid)
                 worker.wait(timeout=5)
+                if timed_out:   # A5: stopped at its time limit, its model_calls row all the same
+                    trace.flush()
+                    engine.record_timed_out(directory / "trace.jsonl", command=arguments,
+                                            worker=config.get("_browser_operation") or "browser",
+                                            seconds=round(time.monotonic() - started, 3))
                 import browser_runtime
                 if config.get("_browser_operation") and config["_browser_operation"] not in browser_runtime.SHOWN_OPERATIONS:
                     browser_runtime.end_session(config)   # a support email's draft stays open for the user

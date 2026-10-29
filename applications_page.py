@@ -166,6 +166,8 @@ CODE_WORDS = {
     "APPLICATION_RECOVERY_ABANDONED": "Sidedoor looked into a problem and decided it cannot apply.",
     "APPLICATION_COORDINATOR_ATTEMPTS_EXHAUSTED": "Sidedoor ran out of tries working out a problem.",
 }
+# Codes that show no reason line under "Waiting for confirmation" (owner, 2026-10-29, L3).
+NO_REASON_WHILE_CONFIRMING = frozenset({"SUBMISSION_OBSERVATION_LOST"})
 # The unreadable-form hold reuses the answers prefix, but nothing was asked: the form could not be read.
 FORM_NOT_READABLE = "UNKNOWN_REQUIRED_ANSWERS:" + decision_transport.FORM_NOT_READABLE_FIELD
 FORM_NOT_READABLE_WORDS = "Sidedoor couldn't read the application form (it may need you signed in, or the page didn't load)."
@@ -509,6 +511,8 @@ def job_view(row, owner_keys, asked, live_reading, fmt):
     problem = None
     if overview.approval_hold(code) or code == "APPLICATION_APPROVED":
         pass   # nothing went wrong: the to-do line says what happens
+    elif words == STATE_WORDS["RECONCILE"] and code_root(code) in NO_REASON_WHILE_CONFIRMING:
+        pass   # L3: "Waiting for confirmation" says it all; no reason line, never the raw code
     elif state in ("BLOCKED", "RETRY_WAIT", "WAITING_BROWSER") or (state in ("SUBMITTING", "RECONCILE") and code):
         problem = code_words(code, "OWNER" if owner_hold else route)
     closed = None

@@ -36,7 +36,7 @@ INSTALLED = Path("share") / "sidedoor"   # pip's data-files folder, under sys.pr
 
 PROMPTS = (
     "agent-worker-prompt.md", "answering-judge-prompt.md", "answering-prompt.md",
-    "desktop-worker-prompt.md", "discovery-prompt.md", "followup-prompt.md",
+    "discovery-prompt.md", "followup-prompt.md",
     "outreach-agent-prompt.md", "outreach-compose-prompt.md", "reply-prompt.md", "research-prompt.md",
 )
 SCHEMAS = (

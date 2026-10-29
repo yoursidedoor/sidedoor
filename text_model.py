@@ -117,6 +117,18 @@ class TextModelHTTPError(TextModelError):
 class TextModelResponseError(TextModelError):
     finish_reason = None          # set when the provider returned no content
     content_limit_exceeded = False
+    transport_error = None        # the network error's class name, when the call never got an answer
+    certificate_error = False     # that error was an SSL certificate / handshake failure (tls_setup)
+
+
+def _transport_failure(error, secret):
+    """The TextModelResponseError for a network error, naming its class and whether it was a
+    certificate failure (Setup and doctor say that plainly instead of "check your internet")."""
+    import tls_setup
+    failure = TextModelResponseError("transport " + type(error).__name__ + ": " + _short(str(error), secret))
+    failure.transport_error = type(error).__name__
+    failure.certificate_error = tls_setup.is_certificate_error(error)
+    return failure
 
 
 def _short(text, secret):
@@ -136,6 +148,32 @@ def _post(url, data, headers, timeout):
             return response.status, response.read(1 << 20)
     except urllib.error.HTTPError as error:
         return error.code, error.read(1 << 16)
+
+
+def check_connection(timeout=20, transport=None, base_url=None):
+    """`sidedoor net-check` and doctor's Secure connection line: one GET of OpenRouter's public model
+    list (no key, no credit) through the same urllib path `_post` uses. Returns the HTTP status (any
+    answer means the secure connection worked); raises TimeoutError, or TextModelResponseError with
+    `transport_error` / `certificate_error` when no answer came. `transport(url, timeout) -> status`
+    replaces the network in tests."""
+    url = (base_url or BASE_URL).rstrip("/") + "/models"
+
+    def get(url, timeout):
+        request = urllib.request.Request(url, headers={"X-Title": "Sidedoor"}, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response.read(1 << 10)
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+    try:
+        return (transport or get)(url, timeout)
+    except TimeoutError:
+        raise
+    except OSError as error:
+        if "timed out" in str(error):
+            raise TimeoutError("OpenRouter connection check timed out") from None
+        raise _transport_failure(error, None) from None
 
 
 SLOT_WAIT_SECONDS = 300   # the longest a direct call waits for an "openrouter" pacing slot
@@ -272,7 +310,7 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
     except OSError as error:
         if "timed out" in str(error):
             raise TimeoutError("Text model call timed out") from None
-        raise TextModelResponseError("transport " + type(error).__name__ + ": " + _short(str(error), secret)) from None
+        raise _transport_failure(error, secret) from None
     if time.monotonic() - started > timeout:
         raise TimeoutError("Text model call exceeded its deadline")
     text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)

@@ -1,7 +1,7 @@
 """The license clock (E8.T2): the daily heartbeat, the trial countdown, the 72-hour offline grace
 and the clock-tamper check, and the one license state every page reads (E6.T0 sections 2, 5, 10, 11).
 
-What is stored, in the Sidedoor home next to Setup step 5's files (each 0600):
+What is stored, in the Sidedoor home next to Setup step 1's files (each 0600):
 - `license-entitlement.json`: {"entitlement": <the exact JSON text the relay signed>,
   "signature": <base64 Ed25519>, "clock": <the clock record>}. The relay signs the entitlement
   (`relay/licenses.py`, `Signer`); the app ships the public half (`PUBLIC_KEY`, the same value as
@@ -420,12 +420,18 @@ def _post(url, body):
     return setup_steps._post_json(url, body, timeout=REQUEST_TIMEOUT_SECONDS)
 
 
+CERTIFICATE = "CERTIFICATE"   # T7: last_error when the relay's secure connection could not be verified
+_CERTIFICATE_FAILURE = {"error": CERTIFICATE}   # `_call`'s answer for that (never a relay answer: status None)
+
+
 def _call(post, url, body):
-    """(status, parsed JSON or None); status None when the relay could not be reached."""
+    """(status, parsed JSON or None); status None when the relay could not be reached, with parsed
+    `_CERTIFICATE_FAILURE` when that was a certificate failure (`tls_setup.is_certificate_error`)."""
     try:
         status, raw = post(url, body)
-    except NETWORK_ERRORS:
-        return None, None
+    except NETWORK_ERRORS as error:
+        import tls_setup
+        return None, (_CERTIFICATE_FAILURE if tls_setup.is_certificate_error(error) else None)
     try:
         parsed = json.loads(raw) if raw is not None else None
     except (ValueError, TypeError):
@@ -440,7 +446,8 @@ def _error(parsed):
 def activate(key, home=None, relay_url=None, post=None, now=None, to_file=False):
     """`POST /license/activate {key, machine}` under the check lock, so an older key's heartbeat in
     flight can never store over the new key. Returns (outcome, entitlement fields or None): "ok"
-    (key and entitlement stored), "invalid" (401), "activation_limit" (409) or "offline"."""
+    (key and entitlement stored), "invalid" (401), "activation_limit" (409), "certificate" (the relay's
+    secure connection could not be verified, T7) or "offline"."""
     with _check_lock:
         stored = _load(home)[0]
         claimed = (_claims(stored) or {}).get("machine") if isinstance(stored, dict) else None
@@ -489,6 +496,8 @@ def _activate(key, home, relay_url, post, now, replaces=None, to_file=False, **e
         return _activate(key, home, relay_url, post, now, to_file=to_file, **extra)
     if status == 409 and _error(parsed) == "ACTIVATION_LIMIT":
         return "activation_limit", None
+    if status is None and parsed is _CERTIFICATE_FAILURE:
+        return "certificate", None
     return "offline", None
 
 
@@ -528,8 +537,9 @@ def _check(home, relay_url, post, now):
                                reactivated_from=claimed)
         if outcome in ("invalid", "activation_limit"):
             _record(home, now, outcome, key, reactivated_from=claimed)
-        elif outcome == "offline":
-            _record(home, now, "offline", key)
+        elif outcome in ("offline", "certificate"):   # a certificate failure is offline, said plainly (T7)
+            _record(home, now, "offline", key, code=CERTIFICATE if outcome == "certificate" else None)
+            return "offline"
         return outcome
     status, parsed = _call(post, relay_url + "/license/heartbeat", {"key": key, "machine": machine})
     if status == 200 and check_signed(parsed, key, machine) is not None:
@@ -571,6 +581,9 @@ def check_message(result, value):
     """What [Check again] says afterwards, in plain words."""
     if result == "busy":
         return "A license check is already running. Its result shows in a moment."
+    if result == "offline" and value.get("certificate"):   # T7
+        return ("Still can't verify the license server's secure connection on this computer. Run Report a "
+                "problem so we can see why.")
     if result == "offline":
         return "Still can't reach the license server. Check your internet; Sidedoor tries again every hour."
     if result in ("ok", "recent") and value["state"] in ("trial", "active", "payment_retrying"):
@@ -778,7 +791,7 @@ def view(home=None, now=None):
     {"state": no_license | checking | trial | active | payment_retrying | grace | grace_spent |
      expired | license_problem, "problem": None | invalid | machine | activation_limit | clock |
      signature, "usable": bool (signed, valid, before valid_until by server time, clock right:
-     Setup step 5's "done"), "label", "tone", "href" (the chip), "text" (plain words), "action"
+     Setup step 1's "done"), "label", "tone", "href" (the chip), "text" (plain words), "action"
      (the main way forward: {"label", "href"} or {"label", "post"}; None when nothing is needed),
      "actions" (every way forward, for Settings > License), "support" (a support line or None),
      "trial_days_left", "trial_end", "offline", "hours_left", "valid_until", "last_check" (signed
@@ -794,7 +807,7 @@ def view(home=None, now=None):
         waiting = setup_steps.keys_waiting(home)
         if waiting:
             # E2.T4 (KR1): the key is there but the keychain can't be read now: never "No license
-            # yet". Step 5 stays as it was (its saved record), nothing pauses on it (the scheduler
+            # yet". The license step (step 1) stays as it was (its saved record), nothing pauses on it (the scheduler
             # already holds every job while the keys wait).
             done = setup_steps.load_state(home)["steps"].get("license", {}).get("status") == "done"
             return _dress(dict(result, state="keychain", usable=done, waiting=waiting))
@@ -847,6 +860,7 @@ def view(home=None, now=None):
     left = (valid_until - estimated).total_seconds()
     result["hours_left"] = max(0, math.ceil(left / 3600))
     result["offline"] = last_result == "offline"
+    result["certificate"] = result["offline"] and record.get("last_error") == CERTIFICATE   # T7
     result["usable"] = value["valid"] is True and left > 0
     if last_result == "machine":
         return _dress(dict(result, state="license_problem", problem="machine"))
@@ -890,7 +904,7 @@ def _dress(result):
         label = "Keychain locked" if text.startswith("Keychain locked") else "Waiting for keychain"
         tone, href, action = "warning", SETTINGS_LICENSE, None
     elif state == "no_license":
-        label, tone, href = "No license yet", "warning", "/setup#step-5"
+        label, tone, href = "No license yet", "warning", "/setup#step-1"
         text, action = "No license yet.", {"label": "Enter license key", "href": SETTINGS_LICENSE}
     elif state == "checking":
         label, tone, href, action = "Checking your license…", "info", SETTINGS_LICENSE, None
@@ -915,12 +929,20 @@ def _dress(result):
         actions = []
     elif state == "grace":
         label, tone, href, action = "Offline, %s left" % _plural(hours, "hour"), "warning", SETTINGS_LICENSE, CHECK_AGAIN
-        text = ("Sidedoor couldn't reach the license server. It keeps working for %s more; check your internet."
-                % _plural(hours, "hour"))
+        if result.get("certificate"):   # T7: not the internet
+            text = ("Sidedoor couldn't verify the license server's secure connection on this computer. It keeps "
+                    "working for %s more. Run Report a problem so we can see why." % _plural(hours, "hour"))
+        else:
+            text = ("Sidedoor couldn't reach the license server. It keeps working for %s more; check your internet."
+                    % _plural(hours, "hour"))
     elif state == "grace_spent":
         label, tone, href, action = "Offline, paused", "error", SETTINGS_LICENSE, CHECK_AGAIN
-        text = ("Sidedoor could not reach the license server for 3 days. Check your internet; Sidedoor resumes on "
-                "its own once it connects.")
+        if result.get("certificate"):   # T7
+            text = ("Sidedoor is paused: it couldn't verify the license server's secure connection on this computer "
+                    "for 3 days. Run Report a problem so we can see why; Sidedoor resumes on its own once it connects.")
+        else:
+            text = ("Sidedoor could not reach the license server for 3 days. Check your internet; Sidedoor resumes on "
+                    "its own once it connects.")
     elif state == "expired":
         label, tone, href, action = "Expired", "error", SETTINGS_LICENSE, RENEW
         text = "Sidedoor is paused. Renew to continue."
@@ -959,7 +981,7 @@ RAW_TIME = re.compile(r"\b\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]
 def local_message(saved, config, now=None):
     """The license step's saved record with any raw UTC time in its message in the user's time
     zone, as Overview writes times (LA4: a message an older build stored read "Active: Trial. Good
-    until 2026-10-26T01:06:27Z."). Setup step 5 and Settings > License show it through this."""
+    until 2026-10-26T01:06:27Z."). Setup step 1 and Settings > License show it through this."""
     message = (saved or {}).get("message")
     if not isinstance(message, str) or not RAW_TIME.search(message):
         return saved

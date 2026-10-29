@@ -4,7 +4,7 @@ Each case is one employer question put to the real answering AI and judge with a
 by Setup's own producer (`setup_steps.validate_profile` + `profile_document`). A case lists only
 what differs from BASE_FORM:
 
-    form          Setup step 3 fields that differ (places + work_modes make location_priority
+    form          Setup step 4 fields that differ (places + work_modes make location_priority
                   "<place> <modes>", exactly as setup_steps.profile_document writes it)
     owner_answers answers saved the way Approvals saves them (`setup_steps.save_owner_answer`):
                   (semantic, value, context). Setup has no citizenship pick, so "US citizen" and

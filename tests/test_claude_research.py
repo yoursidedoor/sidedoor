@@ -60,6 +60,22 @@ def fake_claude(folder, text, code=0):
     return str(path)
 
 
+def slow_claude(folder, text):
+    """An executable named claude that prints `text` (a stream with no result yet) and then hangs."""
+    folder = Path(folder)
+    (folder / "stream.jsonl").write_text(text, encoding="utf-8")
+    path = folder / "bin" / "claude"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\ncat '%s'\nexec sleep 30\n" % (folder / "stream.jsonl"))
+    path.chmod(0o755)
+    return str(path)
+
+
+def started_stream():
+    """r01's real web events with no result event: a session cut off before it ended."""
+    return "\n".join(json.dumps(event) for event in events("r01_web.jsonl")[:-1]) + "\n"
+
+
 def subscription():
     return patch.object(setup_steps, "claude_api_key_mode", return_value=False)
 
@@ -155,6 +171,25 @@ class ResearchWorker(unittest.TestCase):
         (route, outcome), fields = self.rows[0]
         self.assertEqual((route, outcome, fields["worker"], fields["provider"]), ("claude", "ok", "research", "anthropic"))
         self.assertIsNone(fields["cost"])   # the user's subscription: no money cost recorded
+
+    def test_a5_a_run_stopped_at_its_time_limit_writes_its_model_calls_row(self):
+        import subprocess
+        config = {"engine": "claude", "claude": slow_claude(self.root, started_stream()), "model": "m"}
+        command = orchestrator.research_command(self.root, config, self.output, "discovery-schema.json")
+        rows = []
+        with subscription(), patch.object(model_calls, "record", side_effect=lambda *a, **k: rows.append((a, k))):
+            with self.assertRaises(subprocess.TimeoutExpired):   # still raised as before
+                orchestrator.run_research_worker(self.root, command, "prompt", self.log, 1)
+        self.assertEqual(len(rows), 1)
+        (route, outcome), fields = rows[0]
+        self.assertEqual((route, outcome, fields["worker"], fields["provider"]),
+                         ("claude", "timeout", "research", "anthropic"))
+        self.assertEqual(fields["model"], "claude-sonnet-5-5")   # what the stream showed before the stop
+        self.assertGreaterEqual(fields["seconds"], 1)
+
+    def test_r2_an_unreadable_stream_never_raises_from_the_time_out_record(self):
+        CLAUDE.record_timed_out(self.root / "missing.log", worker="research", seconds=1)
+        CLAUDE.record_timed_out(self.root, worker="research")   # a folder: IsADirectoryError, swallowed
 
     def test_an_exit_0_forbidden_tool_is_a_failure(self):
         text = (FIXTURES / "run3_denied.jsonl").read_text()
@@ -314,6 +349,16 @@ class AgentWorker(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "^CLAUDE_SIGNED_OUT$") as caught:
                 agent_worker._execute(config, "prompt", self.directory, 30)
         self.assertIs(provider_limits.wait_of(caught.exception), wait)
+
+    def test_a5_a_run_stopped_at_its_time_limit_writes_its_model_calls_row(self):
+        import subprocess
+        config = {"engine": "claude", "claude": slow_claude(tempfile.mkdtemp(), started_stream()), "model": "m"}
+        rows = []
+        with subscription(), patch.object(engines.ClaudeEngine, "wait", return_value=None), \
+                patch.object(model_calls, "record", side_effect=lambda *a, **k: rows.append((a, k))):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                agent_worker._execute(config, "prompt", self.directory, 1)
+        self.assertEqual([(a[0], a[1], k["worker"]) for a, k in rows], [("claude", "timeout", agent_worker.WORKER)])
 
     def test_a_denied_run_is_executor_failed(self):
         with self.assertRaisesRegex(RuntimeError, "EXECUTOR_FAILED"):

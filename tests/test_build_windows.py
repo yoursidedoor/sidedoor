@@ -35,7 +35,7 @@ class NuitkaCommandTests(unittest.TestCase):
                      "--output-filename=sidedoor.exe", "--include-package=tzdata", "--include-package-data=tzdata",
                      "--nofollow-import-to=pystray", "--nofollow-import-to=fpdf", "--no-deployment-flag=excluded-module-usage",
                      "--zig", "--include-module=orchestrator", "--include-module=uvicorn.loops.auto",
-                     "--include-module=queue"):
+                     "--include-module=queue", "--include-package=truststore", "--include-package=certifi"):
             self.assertIn(flag, command)
         self.assertIn("--windows-file-version=%s.0" % build_windows.version.current(), command)
         self.assertTrue(any(item.startswith("--include-data-dir=") and item.endswith("=dashboard_assets") for item in command))

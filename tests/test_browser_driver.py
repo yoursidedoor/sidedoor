@@ -329,7 +329,10 @@ class CommandTests(unittest.TestCase):
             # Off in tests (profile_home); the macOS background form is tests/test_browser_focus.py's.
             self.assertEqual(mcp[mcp.index("--user-data-dir") + 1], str(setup_steps.BROWSER_PROFILE))
             self.assertNotIn("--headless", mcp)
-            self.assertEqual(json.loads((directory / "browser-config.json").read_text()), browser_runtime.LAUNCH_CONFIG)
+            launch = json.loads((directory / "browser-config.json").read_text())
+            if sys.platform == "darwin":   # E7: the Chrome Setup found is named on a Mac (test_browser_offscreen)
+                self.assertEqual(launch["browser"]["launchOptions"].pop("executablePath", None), setup_steps.chrome_path())
+            self.assertEqual(launch, browser_runtime.LAUNCH_CONFIG)
             self.assertEqual(command[command.index("--model") + 1], "astra" if claim else "sol")
             self.assertNotIn("cua_repl", " ".join(command))
             self.assertNotIn("computer-use", " ".join(command))

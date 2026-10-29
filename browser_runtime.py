@@ -742,6 +742,13 @@ def launch_config(config=None, operation=None):
     launch failed, and then runs the session by the --offscreen rules (browser_guard). A test session
     (`test_session`) gets TEST_SWITCHES and keeps Playwright's own mock keychain."""
     value = json.loads(json.dumps(LAUNCH_CONFIG))
+    if sys.platform == "darwin":
+        # E7: Playwright's channel "chrome" looks only in /Applications; the Chrome Setup found (also
+        # ~/Applications) is named outright. Windows and Linux keep Playwright's own lookup.
+        import setup_steps
+        chrome = setup_steps.chrome_path()
+        if chrome:
+            value["browser"]["launchOptions"]["executablePath"] = chrome
     if offscreen(config) and operation not in SHOWN_OPERATIONS:
         value["browser"]["launchOptions"]["args"] = list(WINDOW_SWITCHES)
     if test_session(config):

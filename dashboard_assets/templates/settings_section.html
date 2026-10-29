@@ -5,7 +5,7 @@
 {% if x.name == "profile" %}
   {% set f = x.form %}{% set e = x.errors %}
   <h2>Profile and search</h2>
-  <p class="why">Your contact details, what you are looking for and the answers Sidedoor gives on application forms. Research uses the new values from its next run.</p>
+  <p class="why">Your contact details, what you are looking for and the answers Sidedoor gives on application forms.</p>
   {% if x.saved.status == "failed" and x.saved.message %}<p class="note note-error" role="status">{{ x.saved.message }}</p>
   {% elif x.saved_now %}<p class="note note-success" role="status">{{ x.saved.message }}</p>{% endif %}
   <form class="profile" method="post" action="/settings/profile" hx-post="/settings/profile" hx-target="#profile" hx-swap="outerHTML">
@@ -77,7 +77,7 @@
 
 {% elif x.name == "answers" %}
   <h2>Your saved answers</h2>
-  <p class="why">Answers you gave to Sidedoor's questions on Approvals. Sidedoor's answering AI uses them on later applications when a question asks the same thing, and decides whether each one fits.</p>
+  <p class="why">Answers you gave on Approvals. Sidedoor reuses these when a form asks the same question.</p>
   <div class="settings-kept-answers" id="kept-answers">
   {% if x.kept_answers %}
     {% for key, answer in x.kept_answers %}{% with notice = None, over = x.kept_over or {}, oob = False, status = x.kept_status or {}, companies = x.kept_companies or {} %}{% include "settings_kept_answer.html" %}{% endwith %}{% endfor %}

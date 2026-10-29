@@ -388,6 +388,37 @@ class LimitTests(unittest.TestCase):
         self.assertIsNone(CLAUDE.read_trace(joined(events)).error_kind)
         self.rate_limited.assert_not_called()
 
+    def test_l4_the_user_sees_when_the_usage_limit_resets(self):
+        # L4: a rejected rate_limit_event with resetsAt shows the usage banner and Health line while Claude is
+        # chosen, as A1 for Antigravity; a 429 (no stated reset) shows none.
+        now = dt.datetime.now(dt.timezone.utc)
+        events = lines("r15_structured.jsonl")
+        events[3]["rate_limit_info"].update(status="rejected", rateLimitType="seven_day",
+                                            resetsAt=int((now + dt.timedelta(days=3)).timestamp()))
+        rejected = joined(events[:1] + events[3:4])
+        with tempfile.TemporaryDirectory() as folder, patch.object(model_calls, "record"):
+            home = Path(folder)
+            with patch.object(provider_limits, "chosen_engine", return_value="claude"):
+                CLAUDE.finish_run(0, rejected, home=home)
+                found = provider_limits.waits(home, now)["usage_limit"]
+                self.assertTrue(found["banner"]["text"].startswith(
+                    "Your Claude usage limit is reached. Sidedoor pauses its AI work and picks up again at about "))
+                self.assertEqual(found["banner"]["action_href"], "https://claude.ai/settings/usage")
+                self.assertTrue(found["health"].startswith("Usage limit reached until "))
+                self.assertIn(found["banner"], provider_limits.banners(home, now))
+                self.assertIsNone(provider_limits.waits(home, now + dt.timedelta(days=4))["usage_limit"])   # passed
+                self.assertFalse((home / provider_limits.CLAUDE_USAGE_WAIT_FILE).exists())
+                CLAUDE.finish_run(0, rejected, home=home)
+                CLAUDE.finish_run(0, fixture("r15_structured.jsonl"), home=home)   # a run that works ends the wait
+                self.assertIsNone(provider_limits.waits(home, now)["usage_limit"])
+                CLAUDE.finish_run(1, self.errored(429), home=home)   # no stated reset: no banner
+                self.assertIsNone(provider_limits.waits(home, now)["usage_limit"])
+                CLAUDE.finish_run(0, rejected, home=home)
+            with patch.object(provider_limits, "chosen_engine", return_value="codex"):
+                self.assertIsNone(provider_limits.waits(home, now)["usage_limit"])   # only the chosen engine's
+            with patch.object(provider_limits, "chosen_engine", return_value="claude"):
+                self.assertIsNotNone(provider_limits.waits(home, now)["usage_limit"])   # back again
+
     def test_429_and_529_are_the_short_wait(self):
         for status in (429, 529):
             wait = CLAUDE.check_run(1, self.errored(status), now=self.NOW)

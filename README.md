@@ -211,7 +211,7 @@ be accessed or changed for this project.
 The opt-in `desktop_adapter.py` now connects the existing worker to a durable
 desktop request/result mailbox; it does not implement or launch another browser.
 `application_adapter: "desktop"` selects it, but production configuration has not
-been changed for testing. `desktop-worker-prompt.md` defines the supported consumer
+been changed for testing. `docs/desktop-worker-prompt.md` (not bundled) defines the supported consumer
 protocol. Claims bind the job, policy, form, answers and attempt; pre-click intent
 is consumed once, stale results are rejected, and uncertain submissions reconcile.
 Waiting for the browser does not consume retry budget, but requests and retries

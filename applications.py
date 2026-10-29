@@ -1085,7 +1085,7 @@ def pursue_without_authorization(review, policy):
 #    application path has ever supplied `compensation["fx"]`:
 #    `application_browser.result_contract("inspect")` declares compensation as
 #    {verified, currency, minimum, maximum, period} with no fx key, and
-#    `desktop-worker-prompt.md` does not mention salary at all. So a EUR or GBP posting
+#    `docs/desktop-worker-prompt.md` does not mention salary at all. So a EUR or GBP posting
 #    could never satisfy the old requirement, no matter how well it was read. It was an
 #    unconditional refusal wearing the clothes of a verification step.
 # 2. Therefore the gate applies only where the figure is genuinely knowable: a fresh,

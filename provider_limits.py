@@ -112,6 +112,17 @@ ANTIGRAVITY_WORDS = {
                              "Antigravity is signed out. Sidedoor's AI work is paused until you sign in to Antigravity again.",
                              "Antigravity is signed out"),
 }
+# A1 (2026-10-29): agy's usage limit with a stated reset ("Individual quota reached. ... Resets in 166h8m9s"):
+# the work waits for that reset (kind RATE_LIMITED, engines.AntigravityEngine.check_run) and this file shows it,
+# as the ChatGPT usage banner does, until the reset passes or an Antigravity run works again.
+ANTIGRAVITY_USAGE_WAIT_FILE = "antigravity-usage-wait.json"
+# L4 (2026-10-29): Claude's usage limit with a stated reset (a rejected rate_limit_event's resetsAt), as A1 for
+# Antigravity: the work waits for that reset (kind RATE_LIMITED, engines.ClaudeEngine.check_run) and this file
+# shows it until the reset passes or a Claude run works again. Kept apart from CLAUDE_WAIT_FILES (as the
+# Antigravity one is from ANTIGRAVITY_WAIT_FILES): an engine save clears those, and this wait must show again
+# after a switch back.
+CLAUDE_USAGE_WAIT_FILE = "claude-usage-wait.json"
+CLAUDE_USAGE_URL = "https://claude.ai/settings/usage"
 CODEX_WORDS = "Sidedoor can't find Codex. Open Setup to find it again."
 CODEX_WORDS_FINISHED = "Sidedoor can't find Codex. Open Settings to find it again."
 CREDIT_WAIT_FILE = "openrouter-credit-wait.json"
@@ -264,9 +275,14 @@ def rate_limit(message, now=None, command=None, provider=None):
 def slot_wait(busy, now=None):
     """The short rate-limit wait for a session that found no pacing slot within its allowed wait
     (provider_pacing.SlotWaitTooLong): resume when the pacer expects a slot, at least RETRY 30 s and at most
-    300 s away. Not a 429, so the provider's streak is not raised."""
+    300 s away. A cool-down past provider_pacing.LONG_WAIT_SECONDS is a stated reset hours or days away (G2:
+    agy's weekly quota, Claude's resetsAt): the work resumes at it (at most MAX_WAIT away), not every 300 s.
+    Not a 429, so the provider's streak is not raised."""
     import provider_pacing
-    delay = min(max(busy.left, provider_pacing.RETRY_SECONDS), provider_pacing.MAX_RETRY_SECONDS)
+    if busy.left > provider_pacing.LONG_WAIT_SECONDS:
+        delay = min(busy.left, MAX_WAIT.total_seconds())
+    else:
+        delay = min(max(busy.left, provider_pacing.RETRY_SECONDS), provider_pacing.MAX_RETRY_SECONDS)
     return ProviderUsageLimit("PROVIDER_SLOT_WAIT_TOO_LONG: Sidedoor is pacing its AI sessions", now,
                               kind=RATE_LIMITED, delay=delay)
 
@@ -443,6 +459,26 @@ def noted(limit, home=None):
     return limit
 
 
+def antigravity_usage_noted(limit, home=None):
+    """Record an Antigravity usage-limit wait with a stated reset for its banner (A1). Times only. Best effort."""
+    return _usage_noted(ANTIGRAVITY_USAGE_WAIT_FILE, limit, home)
+
+
+def claude_usage_noted(limit, home=None):
+    """Record a Claude usage-limit wait with a stated reset for its banner (L4, as A1). Times only. Best effort."""
+    return _usage_noted(CLAUDE_USAGE_WAIT_FILE, limit, home)
+
+
+def _usage_noted(name, limit, home):
+    try:
+        import openai_auth
+        openai_auth._write_private(_home(home) / name, json.dumps(
+            {"observed_at": limit.observed_at, "resume_at": limit.next_at, "stated_reset": limit.stated_reset}) + "\n")
+    except Exception:
+        pass
+    return limit
+
+
 def out_of_credit(message, now=None, home=None):
     """The wait for a direct OpenRouter call refused with HTTP 402 (`text_model.complete`), recorded."""
     return noted(ProviderUsageLimit(message, now, kind=OUT_OF_CREDIT), home)
@@ -551,6 +587,27 @@ def waits(home=None, now=None, finished=False):
             "until you add credits.", "action_label": "Add credits", "action_href": CREDITS_URL, "external": True},
             "health": "Out of credits"}
     usage = _recorded(CHATGPT_WAIT_FILE, home)
+    chosen = chosen_engine(home)
+    # A1 (Antigravity) and L4 (Claude): the chosen engine's usage limit, in the same place and words as ChatGPT's
+    engine_usage = {"antigravity": (ANTIGRAVITY_USAGE_WAIT_FILE, "Antigravity", None),
+                    "claude": (CLAUDE_USAGE_WAIT_FILE, "Claude", CLAUDE_USAGE_URL)}.get(chosen)
+    if engine_usage:
+        name, provider, page = engine_usage
+        usage = _recorded(name, home)
+        try:
+            reset = _utc(usage.get("resume_at")) if usage else None
+        except (AttributeError, TypeError, ValueError):
+            reset = None
+        if reset is not None and reset > now:
+            until = _local_clock(reset.isoformat())
+            banner = {"tone": "warning", "text": "Your %s usage limit is reached. Sidedoor pauses its AI work "
+                      "and picks up again at about %s." % (provider, until)}
+            if page:
+                banner.update(action_label="See your usage", action_href=page, external=True)
+            found["usage_limit"] = {"banner": banner, "health": "Usage limit reached until %s" % until}
+        elif reset is not None:
+            clear(name, home)   # the reset passed: the wait is over
+        usage = None   # the ChatGPT file is kept for a switch back, not shown
     if usage:
         try:
             reset = _utc(usage.get("resume_at"))
@@ -567,9 +624,10 @@ def waits(home=None, now=None, finished=False):
             clear(CHATGPT_WAIT_FILE, home)   # the reset passed: the wait is over
     # U1 3g G2: only the chosen engine's waits show; the other engine's files are kept (they show again
     # after a switch back). The OpenRouter credit wait is engine-independent.
-    chosen = chosen_engine(home)
     if chosen != "codex":
-        found["codex_missing"] = found["usage_limit"] = None
+        found["codex_missing"] = None
+        if chosen not in ("antigravity", "claude"):
+            found["usage_limit"] = None
     if chosen != "claude":
         found["claude"] = None
     if chosen != "antigravity":   # U1 4: Antigravity's waits show only while it is chosen

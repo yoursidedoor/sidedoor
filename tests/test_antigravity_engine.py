@@ -350,9 +350,21 @@ class AllowRulesTest(TempHome):
         worker.communicate.return_value = ("", "")
         worker.poll.return_value = 0
         with patch("subprocess.Popen", side_effect=lambda *a, **k: order.append("popen") or worker), \
-                patch.object(portable, "contain", side_effect=lambda w: order.append("contain")):
+                patch.object(portable, "contain", side_effect=lambda w: order.append("contain")), \
+                patch.object(portable, "kill_tree"):
             AGY._listed_tools({"command": "/bin/x"})
         self.assertEqual(order, ["popen", "contain"])
+
+    def test_w1_a_probe_that_exited_by_itself_still_has_its_tree_ended(self):
+        """W1: on Windows a server that exited by itself kept its Job Object open until Sidedoor exited."""
+        import portable
+        worker = unittest.mock.MagicMock(pid=7)
+        worker.communicate.return_value = ("", "")
+        worker.poll.return_value = 0   # already gone
+        with patch("subprocess.Popen", return_value=worker), patch.object(portable, "contain"), \
+                patch.object(portable, "kill_tree") as killed:
+            AGY._listed_tools({"command": "/bin/x"})
+        killed.assert_called_once_with(7)
 
     def test_n3d_one_bad_server_is_skipped(self):
         self.user_config({"bad": {"command": "/bin/bad"}, "good": {"command": "/bin/good"}})
@@ -406,3 +418,133 @@ class LauncherTest(TempHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveTestFixesTest(TempHome):
+    """0.4.0 fixes from the Antigravity live test (A1, A2, A4, A6). quota.jsonl is the real 2026-10-28 discovery
+    log of a run that hit agy's weekly quota (init, agy's AGY_ERROR line and the result; response trimmed);
+    direct.jsonl is the real run where the model called save_role by its direct name and the hook denied it."""
+
+    NOW = "2026-10-28T19:00:00+00:00"
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch("provider_pacing.rate_limited", side_effect=lambda provider, stated=None: stated or 30)
+        self.rate_limited = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a1_weekly_quota_waits_until_the_stated_reset(self):
+        wait = AGY.check_run(1, fixture("quota.jsonl"), now=self.NOW)
+        self.assertEqual(wait.kind, provider_limits.RATE_LIMITED)
+        self.assertEqual(wait.stated_reset, "2026-11-04T17:08:09+00:00")   # 166h8m9s after NOW
+        self.assertEqual(wait.next_at, wait.stated_reset)
+        self.rate_limited.assert_called_once_with("google", 166 * 3600 + 8 * 60 + 9)
+
+    def test_a1_no_stated_reset_keeps_the_short_wait(self):
+        wait = AGY.check_run(0, result_line(status="ERROR", error="RESOURCE_EXHAUSTED: Quota exhausted"), now=self.NOW)
+        self.assertIsNone(wait.stated_reset)
+        self.assertEqual(wait.next_at, "2026-10-28T19:00:30+00:00")
+        for words in ("Resets in 500ms.", "Resets in soon.", "Resets in 0s."):
+            self.assertIsNone(AGY.reset_at("Individual quota reached. " + words, self.NOW), words)
+        self.assertEqual(AGY.reset_at("Resets in 2m30s.", self.NOW).isoformat(), "2026-10-28T19:02:30+00:00")
+
+    def test_a1_the_user_sees_when_it_resets(self):
+        import datetime as dt
+        home = self.home / "sidedoor"
+        home.mkdir()
+        now = dt.datetime.now(dt.timezone.utc)
+        with patch.object(provider_limits, "chosen_engine", return_value="antigravity"):
+            AGY.finish_run(1, fixture("quota.jsonl"), home=home)
+            found = provider_limits.waits(home, now)["usage_limit"]
+            self.assertTrue(found["banner"]["text"].startswith("Your Antigravity usage limit is reached. Sidedoor "
+                                                               "pauses its AI work and picks up again at about "))
+            self.assertTrue(found["health"].startswith("Usage limit reached until "))
+            self.assertIn(found["banner"], provider_limits.banners(home, now))
+            self.assertEqual(provider_limits.waits(home, now + dt.timedelta(days=8))["usage_limit"], None)   # passed
+            AGY.finish_run(1, fixture("quota.jsonl"), home=home)
+            AGY.finish_run(0, fixture("inspect.jsonl"), home=home)   # a run that works ends the wait
+            self.assertIsNone(provider_limits.waits(home, now)["usage_limit"])
+        with patch.object(provider_limits, "chosen_engine", return_value="claude"):
+            AGY.finish_run(1, fixture("quota.jsonl"), home=home)
+            self.assertIsNone(provider_limits.waits(home, now)["usage_limit"])   # only the chosen engine's waits
+
+    def saved(self, conversation="c1", index="2"):
+        path = self.home / ".gemini" / "antigravity-cli" / "brain" / conversation / ".system_generated" / "steps" / index
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "output.txt").write_text("FULL")
+        return path / "output.txt"
+
+    def test_a2_the_model_may_read_its_own_saved_outputs(self):
+        workspace = self.home / "ws"
+        allowed = AGY.write_workspace(workspace, {"browser": (["/bin/g"], None, ["browser_snapshot"])}, ())
+        policy = workspace / ".agents" / AGY.POLICY
+        mine, other = self.saved("c1"), self.saved("c2")
+        (self.home / "secret").write_text("x")
+        (mine.parent / "link").mkdir()
+        (mine.parent / "link" / "output.txt").symlink_to(self.home / "secret")
+
+        def decide(path, conversation="c1"):
+            return engines.agy_hook(policy, {"conversationId": conversation,
+                                             "toolCall": {"name": "read_file", "args": {"Path": str(path)}}})["decision"]
+        self.assertEqual(decide(mine), "allow")
+        self.assertEqual(decide("file://" + str(mine)), "allow")
+        self.assertEqual(decide(other), "deny")                                  # another run's conversation
+        self.assertEqual(decide(mine, conversation=None), "deny")
+        self.assertEqual(decide(mine.parent / "link" / "output.txt"), "deny")    # a symlink out
+        self.assertEqual(decide(str(mine.parent) + "/../2/output.txt"), "deny")  # ".." is refused outright
+        self.assertEqual(decide(mine.parent.parent.parent / "logs" / "transcript_full.jsonl"), "deny")
+        step = {"event": "step_update", "step_update": {"conversation_id": "c1", "step_index": 5, "state": "DONE",
+                                                        "step_type": "tool", "tool_name": "read_file",
+                                                        "tool_info": {"name": "read_file", "parameters": {"Path": str(mine)}}}}
+        text = result_line(structured_output={"ok": True})
+        self.assertIsNone(AGY.check_run(0, json.dumps(step) + "\n" + text, allowed=allowed))
+        step["step_update"]["tool_info"]["parameters"]["Path"] = str(other)
+        self.assertEqual(AGY.check_run(0, json.dumps(step) + "\n" + text, allowed=allowed).code, AGY.FORBIDDEN_TOOL)
+
+    def test_a4_an_allowed_tool_by_its_direct_name(self):
+        allowed = AGY.write_workspace(self.home / "ws", {"research_tools": (["/bin/r"], None, ["save_role"])}, ())
+        policy = self.home / "ws" / ".agents" / AGY.POLICY
+        record = AGY.read_trace(fixture("direct.jsonl"), allowed=allowed)
+        self.assertEqual([(call.server, call.tool, call.args) for call in record.tool_calls],
+                         [("research_tools", "save_role", {"note": "t3"})])
+        self.assertIsNone(AGY.check_run(0, fixture("direct.jsonl"), allowed=allowed))
+
+        def decide(name):
+            return engines.agy_hook(policy, {"toolCall": {"name": name, "args": {"note": "t3"}}})["decision"]
+        self.assertEqual(decide("mcp_sidedoor_research_tools_save_role"), "allow")
+        self.assertEqual(decide("mcp_sidedoor_research_tools_delete_role"), "deny")
+        self.assertEqual(decide("mcp_other_save_role"), "deny")
+        narrowed = {"sidedoor_research_tools/save_note"}
+        self.assertEqual(AGY.check_run(0, fixture("direct.jsonl"), allowed=narrowed).code, AGY.FORBIDDEN_TOOL)
+
+    def test_a6_total_includes_cache_reads(self):
+        with patch("model_calls.record") as record:
+            AGY.record_model_call(AGY.read_trace(fixture("quota.jsonl"), strict=False))
+        tokens = record.call_args.kwargs
+        self.assertEqual(tokens["prompt_tokens"], 25623 + 41456)
+        self.assertEqual(tokens["total_tokens"], tokens["prompt_tokens"] + tokens["completion_tokens"])
+
+
+class ReviewRoundOneTest(TempHome):
+    def test_g1_a_url_query_or_fragment_is_refused(self):
+        path = self.home / ".gemini" / "antigravity-cli" / "brain" / "c1" / ".system_generated" / "steps" / "1"
+        path.mkdir(parents=True)
+        (path / "output.txt").write_text("x")
+        saved = str(path / "output.txt")
+        self.assertTrue(AGY.saved_output("file://" + saved, "c1"))
+        for bad in ("file://" + saved + "?/../../../../../../../etc/passwd", "file://" + saved + "#/../x",
+                    "file://" + saved + ";/../../x", saved + "?x", saved.replace("steps/1", "steps/²")):
+            self.assertFalse(AGY.saved_output(bad, "c1"), bad)
+
+    def test_g3_a_shorter_user_server_never_takes_a_longer_servers_name(self):
+        allowed = {"sidedoor/*", "sidedoor_research_tools/save_role"}
+        self.assertIsNone(AGY.direct_mcp("mcp_sidedoor_research_tools_delete_role", allowed))
+        self.assertIsNone(AGY.direct_mcp("mcp_sidedoor_browser_submit", allowed))
+        self.assertEqual(AGY.direct_mcp("mcp_sidedoor_research_tools_save_role", allowed),
+                         ("sidedoor_research_tools", "save_role"))
+        self.assertEqual(AGY.direct_mcp("mcp_sidedoor_notes", allowed), ("sidedoor", "notes"))
+
+    def test_g5_any_non_alphanumeric_ends_the_reset(self):
+        for words in ("Resets in 1h30m0s,", "Resets in 1h30m0s)", "Resets in 1h30m0s."):
+            self.assertEqual(AGY.reset_at(words, "2026-10-28T00:00:00+00:00").isoformat(), "2026-10-28T01:30:00+00:00")
+        self.assertIsNone(AGY.reset_at("Resets in 1h30m0sx", "2026-10-28T00:00:00+00:00"))

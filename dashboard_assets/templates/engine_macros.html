@@ -2,7 +2,7 @@
 {% macro engine_choice(action, target, engine, options, risk) %}
   <form method="post" action="{{ action }}" hx-post="{{ action }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="engine-choice">
     <fieldset>
-      <legend>Which AI runs Sidedoor's research and browser work</legend>
+      <legend>Which AI Sidedoor uses</legend>
       {% for name, label in options %}
       <label><input type="radio" name="engine" value="{{ name }}"{% if name == engine %} checked{% endif %}> {{ label }}{% if name == "codex" %} (default){% endif %}</label>
       {% if name == "antigravity" %}<p class="note note-warning antigravity-risk">{{ risk }}</p>{% endif %}
@@ -14,7 +14,7 @@
 {% endmacro %}
 
 {% macro antigravity_signin(base, target, v) %}
-  <p class="why">Sidedoor's research and browser work run through Antigravity, signed in with your own Google account.</p>
+  <p class="why">Sign in with your Google account.</p>
   {% if v.antigravity_path and v.antigravity_done %}<p class="muted">Found at {{ v.antigravity_path }}</p>{% endif %}
   {% if v.antigravity_models %}
   <form method="post" action="{{ base }}/models" hx-post="{{ base }}/models" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="antigravity-models">
@@ -40,9 +40,9 @@
 
 {% macro claude_signin(base, target, v, input_id) %}
   {% if v.claude_auth_view == "api_key" %}
-  <p class="why">Sidedoor's research and browser work run through Claude, using your Anthropic API key. Anthropic bills that key for what Sidedoor uses. The key is kept on this computer.</p>
+  <p class="why">Anthropic bills your API key for what Sidedoor uses. The key stays on this computer.</p>
   {% else %}
-  <p class="why">Sidedoor's research and browser work run through Claude, signed in with your Claude subscription.</p>
+  <p class="why">Sign in with your Claude subscription.</p>
   {% endif %}
   {% if v.claude_path and v.claude_done %}<p class="muted">Found at {{ v.claude_path }}</p>{% endif %}
   <form method="post" action="{{ base }}/auth" hx-post="{{ base }}/auth" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="choice">

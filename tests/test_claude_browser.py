@@ -144,7 +144,8 @@ class TestLaunch(unittest.TestCase):
             self.assertNotIn("--use-mock-keychain", options["ignoreDefaultArgs"])
 
     def test_the_users_real_browser_is_unchanged(self):
-        if True:
+        import setup_steps
+        with patch.object(setup_steps, "chrome_path", return_value=None):   # E7's named Chrome: test_browser_offscreen
             for allowed in (False, True):
                 with patch.object(browser_runtime, "BACKGROUND_ALLOWED", allowed), \
                         patch.object(browser_runtime.sys, "platform", "darwin"):
@@ -413,6 +414,23 @@ class Sessions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HISTORY_UNAUTHORIZED_TOOL_TRACE") as caught:
             outreach_history_browser.execute(config(self.folder, "webmail"), "prompt", self.directory, 60)
         self.assertEqual(caught.exception.__cause__.code, CLAUDE.FORBIDDEN_TOOL)
+
+    def test_a5_history_worker_stopped_at_its_time_limit_writes_its_model_call(self):
+        import subprocess
+        fake_claude(self.folder, WEBMAIL[:-1], delay=5)   # one line, then still running at the limit
+        with self.assertRaises(subprocess.TimeoutExpired):
+            outreach_history_browser.execute(config(self.folder, "webmail"), "prompt", self.directory, 1)
+        self.assertEqual(self.calls(), [("claude", "timeout", "webmail")])
+        seconds = sqlite3.connect(self.folder / "calls.sqlite3").execute("SELECT seconds FROM model_calls").fetchone()[0]
+        self.assertGreaterEqual(seconds, 1)   # R4
+
+    def test_r3_application_worker_stopped_at_its_time_limit_records_timeout(self):
+        fake_claude(self.folder, INSPECT[:-1], delay=5)
+        with self.assertRaisesRegex(TimeoutError, "APPLICATION_BROWSER_TIMEOUT"):
+            application_browser.execute(config(self.folder, _application_operation="inspect",
+                                               _application_human_check=str(self.folder / "h")),
+                                        "prompt", self.directory, 1)
+        self.assertEqual(self.calls(), [("claude", "timeout", "application_browser")])
 
     def test_history_worker_fails_a_run_with_a_failed_server(self):
         fake_claude(self.folder, with_failed_server(WEBMAIL))

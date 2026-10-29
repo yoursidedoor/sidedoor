@@ -395,3 +395,104 @@ class PacerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LongResetSlotTests(unittest.TestCase):
+    """G2 (2026-10-29): a stated reset days away (agy's weekly quota) never parks a worker in-process for days,
+    and a wait ends when the user picks another engine. The same path serves Claude (resetsAt) and Codex."""
+
+    def setUp(self):
+        import setup_steps
+        self.home = Path(tempfile.mkdtemp())
+        self.setup_steps = setup_steps
+        patcher = patch.object(provider_pacing, "_root", self.home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        before = setup_steps.load_state().get("engine")
+        self.addCleanup(lambda: setup_steps.update_state(
+            lambda state: state.pop("engine", None) if before is None else state.update(engine=before)))
+        self.choose("antigravity")
+
+    def choose(self, engine):
+        self.setup_steps.update_state(lambda state: state.update(engine=engine))
+
+    def test_a_days_long_reset_returns_to_the_scheduler_at_once(self):
+        provider_pacing.rate_limited("google", 600000)
+        slept = []
+        with self.assertRaises(provider_pacing.SlotWaitTooLong) as raised:
+            provider_pacing.acquire("google", sleep=slept.append)
+        self.assertEqual(slept, [])
+        self.assertGreater(raised.exception.left, 599000)
+        # take: the usual slot wait (no try spent; the scheduler looks again within 300 s, and the run that hit
+        # the quota already holds research until the reset)
+        with patch.object(provider_pacing.time, "sleep", slept.append), \
+                self.assertRaises(provider_limits.ProviderUsageLimit) as wait:
+            provider_pacing.take(None, provider="google")
+        self.assertEqual(wait.exception.kind, provider_limits.RATE_LIMITED)
+        self.assertEqual(slept, [])
+
+    def test_an_engine_switch_ends_the_wait(self):
+        provider_pacing.rate_limited("google", 60)
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            self.choose("claude")
+        with self.assertRaises(provider_pacing.SlotWaitTooLong):
+            provider_pacing.acquire("google", sleep=sleep)
+        self.assertEqual(len(slept), 1)
+        self.assertTrue(provider_pacing.in_use("anthropic"))
+        self.assertTrue(provider_pacing.in_use("openrouter"))   # direct OpenRouter calls run under every engine
+        self.assertFalse(provider_pacing.in_use("openai"))
+
+    def test_a_short_cool_down_still_waits_in_process(self):
+        provider_pacing.rate_limited("google", 2)
+        slept = []
+        import time
+
+        def sleep(seconds):
+            slept.append(seconds)
+            time.sleep(seconds)
+        lease = provider_pacing.acquire("google", sleep=sleep)
+        self.assertIsNotNone(lease)
+        self.assertTrue(slept)
+
+
+class LongResetFollowUpTests(LongResetSlotTests):
+    """G2 follow-ups (2026-10-29): a reset days away is the wait's resume time (capped at MAX_WAIT), and an
+    unreadable setup state never ends a wait."""
+
+    test_a_days_long_reset_returns_to_the_scheduler_at_once = None
+    test_an_engine_switch_ends_the_wait = None
+    test_a_short_cool_down_still_waits_in_process = None
+
+    def test_a_week_long_reset_resumes_at_the_reset(self):
+        self.choose("claude")
+        provider_pacing.rate_limited("anthropic", 7 * 86400)
+        before = dt.datetime.now(dt.timezone.utc)
+        with self.assertRaises(provider_limits.ProviderUsageLimit) as wait:
+            provider_pacing.take(None, provider="anthropic")
+        ahead = (wait.exception.resume_at - before).total_seconds()
+        self.assertGreater(ahead, 7 * 86400 - 60)
+        self.assertLessEqual(ahead, provider_limits.MAX_WAIT.total_seconds() + 1)
+        provider_pacing.rate_limited("anthropic", 30 * 86400)   # past MAX_WAIT: capped
+        with self.assertRaises(provider_limits.ProviderUsageLimit) as wait:
+            provider_pacing.take(None, provider="anthropic")
+        self.assertLessEqual((wait.exception.resume_at - before).total_seconds(), provider_limits.MAX_WAIT.total_seconds() + 1)
+
+    def test_an_unreadable_setup_state_keeps_the_wait(self):
+        self.choose("claude")
+        provider_pacing.rate_limited("anthropic", 10)
+        state = self.setup_steps._home(None) / self.setup_steps.STATE_FILE
+        saved = state.read_text()
+        self.addCleanup(state.write_text, saved)
+        state.write_text("{")
+        slept, calls = [], []
+
+        def take(provider, lease_seconds):   # the 10 s cool-down for three polls, then a slot
+            calls.append(provider)
+            return (None, 5) if len(calls) <= 3 else ("lease", 0)
+        with patch.object(provider_pacing, "_try_take", take):
+            self.assertEqual(provider_pacing.acquire("anthropic", sleep=slept.append), "lease")
+        self.assertEqual(len(slept), 3)   # kept waiting through every poll: the unreadable file decides nothing
+        self.assertTrue(provider_pacing.in_use("openai"))

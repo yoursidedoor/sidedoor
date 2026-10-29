@@ -83,11 +83,44 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual(self.mode("openrouter.key"), PRIVATE)
         self.assertNotIn(SECRET_KEY, (self.home / setup_steps.STATE_FILE).read_text())
 
+    def test_a_license_key_in_the_openrouter_box_is_named_and_never_sent(self):
+        # S2 (beta user, 2026-10-28): she pasted her SD- key here. Nothing is saved or sent.
+        calls = []
+        for pasted in ("SD-abc123", "  sd-abc123 ", '"SD-abc123"', "'Sd-abc123'"):   # U4: case, spaces, quotes
+            state = setup_steps.save_and_test_openrouter(pasted, CONFIG, self.home,
+                                                         transport=lambda *args: calls.append(args))
+            self.assertEqual(state["license_key_notice"], "That's your Sidedoor license key. It goes in step 1.")
+            self.assertNotIn("openrouter", state["steps"])   # U1: nothing recorded
+        self.assertEqual(setup_steps.NUMBER["license"], 1)   # "step 1" is true
+        self.assertEqual(calls, [])
+        self.assertIsNone(setup_steps.saved_openrouter_key(self.home))
+        self.assertFalse(setup_steps.is_license_key("sk-or-v1-SD-"))
+        # Found in the 0.4.0 release check (no keychain): the notice comes before the keychain's refusal.
+        with mock.patch.object(setup_steps, "keychain_refusal", return_value="Sidedoor can't save to your keychain."):
+            state = setup_steps.save_and_test_openrouter("SD-abc123", CONFIG, self.home,
+                                                         transport=lambda *args: calls.append(args))
+        self.assertEqual(state["license_key_notice"], "That's your Sidedoor license key. It goes in step 1.")
+        self.assertNotIn("keychain_refused", state)
+
     def test_openrouter_failures_in_plain_words(self):
         self.assertEqual(self.openrouter(401, '{"error": "no"}')[0]["message"], "OpenRouter did not accept this key.")
         self.assertIn("no credits left", self.openrouter(402, '{"error": "no"}')[0]["message"])
         self.assertIn("Could not reach OpenRouter", self.openrouter(OSError("down"), "")[0]["message"])
         self.assertIn("Could not reach OpenRouter", self.openrouter(TimeoutError(), "")[0]["message"])
+
+    def test_openrouter_certificate_failure_is_not_called_an_internet_problem(self):
+        import ssl
+        import urllib.error
+        failure = urllib.error.URLError(ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+                                                                       "verify failed: unable to get local issuer certificate"))
+        step = self.openrouter(failure, "")[0]
+        self.assertEqual(step["status"], "failed")
+        self.assertEqual(step["message"], "Sidedoor couldn't verify OpenRouter's secure connection on this computer. "
+                                          "Run Report a problem so we can see why.")
+        self.assertNotIn("internet", step["message"])
+        self.assertEqual(step["error_class"], "URLError")       # the cause is kept for a support report
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", step["error"])
+        self.assertNotIn(SECRET_KEY, (self.home / setup_steps.STATE_FILE).read_text())
 
     # --- step 2 ---
     def reading(self, file_name="My Résumé.pdf", data=b"%PDF-1.4 test"):
@@ -113,7 +146,7 @@ class SetupStepsTest(unittest.TestCase):
         step = setup_steps.load_state(self.home)["steps"]["resume"]
         self.assertEqual((step["status"], step["claims"], step["pages"]), ("done", 7, 2))
         self.assertIn("7 sentences", step["message"])
-        self.assertTrue(setup_steps.progress(self.home)["done"][2])
+        self.assertTrue(setup_steps.progress(self.home)["done"][3])
 
     def test_one_read_at_a_time(self):
         state, read = self.reading()
@@ -227,7 +260,7 @@ class SetupStepsTest(unittest.TestCase):
     def test_phone_and_linkedin_are_required(self):
         state, errors = setup_steps.save_profile(valid_form(phone="", linkedin=""), self.home)
         self.assertEqual((errors["phone"], errors["linkedin"]), ("Required.", "Required."))
-        self.assertFalse(setup_steps.step_done(3, state, self.home))
+        self.assertFalse(setup_steps.step_done(4, state, self.home))
         self.assertFalse((self.home / "profile.json").exists())
         _, errors = setup_steps.save_profile(valid_form(phone="call me", linkedin="https://example.com/me"), self.home)
         self.assertEqual(set(errors), {"phone", "linkedin"})
@@ -235,7 +268,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual(set(errors), {"phone"})  # no digit
         state, errors = setup_steps.save_profile(valid_form(), self.home)
         self.assertEqual(errors, {})
-        self.assertTrue(setup_steps.step_done(3, state, self.home))
+        self.assertTrue(setup_steps.step_done(4, state, self.home))
         answers = json.loads((self.home / "profile.json").read_text())["answers"]
         self.assertEqual(answers["linkedin"]["value"], "https://www.linkedin.com/in/alex-example/")
 
@@ -305,7 +338,7 @@ class SetupStepsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MODE_UNKNOWN"):  # refused, nothing written (E6.T2 P6)
             setup_steps.set_mode("anything", self.home)
         self.assertEqual(setup_steps.load_state(self.home)["mode"], "review")
-        self.assertTrue(setup_steps.progress(self.home)["done"][4])
+        self.assertTrue(setup_steps.progress(self.home)["done"][5])
 
     # --- step 5 ---
     def activate(self, status, body):
@@ -393,7 +426,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual(state["steps"]["codex"]["status"], "done")
 
     def test_jobs_run_the_codex_setup_found(self):
-        # config.json is bundled and names /opt/homebrew/bin/codex; the jobs use the one setup saved.
+        # config.json is bundled with an empty codex; the jobs use the one setup saved.
         brew = self.home / "usr-local-bin"
         brew.mkdir()
         fake_executables.stub(brew / "codex")
@@ -425,6 +458,21 @@ class SetupStepsTest(unittest.TestCase):
         self.assertIn(str(Path(r"C:\Users\u\AppData\Local") / "Microsoft" / "WinGet" / "Links"), folders)
         self.assertIn(r"C:\tools", folders)
         self.assertIn(str(Path(r"C:\Users\u\AppData\Roaming") / "npm" / "codex.cmd"), candidates)
+
+    def test_the_codex_desktop_apps_own_cli_is_found_on_a_mac(self):
+        # E8: the desktop app (com.openai.codex, ChatGPT.app on the owner's Mac) carries its CLI in
+        # Contents/Resources/codex-cli/bin; ~/Applications counts too. Never on Windows or Linux.
+        folder = self.home / "Applications" / "ChatGPT.app" / "Contents" / "Resources" / "codex-cli" / "bin"
+        folder.mkdir(parents=True)
+        fake_executables.stub(folder / "codex")
+        mine = lambda path: bool(path) and str(path).startswith(str(self.home)) and os.path.isfile(path)   # not this Mac's own
+        with mock.patch.object(setup_steps.Path, "home", return_value=self.home), \
+                mock.patch.object(setup_steps, "_usable", side_effect=mine):
+            with mock.patch.object(setup_steps.sys, "platform", "darwin"):
+                self.assertEqual(setup_steps.find_codex(search_path=""), str(folder / CODEX))
+                self.assertIn("/Applications/Codex.app/Contents/Resources/codex-cli/bin", setup_steps.install_folders())
+            with mock.patch.object(setup_steps.sys, "platform", "linux"):
+                self.assertNotIn(str(folder), setup_steps.install_folders())
 
     def test_codex_is_looked_for_in_local_bin(self):
         with mock.patch.object(setup_steps.Path, "home", return_value=Path("/u")):
@@ -698,9 +746,19 @@ class SetupStepsTest(unittest.TestCase):
     # --- order and stubs ---
     def test_order_the_code_forces(self):
         locked = setup_steps.progress(self.home)["locked"]
-        self.assertEqual((locked[2], locked[7], locked[9], locked[11]), (1, 5, 3, 1))
+        self.assertEqual((locked[3], locked[7], locked[9], locked[11]), (2, 1, 4, 1))   # S1a: the license is step 1
         self.assertNotIn(10, locked)
         self.assertEqual(setup_steps.progress(self.home)["left"], 8)
+
+    def test_a_030_setup_file_shows_the_same_steps_done_after_the_license_moved_first(self):
+        # S1a: saved progress is keyed by step name, so a 0.3.0 file loads with the new numbers.
+        (self.home / setup_steps.STATE_FILE).write_text(json.dumps({"mode": "review", "steps": {
+            "openrouter": {"status": "done"}, "resume": {"status": "done"}, "profile": {"status": "done"},
+            "linkedin": {"status": "done"}}}))
+        progress = setup_steps.progress(self.home)
+        self.assertEqual([progress["done"][number] for number in range(1, 8)], [False, True, True, True, True, False, True])
+        self.assertEqual(progress["locked"][7], 1)   # LinkedIn still needs the license, now step 1
+        self.assertNotIn(3, progress["locked"])     # the résumé's OpenRouter (step 2) is done
 
     def test_unbuilt_steps_say_so(self):
         import login_item
@@ -864,7 +922,7 @@ class ResetSetupFileTest(unittest.TestCase):
         state = setup_steps.load_state(self.home)
         self.assertFalse(setup_steps.state_unreadable(self.home))
         progress = setup_steps.progress(self.home)
-        self.assertEqual([progress["done"][number] for number in (1, 2, 3, 6, 7, 9)], [True, True, True, True, False, True])
+        self.assertEqual([progress["done"][number] for number in (2, 3, 4, 6, 7, 9)], [True, True, True, True, False, True])
         self.assertEqual(state["locked_email"], setup_steps.saved_email(self.home))   # GL1: the email stays locked
         self.assertTrue(progress["finished"])
         self.assertNotIn("linkedin", state["steps"])

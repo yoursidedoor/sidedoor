@@ -432,5 +432,181 @@ class ProfileTests(unittest.TestCase):
             self.assertFalse(portable.profile_busy("/nonexistent"))
 
 
+class KillTreeR1Tests(unittest.TestCase):
+    @unittest.skipIf(portable.WINDOWS, "POSIX process groups")
+    def test_r1_an_exited_unreaped_leader_never_raises(self):
+        """macOS answers EPERM for a group whose only member is its exited, unreaped leader."""
+        worker = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+        time.sleep(0.1)
+        portable.kill_tree(worker.pid)
+        worker.wait()
+        with mock.patch.object(os, "killpg", side_effect=PermissionError(1, "Operation not permitted")):
+            portable.kill_tree(worker.pid)
+
+
+class NpmShimTests(unittest.TestCase):
+    """E10: an npm .cmd shim runs its program directly, so no argument goes through cmd.exe. The npm shims in
+    tests/fixtures/cmd_shims were written by npm's own cmd-shim 8.0.0 (npm 11): node_script.cmd for a
+    `#!/usr/bin/env node` package script (Claude, agy, Codex), own_exe.cmd for a package whose bin is an
+    .exe, with_variables.cmd for a shebang that sets variables (left to cmd.exe)."""
+
+    SCHEMA = '{"type":"object","properties":{"a":{"description":"100% & <x> ^ \\"q\\" !v!"}}}'
+
+    def setUp(self):
+        self.npm = Path(tempfile.mkdtemp()) / "npm"
+        (self.npm / "node_modules" / "@anthropic-ai" / "claude-code").mkdir(parents=True)
+        self.script = self.npm / "node_modules" / "@anthropic-ai" / "claude-code" / "cli.js"
+        self.script.write_text("#!/usr/bin/env node\n")
+        self.patches = [mock.patch.object(portable, "WINDOWS", True),
+                        mock.patch.object(setup_steps, "install_folders", return_value=[])]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def shim(self, fixture, name="claude.cmd"):
+        path = self.npm / name
+        path.write_bytes((TESTS / "fixtures" / "cmd_shims" / fixture).read_bytes())
+        return str(path)
+
+    def executable(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+        path.chmod(0o755)
+        return str(path)
+
+    def argv(self, shim):
+        return [shim, "-p", "--json-schema", self.SCHEMA, "--allowedTools", "mcp__browser__a,mcp__browser__b"]
+
+    def test_node_next_to_the_shim_runs_the_script_with_every_argument_unchanged(self):
+        node = self.executable(self.npm / "node.exe")
+        argv = self.argv(self.shim("node_script.cmd"))
+        self.assertEqual(portable.direct_argv(argv, {"PATH": ""}), [node, str(self.script)] + argv[1:])
+
+    def test_node_on_the_childs_path(self):
+        node = self.executable(Path(tempfile.mkdtemp()) / "nodejs" / "node.exe")
+        argv = self.argv(self.shim("node_script.cmd", "agy.cmd"))
+        self.assertEqual(portable.direct_argv(argv, {"PATH": str(Path(node).parent)}),
+                         [node, str(self.script)] + argv[1:])
+
+    def test_node_in_an_install_folder_when_the_path_lacks_it(self):
+        node = self.executable(Path(tempfile.mkdtemp()) / "nodejs" / "node.exe")
+        argv = self.argv(self.shim("node_script.cmd", "codex.cmd"))
+        with mock.patch.object(setup_steps, "install_folders", return_value=[str(Path(node).parent)]):
+            self.assertEqual(portable.direct_argv(argv, {"PATH": ""})[:2], [node, str(self.script)])
+
+    def test_a_package_exe_runs_directly(self):
+        program = self.executable(self.npm / "node_modules" / "pkg" / "bin" / "tool.exe")
+        argv = self.argv(self.shim("own_exe.cmd", "tool.cmd"))
+        self.assertEqual(portable.direct_argv(argv, {}), [program] + argv[1:])
+
+    def test_left_as_it_is(self):
+        no_node = self.argv(self.shim("node_script.cmd"))
+        self.assertIs(portable.direct_argv(no_node, {"PATH": ""}), no_node)        # no node anywhere
+        self.executable(self.npm / "node.exe")
+        variables = self.argv(self.shim("with_variables.cmd", "vars.cmd"))
+        self.assertIs(portable.direct_argv(variables, {}), variables)              # not handled: cmd.exe sets them
+        exe = [str(self.npm / "claude.exe"), "-p"]
+        self.assertIs(portable.direct_argv(exe, {}), exe)
+        shim = self.argv(self.shim("node_script.cmd"))
+        with mock.patch.object(portable, "WINDOWS", False):
+            self.assertIs(portable.direct_argv(shim, {}), shim)                   # macOS: unchanged
+
+    def test_r5_a_shim_with_any_line_outside_the_template_is_left_to_cmd_exe(self):
+        self.executable(self.npm / "node.exe")
+        text = (TESTS / "fixtures" / "cmd_shims" / "node_script.cmd").read_text()
+        for extra in ("SET NODE_OPTIONS=--x", "@SET NODE_OPTIONS=--x", "set FOO=1", "echo hello", "call other.cmd"):
+            shim = self.npm / "claude.cmd"
+            shim.write_text(text.replace("CALL :find_dp0", "CALL :find_dp0\r\n" + extra))
+            argv = self.argv(str(shim))
+            self.assertIs(portable.direct_argv(argv, {}), argv, extra)
+            shim.write_text(text + extra + "\r\n")
+            self.assertIs(portable.direct_argv(argv, {}), argv, extra)
+
+    def test_every_engine_launch_starts_the_direct_command(self):
+        """The four places that start a Claude, agy or Codex session (research, the agent worker, the two
+        browser workers) start what portable.direct_command returns, with its environment."""
+        for name in ("orchestrator.py", "agent_worker.py", "application_browser.py", "outreach_history_browser.py"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            start = source.index("launch, ")
+            self.assertRegex(source[start:start + 200],
+                             r"^launch, (\w+) = portable\.direct_command\(\w+, \1\)\n\s+worker = subprocess\.Popen\(launch,",
+                             name)
+            popen = source[start:source.index("**portable.worker_spawn_options", start)]
+            variable = popen.split(",")[1].split("=")[0].strip()
+            self.assertIn("env=%s" % variable, popen, name)
+
+
+class PnpmYarnShimTests(unittest.TestCase):
+    """R8 (owner, 2026-10-29): pnpm's and yarn's shims too. pnpm_global.cmd, pnpm_node_path.cmd, yarn_global.cmd
+    and yarn_inner.cmd were written on the Windows VM by pnpm 11.21.0 (`pnpm add -g`) and yarn 1.22.22
+    (`yarn global add`) for a local fake package; pnpm_exec_path.cmd by @zkochan/cmd-shim 9.0.8 with
+    nodeExecPath (pnpm's own shim library). The folders below repeat the VM's layout."""
+
+    SCHEMA = NpmShimTests.SCHEMA
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        for patch in (mock.patch.object(portable, "WINDOWS", True),
+                      mock.patch.object(setup_steps, "install_folders", return_value=[])):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.node = Path(tempfile.mkdtemp()) / "nodejs" / "node.exe"
+        self.file(self.node)
+        self.environment = {"PATH": str(self.node.parent)}
+
+    def file(self, path, data=b""):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o755)
+        return path
+
+    def shim(self, fixture, relative):
+        return self.file(self.base / relative, (TESTS / "fixtures" / "cmd_shims" / fixture).read_bytes())
+
+    def argv(self, shim):
+        return [str(shim), "-p", "--json-schema", self.SCHEMA, "x" * 9000]
+
+    def test_pnpm_global_bin(self):
+        script = self.file(self.base / "pnhome/global/v11/2de0-1a18976653b-e0436bb23e66faec/node_modules/fake-cli/bin/cli.js")
+        argv = self.argv(self.shim("pnpm_global.cmd", "pnhome/bin/fake-cli.CMD"))
+        self.assertEqual(portable.direct_command(argv, self.environment),
+                         ([str(self.node), str(script)] + argv[1:], self.environment))
+
+    def test_pnpm_sets_node_path_on_the_child_as_its_shim_does(self):
+        store = ("pnstore/v11/links/@/fake-cli/directory/"
+                 "3a228e6c8c880bddbfe1a479f537f93c98a5b8501bd5f00b0c2682483012fc87/node_modules/fake-cli/bin/cli.js")
+        script = self.file(self.base / store)
+        argv = self.argv(self.shim("pnpm_node_path.cmd", "pnhome/global/v11/x/node_modules/.bin/fake-cli.CMD"))
+        launch, environment = portable.direct_command(argv, dict(self.environment))
+        self.assertEqual(launch, [str(self.node), str(script)] + argv[1:])
+        value = environment["NODE_PATH"]
+        self.assertTrue(value.startswith(r"C:\Users\tester\pm\pnstore") and value.endswith(r"\.pnpm\node_modules"))
+        _, environment = portable.direct_command(argv, dict(self.environment, NODE_PATH="before"))
+        self.assertEqual(environment["NODE_PATH"], value + ";before")   # the ELSE branch: prepended
+        self.assertNotIn("NODE_PATH", self.environment)                   # the caller's dict is not changed
+
+    def test_pnpm_node_exec_path(self):
+        script = self.file(self.base / "bin/pkg/cli.js")
+        text = (TESTS / "fixtures" / "cmd_shims" / "pnpm_exec_path.cmd").read_text().replace(
+            r"C:\Program Files\nodejs\node.exe", str(self.node))
+        shim = self.file(self.base / "bin/tool.cmd", text.encode())
+        argv = self.argv(shim)
+        self.assertEqual(portable.direct_command(argv, {})[0], [str(self.node), str(script)] + argv[1:])
+
+    def test_yarn_global_bin_follows_its_next_shim(self):
+        script = self.file(self.base / "yglobal/node_modules/fake-cli/bin/cli.js")
+        self.shim("yarn_inner.cmd", "yglobal/node_modules/.bin/fake-cli.cmd")
+        argv = self.argv(self.shim("yarn_global.cmd", "yprefix/bin/fake-cli.cmd"))
+        self.assertEqual(portable.direct_command(argv, self.environment)[0], [str(self.node), str(script)] + argv[1:])
+
+    def test_any_other_line_is_left_to_cmd_exe(self):
+        self.file(self.base / "pnhome/global/v11/2de0-1a18976653b-e0436bb23e66faec/node_modules/fake-cli/bin/cli.js")
+        text = (TESTS / "fixtures" / "cmd_shims" / "pnpm_global.cmd").read_text()
+        for extra in ("@SET FOO=1", "SET FOO=1", '@SET "PATH=C:\\x:%PATH%"', "echo hi"):
+            for changed in (text.replace("@SETLOCAL", "@SETLOCAL\r\n" + extra), text + extra + "\r\n"):
+                argv = self.argv(self.file(self.base / "pnhome/bin/fake-cli.CMD", changed.encode()))
+                self.assertEqual(portable.direct_command(argv, self.environment), (argv, self.environment), extra)
+
+
 if __name__ == "__main__":
     unittest.main()

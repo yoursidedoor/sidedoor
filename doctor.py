@@ -13,7 +13,9 @@ disagree:
     Credentials                credentials.status / where (E2.T4: the OS store, or the 0600 file)
     OpenRouter                 setup_steps.saved_openrouter_key + openrouter_tested (online: text_model.complete,
                                the Save-and-test call, as a pure read)
-    Codex                      setup_steps.codex_candidates / _usable + codex_login_status
+    Codex, Claude or           only the chosen engine (setup_steps.with_engine + engines.engine, C1), with the
+      Antigravity              probes Setup uses: codex_candidates / _usable + codex_login_status; find_claude +
+                               claude_auth_status (or the saved Anthropic key); find_antigravity + antigravity_probe
     Google Chrome              setup_steps.chrome_path
     Browser runtime            browser_runtime.display_state (missing, profile_in_use, and whether a Sidedoor
                                session owns that Chrome: the browser lock or a running guard)
@@ -29,6 +31,8 @@ disagree:
     Disk space                 shutil.disk_usage on the Sidedoor home
     Computer                   platform
     Relay (online)             GET /healthz on the relay
+    Secure connection          tls_setup.state (how this process trusts HTTPS); online: text_model.check_connection,
+                               the `sidedoor net-check` GET of OpenRouter's model list
 
 Nothing here prints a secret: every line goes through failures_page.redact_text with
 failures_page.secrets_of (the license key, the OpenRouter key, the dashboard token, Unipile's token
@@ -250,7 +254,13 @@ def check_openrouter(home, config, online=False, transport=None):
                 return _line(FAIL, "OpenRouter", "Your OpenRouter account has no credits left.", "Add credits.")
             return _line(WARN, "OpenRouter", "OpenRouter refused the test call (HTTP %s)." % error.status,
                          "Try again in a few minutes.")
-        except (TimeoutError, OSError, text_model.TextModelResponseError):
+        except text_model.TextModelResponseError as error:
+            if error.certificate_error:   # not the internet: see the Secure connection line
+                return _line(FAIL, "OpenRouter", "Sidedoor couldn't verify OpenRouter's secure connection to test key "
+                             "%s." % shown, "Run Report a problem so we can see why.")
+            return _line(WARN, "OpenRouter", "Could not reach OpenRouter to test key %s." % shown,
+                         "Check your internet and try again.")
+        except (TimeoutError, OSError):
             return _line(WARN, "OpenRouter", "Could not reach OpenRouter to test key %s." % shown,
                          "Check your internet and try again.")
         except ValueError:
@@ -305,6 +315,71 @@ def check_credentials(home):
         return _line(OK, "Credentials", "No keys saved yet; they will be kept in %s." % store)
     return _line(OK, "Credentials", "Your %s %s kept in %s." % (" and ".join(saved), "is" if len(saved) == 1 else "are",
                                                                store))
+
+
+def chosen_engine(home, config):
+    """The engine work runs on: setup-state's choice laid over the config (setup_steps.with_engine), as
+    every launcher reads it (engines.engine). Never raises."""
+    import engines
+    return engines.engine(setup_steps.with_engine(dict(config or {}), home)).name
+
+
+def check_engine(home, run=None, config=None, online=False, transport=None):
+    """C1: only the chosen engine is checked; an engine not chosen is never asked for."""
+    name = chosen_engine(home, config)
+    if name == "claude":
+        return check_claude(home, run)
+    if name == "antigravity":
+        return check_antigravity(home, run)
+    return check_codex(home, run, config=config, online=online, transport=transport)
+
+
+def check_claude(home, run=None):
+    """Setup's Claude check (setup_steps.check_claude) as a pure read: nothing is saved."""
+    import subprocess
+    import credentials
+    import engines
+    path = setup_steps.find_claude(setup_steps.load_state(home).get("claude_path"))
+    if not path:
+        return _line(FAIL, "Claude", "Claude is not installed.", "Install Claude (see Settings > Connections).")
+    setup_steps.extend_path(path)
+    if setup_steps.claude_api_key_mode(home):
+        try:
+            key = credentials.get("anthropic", home)
+        except OSError:   # E2.T4: the keychain waits; never "none is saved"
+            return _line(WARN, "Claude", credentials.hold_reason(home) or "Sidedoor is waiting for your keychain to "
+                         "read your Anthropic API key.", WAITING_TODO)
+        if not key:
+            return _line(FAIL, "Claude", "Claude is set to use an Anthropic API key, but none is saved.",
+                         "Save your key in Settings > Connections, or use your Claude subscription.")
+        return _line(OK, "Claude", "Installed; uses Anthropic API key %s." % masked(key))
+    status = setup_steps.claude_auth_status(path, engines.CLAUDE.environment(None, home=home), run or subprocess.run)
+    if status is None:
+        return _line(FAIL, "Claude", "Sidedoor couldn't check Claude's sign-in.",
+                     "Click Check in Settings > Connections. If this stays, " + SUPPORT)
+    if status["loggedIn"]:
+        return _line(OK, "Claude", "Installed and signed in.")
+    return _line(FAIL, "Claude", "Claude is installed but not signed in.",
+                 "Sign in to Claude (see Settings > Connections).")
+
+
+def check_antigravity(home, run=None):
+    """Setup's Antigravity check (setup_steps.check_antigravity) as a pure read: `agy models`, no model
+    turn; nothing is saved and Antigravity's settings are not touched."""
+    import subprocess
+    import engines
+    path = setup_steps.find_antigravity(setup_steps.load_state(home).get("antigravity_path"))
+    if not path:
+        return _line(FAIL, "Antigravity", "Antigravity is not installed.",
+                     "Install Antigravity (see Settings > Connections).")
+    status, _models = setup_steps.antigravity_probe(path, engines.ANTIGRAVITY.environment(None), run or subprocess.run)
+    if status is None:
+        return _line(FAIL, "Antigravity", "Sidedoor couldn't check Antigravity's sign-in.",
+                     "Click Check in Settings > Connections. If this stays, " + SUPPORT)
+    if status:
+        return _line(OK, "Antigravity", "Installed and signed in.")
+    return _line(FAIL, "Antigravity", "Antigravity is installed but not signed in.",
+                 "Sign in to Antigravity (see Settings > Connections).")
 
 
 def check_codex(home, run=None, config=None, online=False, transport=None):
@@ -621,6 +696,49 @@ def check_platform():
     return _line(OK, "Computer", "%s %s (%s)." % (platform.system() or sys.platform, platform.release(), platform.machine()))
 
 
+SECURE_FAILED = ("Sidedoor can't make secure connections on this computer, so it can't reach OpenRouter, the license "
+                 "server or updates.")
+
+
+def check_secure_connection(online=False, check=None):
+    """Whether this process can verify HTTPS (hotfix 2026-10-28). Offline: what tls_setup did at start
+    (the OS trust store, the user's SSL_CERT_FILE, the bundled certificates, OpenSSL's defaults, or
+    nothing). Online: one keyless GET of OpenRouter's model list (`sidedoor net-check`); a certificate
+    failure is a FAIL whose `detail` names the error class."""
+    import tls_setup
+    trust = tls_setup.state()
+    if trust["mode"] is None:   # a source run that never went through the CLI start
+        import ssl
+        default = ssl.get_default_verify_paths()
+        trust = dict(trust, mode=tls_setup.USER if tls_setup.user_choice(os.environ) else
+                     tls_setup.DEFAULT if default.cafile or default.capath else tls_setup.NONE)
+    if online:
+        import text_model
+        try:
+            (check or text_model.check_connection)()
+        except text_model.TextModelResponseError as error:
+            detail = {"error_class": error.transport_error or type(error).__name__, "error": str(error),
+                      "trust": trust["mode"]}
+            if error.certificate_error:
+                return dict(_line(FAIL, "Secure connection", SECURE_FAILED, "Run Report a problem so we can see why."),
+                            detail=detail)
+            return dict(_line(WARN, "Secure connection", "Could not reach the internet to test secure connections.",
+                              "Check your internet, then run doctor --online again."), detail=detail)
+        except TimeoutError:
+            return dict(_line(WARN, "Secure connection", "The secure connection test timed out.",
+                              "Check your internet, then run doctor --online again."),
+                        detail={"error_class": "TimeoutError", "trust": trust["mode"]})
+        return dict(_line(OK, "Secure connection", "Works (tested just now)."), detail={"trust": trust["mode"]})
+    words = {tls_setup.TRUSTSTORE: "Uses this computer's trusted certificates.",
+             tls_setup.USER: "Uses the certificates named in SSL_CERT_FILE / SSL_CERT_DIR.",
+             tls_setup.BUNDLED: "Uses Sidedoor's own list of trusted certificates.",
+             tls_setup.DEFAULT: "Uses the system's default certificates."}
+    if trust["mode"] in words:
+        return dict(_line(OK, "Secure connection", words[trust["mode"]]), detail={"trust": trust["mode"]})
+    return dict(_line(FAIL, "Secure connection", SECURE_FAILED, "Run Report a problem so we can see why."),
+                detail={"trust": trust["mode"], "error_class": trust.get("truststore_error")})
+
+
 def relay_get(url, timeout=10):
     with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=timeout) as response:
         return response.status
@@ -631,6 +749,10 @@ def check_relay(relay_url=None, get=None):
     try:
         status = (get or relay_get)(url)
     except Exception as error:
+        import tls_setup
+        if tls_setup.is_certificate_error(error):   # T7: not the internet
+            return _line(FAIL, "Relay", "Sidedoor couldn't verify its service's secure connection (%s)."
+                         % type(error).__name__, "Run Report a problem so we can see why.")
         return _line(FAIL, "Relay", "Can't reach Sidedoor's service (%s)." % type(error).__name__,
                      "Check your internet, then run doctor --online again.")
     if status != 200:
@@ -670,11 +792,14 @@ def dashboard_checks(home, root, config, running, loop, openrouter_transport=Non
 
 def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None, relay_url=None,
         codex_run=None, browser_run=None, openrouter_transport=None, openai_transport=None, license_post=None,
-        linkedin_transport=None, relay=None, disk_usage=shutil.disk_usage, now=None, openrouter_online=False):
+        linkedin_transport=None, relay=None, disk_usage=shutil.disk_usage, now=None, openrouter_online=False,
+        secure_check=None, secure_online=False):
     """The checks, in order, as [{"status", "name", "line", "todo"}]. `running` is whether the
-    scheduler runs (default: ask `cli_running`; None: unknown); the rest are injectable for tests.
+    scheduler runs (default: ask `cli_running`; None: unknown); the rest are injectable for tests
+    (`codex_run` runs the chosen engine's probe, whichever engine that is).
     `openrouter_online` makes the OpenRouter check's one test call even when `online` is off (the
-    dashboard's Run checks while the out-of-credit banner shows, `dashboard_checks`)."""
+    dashboard's Run checks while the out-of-credit banner shows, `dashboard_checks`); `secure_online`
+    makes the Secure connection check's one keyless GET the same way (Report a problem, T2)."""
     home = Path(home) if home is not None else user_profile.home()
     root = paths.data(root, home)  # the data folder (E9.T1): the database lives in the home
     if config is None:
@@ -701,9 +826,11 @@ def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None
     guarded("Résumé", check_resume, home, root)
     guarded("Credentials", check_credentials, home)
     guarded("OpenRouter", check_openrouter, home, config, online or openrouter_online, openrouter_transport)
-    guarded("Codex", check_codex, home, codex_run, config=config, online=online, transport=openai_transport)
+    engine = setup_steps.ENGINE_LABELS.get(chosen_engine(home, config), "Codex")
+    guarded(engine, check_engine, home, codex_run, config=config, online=online, transport=openai_transport)
     guarded("Google Chrome", check_chrome)
     guarded("Browser runtime", check_browser_runtime, config, browser_run, root)
+    guarded("Secure connection", check_secure_connection, online or secure_online, secure_check)
     if online:
         guarded("Relay", check_relay, relay_url, relay)
     guarded("License", check_license, home, online, relay_url, license_post)
@@ -727,8 +854,26 @@ def redacted(lines, home, config):
     secrets = failures_page.secrets_of(home, config)
     if not secrets:
         return lines
-    return [{key: failures_page.redact_text(value, secrets) if key in ("line", "todo") and value else value
+    program = _program_shown()
+
+    def clean(name, value):
+        # C2: the App location line names Sidedoor's own program (Sidedoor.app/Contents/MacOS/sidedoor), which
+        # the URL rule reads as a web address; only that path is kept as it is, the rest is redacted as usual.
+        if name == "App location" and program and program in value:
+            return program.join(failures_page.redact_text(part, secrets) if part else part
+                                for part in value.split(program))
+        return failures_page.redact_text(value, secrets)
+    return [{key: clean(line.get("name"), value) if key in ("line", "todo") and value else value
              for key, value in line.items()} for line in lines]
+
+
+def _program_shown():
+    """The program path check_app_location names (scheduler_loop.program()), or None."""
+    try:
+        import scheduler_loop
+        return str(scheduler_loop.program()) or None
+    except Exception:
+        return None
 
 
 def report_text(lines, now=None):

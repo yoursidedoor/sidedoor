@@ -1,6 +1,6 @@
 {# Settings > Connections > Codex; swapped on its own (E6.T8 T6). #}
 <div class="connection" id="connection-codex"{% if oob %} hx-swap-oob="true"{% endif %}>
-  <h3>Codex and ChatGPT</h3>
+  <h3>Codex</h3>
   {% if x.codex.message %}<p class="note note-{{ 'success' if x.codex_done else 'error' }}" role="status">{% if x.codex.status == "done" and not x.codex_done %}Codex is not installed.{% else %}{{ x.say(x.codex.message) }}{% endif %}</p>{% endif %}
   {% if x.codex_done and x.codex_path %}<p class="muted">Found at {{ x.codex_path }}</p>{% endif %}
   {# E0.T8: Sign in with ChatGPT (default) or Use an OpenAI API key; the key box follows the OpenRouter rule (hidden, eye to show). #}

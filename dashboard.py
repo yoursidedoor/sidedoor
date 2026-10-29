@@ -81,8 +81,8 @@ DATABASE = Path(paths.STATE) / paths.DATABASE
 TOKEN_FILE = "dashboard-token"
 MODE_ERROR = "Choose Automatic or Review."
 COOKIE = "sidedoor_session"
-PORT = 47823
-PORT_IN_USE = "Port 47823 is in use by another program. Close it and open Sidedoor again."
+PORT = paths.DASHBOARD_PORT   # 47823; another port only in a release check (C4, paths.RELEASE_CHECK_PORT_VARIABLE)
+PORT_IN_USE = "Port %d is in use by another program. Close it and open Sidedoor again." % PORT
 PING_PATH = "/_sidedoor/ping"
 # `sidedoor doctor` (E4.T4, UD4) asks the open dashboard whether its scheduler loop runs: GET with a
 # fresh nonce; the answer is "running" or "stopped" plus the HMAC of nonce and state under the token.
@@ -203,7 +203,8 @@ def load_config(root=None):
 
 
 # Steps whose lock or result changes when another step changes; re-sent out of band with each step.
-DEPENDENT_STEPS = (2, 7, 9, 11)
+STEP = setup_steps.NUMBER   # step name -> number (S1a: the license is 1, OpenRouter 2, ...)
+DEPENDENT_STEPS = (STEP["resume"], 7, 9, 11)
 STATUS = {"reading": ("Checking", "info"), "done": ("Done", "success"), "failed": ("Failed", "error"), "needs_you": ("Needs you", "warning"),
           "checking": ("Checking", "info"), setup_steps.NOT_BUILT: ("Not built yet", "info"),
           "not_started": ("Not started", "muted")}
@@ -586,13 +587,13 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         # U1 3g: step 6 is the chosen engine's (its record is kept under the engine's own name)
         saved = state["steps"].get(engine if number == 6 and engine in ("claude", "antigravity") else key, {})
         status = saved.get("status", "not_started")
-        message = saved.get("message")
-        if number == 4:
+        message = setup_steps.current_words(saved.get("message"))   # S1a: a 0.3.0 message's old step number
+        if key == "mode":
             status, message = "done", None
             import approvals  # the mode as the send path reads it (E6.T2 P13)
             state = dict(state, mode=approvals.install_mode(root, home))
-        elif number == 5:
-            status = "done" if progress["done"][5] else ("failed" if status == "failed" else "not_started")
+        elif key == "license":
+            status = "done" if progress["done"][number] else ("failed" if status == "failed" else "not_started")
             import license_clock  # LA4: a saved message with a raw UTC time shows it in local time
             message = license_clock.local_message(saved, config).get("message")
         elif number == 6 and status == "done" and not progress["done"][6]:
@@ -619,13 +620,13 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                 "progress": progress, "oob": False, "email_locked": setup_steps.email_locked(state),
                 "locked_line": setup_steps.LOCKED_LINE, "support": setup_steps.SUPPORT_EMAIL,
                 "website": setup_steps.WEBSITE_URL, "busy_line": setup_steps.BUSY_LINE}
-        if number == 1 and locked is None and progress["locked"].get(2) == 1:
-            view["unlocks"] = 2
-        if number in (1, 5, 6):   # 6: the OpenAI API key (E0.T8) is kept the same way
+        if key == "openrouter" and locked is None and progress["locked"].get(STEP["resume"]) == number:
+            view["unlocks"] = STEP["resume"]
+        if key in ("openrouter", "license") or number == 6:   # 6: the OpenAI API key (E0.T8) is kept the same way
             view["keychain_wait"] = setup_steps.keys_waiting(home)   # E2.T4 (KR1): in place of the key form
             import credentials
             view["offer_file"] = credentials.offer_file(Path(home) if home is not None else user_profile.home())
-        if number == 1 and status != "done":
+        if key == "openrouter" and status != "done":
             # GR1: a key saved but never tested (or saved before the tested mark existed) is shown
             # masked with [Test saved key], so the user never types it again.
             stored = setup_steps.saved_openrouter_key(home)
@@ -648,7 +649,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                         openai_key=settings_page.masked(stored),
                         openai_untested=bool(stored) and test_state != "passed",
                         openai_test_state=test_state)
-        if number == 3:
+        if key == "profile":
             form = setup_steps.profile_form(home)
             view.update(form=form, errors=saved.get("errors") or {}, pick=pick_view,
                         self_id=setup_steps.picklists()["self_identification"])
@@ -713,7 +714,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     @app.post("/setup/openrouter/test")
     async def openrouter_test_saved(request: Request):
         await run_in_threadpool(setup_steps.test_saved_openrouter, config, home)
-        return setup_response(request, 1)
+        return setup_response(request, STEP["openrouter"])
 
     @app.post("/setup/openrouter")
     async def openrouter(request: Request):
@@ -722,12 +723,18 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         state = await run_in_threadpool(setup_steps.save_and_test_openrouter, typed, config, home, None,
                                         form.get("to_file") == "1")
         if state.get("keychain_refused"):   # KC2: nothing saved or recorded; the typed key stays in its box
-            return setup_response(request, 1, {"keychain_notice": state["keychain_refused"], "key_box": typed})
-        return setup_response(request, 1)
+            return setup_response(request, STEP["openrouter"], {"keychain_notice": state["keychain_refused"], "key_box": typed})
+        if state.get("license_key_notice"):   # S2: nothing changed; a saved key is shown with its Test button
+            stored = setup_steps.saved_openrouter_key(home)
+            return setup_response(request, STEP["openrouter"], {
+                "license_key_notice": state["license_key_notice"],
+                "saved_key": settings_page.masked(stored) if stored else None,
+                "saved_key_tested": bool(stored) and setup_steps.openrouter_tested(home)})
+        return setup_response(request, STEP["openrouter"])
 
     @app.post("/setup/resume")
     async def resume(request: Request):
-        refused = locked_refusal(request, 2)
+        refused = locked_refusal(request, STEP["resume"])
         if refused:
             return refused
         form = await form_of(request)
@@ -738,25 +745,25 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             data = await upload.read(setup_steps.RESUME_MAX_BYTES + 1)
             # Saves the file and starts the read in the background; returns at once.
             await run_in_threadpool(setup_steps.save_resume, upload.filename, data, config, home)
-        return setup_response(request, 2)
+        return setup_response(request, STEP["resume"])
 
     @app.post("/setup/resume/retry")
     def resume_retry(request: Request):
-        refused = locked_refusal(request, 2)
+        refused = locked_refusal(request, STEP["resume"])
         if refused:
             return refused
         setup_steps.start_resume_read(config, home)
-        return setup_response(request, 2)
+        return setup_response(request, STEP["resume"])
 
     @app.get("/setup/resume/status")
     def resume_status(request: Request):
-        """Step 2's poll while reading: only step 2 while it reads (so the other steps are not
+        """The résumé step's poll while reading: only that step while it reads (so the other steps are not
         re-rendered every few seconds), then the usual response with progress and banners."""
         progress = setup_steps.progress(home)
         if progress["state"]["steps"].get("resume", {}).get("status") == "reading" and \
                 request.headers.get("hx-request") == "true":
-            return HTMLResponse(templates.get_template("setup_step.html").render(step=step_view(2, progress)))
-        return setup_response(request, 2)
+            return HTMLResponse(templates.get_template("setup_step.html").render(step=step_view(STEP["resume"], progress)))
+        return setup_response(request, STEP["resume"])
 
     @app.post("/setup/profile")
     async def profile(request: Request):
@@ -768,7 +775,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             elif isinstance(form.get(field), str):
                 values[field] = form.get(field)
         setup_steps.save_profile(values, home)
-        return setup_response(request, 3)
+        return setup_response(request, STEP["profile"])
 
     @app.get("/setup/pick/{field}")
     def pick_options(request: Request, field: str):
@@ -809,8 +816,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         try:
             approvals.set_install_mode(form.get("mode"), root=root, home=home)
         except approvals.ModeError:  # an unknown value: nothing written, the mode unchanged (P6)
-            return setup_response(request, 4, {"mode_error": MODE_ERROR})
-        return setup_response(request, 4)
+            return setup_response(request, STEP["mode"], {"mode_error": MODE_ERROR})
+        return setup_response(request, STEP["mode"])
 
     @app.post("/setup/license")
     async def license_(request: Request):
@@ -819,11 +826,11 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         state = await run_in_threadpool(setup_steps.activate_license, typed, home, relay_url, None,
                                         form.get("to_file") == "1")
         if state.get("keychain_refused"):   # KC2
-            return setup_response(request, 5, {"keychain_notice": state["keychain_refused"], "key_box": typed})
+            return setup_response(request, STEP["license"], {"keychain_notice": state["keychain_refused"], "key_box": typed})
         await run_in_threadpool(sync_license_pause, root, home)  # E8.T3
         if setup_steps.license_done(home):  # a newly active key: read LinkedIn again at once
             await run_in_threadpool(setup_steps.linkedin_status, home, relay_url)
-        return setup_response(request, 5)
+        return setup_response(request, STEP["license"])
 
     # U1 3g: step 6 starts with the engine choice; Claude's sign-in mirrors Codex's.
     @app.post("/setup/engine")
@@ -1317,7 +1324,9 @@ def _serve(open_browser, home, path, start, scheduler, tray=False, resume=False)
         return 0  # start at login was turned off from inside the session: a KeepAlive restart ends here (L3)
     secret = token(home)
     import mac_update  # A (owner, 2026-10-23): a downloaded copy outside Applications offers to replace
-    if mac_update.offer_move(home_path, running=lambda: running_here(secret), port=PORT):  # before any job
+    # C4: a release check's second copy never offers the move (it would replace the owner's installed app).
+    if not paths.RELEASE_CHECK and mac_update.offer_move(home_path, running=lambda: running_here(secret),
+                                                         port=PORT):  # before any job
         return 0
     url = f"http://127.0.0.1:{PORT}{path}?t={secret}"
     try:
@@ -1354,7 +1363,8 @@ def _serve(open_browser, home, path, start, scheduler, tray=False, resume=False)
     except Exception as error:  # never stops the dashboard: the files stay and are read first
         print("Sidedoor could not move its keys this start (%s); it tries again next start." % type(error).__name__,
               file=sys.stderr, flush=True)
-    setup_steps.refresh_login_entry(home)  # a moved program, folder or Codex: rewrite the entry (E5.T2)
+    if not paths.RELEASE_CHECK:   # C4/D2: a release check's copy never rewrites the user's login entry
+        setup_steps.refresh_login_entry(home)  # a moved program, folder or Codex: rewrite the entry (E5.T2)
     setup_steps.use_saved_codex(home)      # the Codex setup found runs from a Dock-opened app (npm: node)
     login_item.sweep_own_logs(root)
     close_orphaned_browser(root)   # a session Chrome the last run left behind (it was stopped mid-session)

@@ -315,6 +315,12 @@ GENDER_MENU = {"id": "q-gender", "required": True, "answer_type": "choice", "cho
 class FixReviewTests(base.ResumeFixture):
     """Owner-approved review fixes J1, J2, J3, J5 (2026-10-22)."""
 
+    def setUp(self):
+        super().setUp()
+        # A recorded value that is not every menu's wording ("Male" against Man/Woman); the example
+        # profile records Setup's own option, "Man" (C5).
+        self.policy["answers"]["gender_self_identification"]["value"] = "Male"
+
     def test_j1_a_recorded_value_that_is_not_an_option_goes_to_the_ai(self):
         key = self.key(GENDER_MENU)
         answers, missing = applications.resolve_answers([GENDER_MENU], self.policy)

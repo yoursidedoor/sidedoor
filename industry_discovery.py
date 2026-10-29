@@ -116,6 +116,10 @@ def screen(result, policy, now, limit, dropped=None):
     return dict(result, companies=kept)
 
 
+# How far ahead of now an observation time may be and still be the model's guess of now (C3).
+CLOCK_SKEW = dt.timedelta(minutes=5)
+
+
 def check_company(company, industries, current, seen):
     """One discovered company's checks; returns its key or raises ValueError with a plain reason.
     The same checks run when the AI saves the company as it goes (research_tools.save_company)."""
@@ -158,6 +162,10 @@ def check_company(company, industries, current, seen):
         observed = _timestamp(company["observed_at"])
     except ValueError:
         raise ValueError("the time its source was read was not a valid date") from None
-    if current - observed < dt.timedelta(0):
+    if observed - current > CLOCK_SKEW:
         raise ValueError("the time its source was read was in the future")
+    if observed > current:
+        # C3: the model writes the time itself and guesses a little ahead (4 of 23 Claude saves were
+        # refused for this). A few minutes ahead is that guess, not an invented date: it is saved as now.
+        company["observed_at"] = current.isoformat()
     return name

@@ -183,6 +183,19 @@ class FoundCodexSaved(unittest.TestCase):
             self.assertEqual(setup_steps.with_codex({"codex": MISSING}, self.home)["codex"], self.found)
         self.assertEqual(setup_steps.load_state(self.home)["codex_path"], "/gone/codex")
 
+    def test_the_bundled_config_names_no_build_machine_codex(self):
+        # M10 (0.4.0): config.json's codex is empty; a saved Codex is still used, and none found is a wait.
+        import resources
+        bundled = resources.read_json("config.json")
+        self.assertEqual(bundled["codex"], "")
+        setup_steps.update_state(lambda value: value.update(codex_path=self.found), self.home)
+        self.assertEqual(setup_steps.with_codex(dict(bundled), self.home)["codex"], self.found)
+        setup_steps.update_state(lambda value: value.update(codex_path="/gone/codex"), self.home)
+        with patch.object(setup_steps, "find_codex", return_value=None):
+            config = setup_steps.with_codex(dict(bundled), self.home)
+        self.assertTrue(config[setup_steps.CODEX_MISSING])
+        self.assertEqual(setup_steps.load_state(self.home)["codex_path"], "/gone/codex")
+
     def test_nothing_found_keeps_the_saved_value(self):
         with patch.object(setup_steps, "find_codex", return_value=None):
             self.assertTrue(setup_steps.with_codex({"codex": MISSING}, self.home)[setup_steps.CODEX_MISSING])

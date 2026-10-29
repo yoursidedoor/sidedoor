@@ -12,10 +12,14 @@ import re
 import socket
 import sqlite3
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import paths
 
 # A private file's mode: Windows keeps only the read-only bit (0o666 when writable); its privacy
 # there is the ACL of the user's profile folder, which the home inherits (VM pass, 2026-10-23).
@@ -179,6 +183,39 @@ class DashboardTest(unittest.TestCase):
     def test_one_fixed_port(self):
         self.assertEqual(dashboard.PORT, 47823)
         self.assertEqual(self.serve("darwin", path="/setup")[:2], (0, True))
+
+    def test_release_check_port_is_developer_only(self):
+        # C4: only SIDEDOOR_RELEASE_CHECK_PORT moves the port; anything else is the usual 47823.
+        variable = paths.RELEASE_CHECK_PORT_VARIABLE
+        for value, port in (("48100", 48100), ("", 47823), ("80", 47823), ("abc", 47823), ("70000", 47823)):
+            self.assertEqual(paths._dashboard_port({variable: value}), port, value)
+        self.assertEqual(paths._dashboard_port({}), 47823)
+        shown = subprocess.run([sys.executable, "-c", "import dashboard, paths; print(dashboard.PORT, paths.RELEASE_CHECK, "
+                                "dashboard.PORT_IN_USE)"], capture_output=True, text=True, timeout=120,
+                               env=dict(os.environ, **{variable: "48100"}), cwd=str(Path(dashboard.__file__).parent))
+        self.assertEqual(shown.stdout.split()[:4], ["48100", "True", "Port", "48100"], shown.stderr[-500:])
+
+    def test_a_release_check_never_offers_the_move(self):
+        with mock.patch.object(dashboard.paths, "RELEASE_CHECK", True), \
+                mock.patch("mac_update.offer_move", side_effect=AssertionError("offered")):
+            self.assertEqual(self.serve("darwin")[:2], (0, True))
+        with mock.patch("mac_update.offer_move", return_value=False) as offered:   # every user: offered as today
+            self.assertEqual(self.serve("darwin")[:2], (0, True))
+        offered.assert_called_once()
+
+    def test_a_release_check_never_rewrites_the_login_entry(self):
+        # D2: start at login is on, yet a release-check copy leaves the shared login entry alone.
+        real = dashboard.setup_steps.load_state
+
+        def login_done(home=None):
+            state = real(home)
+            return dict(state, steps=dict(state["steps"], login={"status": "done"}))
+        for release_check, calls in ((True, 0), (False, 1)):
+            with mock.patch.object(dashboard.paths, "RELEASE_CHECK", release_check), \
+                    mock.patch.object(dashboard.setup_steps, "load_state", side_effect=login_done), \
+                    mock.patch("login_item.refresh", return_value=False) as refresh:
+                self.assertEqual(self.serve("darwin")[0], 0)
+            self.assertEqual(refresh.call_count, calls, release_check)
 
     def test_a_running_dashboard_is_reopened_not_started_twice(self):
         status, opened, text = self.serve("darwin", bound=False, ours=True, path="/setup")

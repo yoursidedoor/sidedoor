@@ -524,10 +524,12 @@ class ConfirmFixesTest(Base):
         security = FakeSecurity(self)
         credentials.use_backend(credentials.MacKeychain(security=security.path, unlocked=lambda: False))
         client = self.client()
-        for path, number in (("/setup/openrouter", 1), ("/setup/license", 5)):
-            page = client.post(path, data={"key": "SD-TYPEDKEY0123"}, headers=self.headers).text
+        # An SD- key in the OpenRouter box gets the license-key notice first (S2), so that box types an
+        # OpenRouter-shaped key.
+        for path, typed in (("/setup/openrouter", "sk-or-TYPEDKEY0123"), ("/setup/license", "SD-TYPEDKEY0123")):
+            page = client.post(path, data={"key": typed}, headers=self.headers).text
             self.assertIn("Unlock your keychain, then click Save.", page)
-            self.assertIn('value="SD-TYPEDKEY0123"', page)
+            self.assertIn('value="%s"' % typed, page)
         self.assertFalse((self.home / credentials.ID_FILE).exists())
         self.assertEqual(security.calls(), [])
 

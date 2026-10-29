@@ -1415,7 +1415,8 @@ def reap_live_workers():
 def execute(config, prompt, directory, timeout):
     worker = arguments = None
     engine = engines.engine(config)
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     # The bundled Node and @playwright/mcp (E7.T1) must be in place, and Sidedoor's own Chrome profile
     # free, before codex is started: either missing is an ordinary failed session, never a hang.
     try:
@@ -1432,6 +1433,7 @@ def execute(config, prompt, directory, timeout):
             (directory / "stderr.log").open("w") as errors:
         claude = engine.judged_by_stream   # Claude or Antigravity (U1 4): judged from the stream
         judged = False   # Claude: finish_run wrote the run's model_calls row
+        timed_out = False   # stopped at its time limit (A5: recorded as "timeout")
         try:
             missing = engine.wait(config)
             if missing:   # no usable Codex: never started; a read waits (2026-10-23)
@@ -1441,10 +1443,14 @@ def execute(config, prompt, directory, timeout):
             # live reader knows the same list, so a tool outside it stops the session (review C2).
             engines.record_run(directory, engine, command=arguments)
             reader = engine.trace_reader(engine.allowed_of(arguments)) if claude else engine.trace_reader()
-            worker = subprocess.Popen(arguments, stdin=subprocess.PIPE,
+            child_environment = engine.environment(
+                arguments, engine.base_environment() if claude else reply_worker._environment())
+            # E10: a .cmd shim (npm, pnpm, yarn) is started as the program it runs, never through cmd.exe.
+            launch, child_environment = portable.direct_command(arguments, child_environment)
+            worker = subprocess.Popen(launch, stdin=subprocess.PIPE,
                 stdout=trace, stderr=errors, text=True, encoding="utf-8",
                 cwd=getattr(arguments, "cwd", None) or working,
-                env=engine.environment(arguments, engine.base_environment() if claude else reply_worker._environment()),
+                env=child_environment,
                 **portable.worker_spawn_options())  # POSIX: start_new_session=True
             _LIVE_WORKER_GROUPS.add(worker.pid)
             portable.contain(worker)
@@ -1461,6 +1467,7 @@ def execute(config, prompt, directory, timeout):
                         pass
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    timed_out = True
                     raise TimeoutError("APPLICATION_BROWSER_TIMEOUT")
                 try:
                     worker.communicate(pending, timeout=min(0.1, remaining))
@@ -1513,12 +1520,20 @@ def execute(config, prompt, directory, timeout):
                 if claude and not judged:   # stopped live or timed out: its model_calls row all the same
                     try:
                         trace.flush()
-                        engine.record_model_call(engine.read_trace(
-                            (directory / "trace.jsonl").read_text(errors="replace"),
-                            allowed=engine.allowed_of(arguments), strict=False),
-                            worker="application_browser", outcome="refused")
                     except Exception:
                         pass
+                    if timed_out:   # A5 (R3): "timeout", as the other launchers record it
+                        engine.record_timed_out(directory / "trace.jsonl", command=arguments,
+                                                worker="application_browser",
+                                                seconds=round(time.monotonic() - started, 3))
+                    else:
+                        try:
+                            engine.record_model_call(engine.read_trace(
+                                (directory / "trace.jsonl").read_text(errors="replace"),
+                                allowed=engine.allowed_of(arguments), strict=False),
+                                worker="application_browser", outcome="refused")
+                        except Exception:
+                            pass
 
 
 def leaves(value, pointer=""):

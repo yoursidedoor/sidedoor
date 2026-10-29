@@ -1321,7 +1321,10 @@ def run_research_worker(root, command, prompt, log_path, timeout, on_start=None,
         engines.record_run(log_path, engine, command=command)
         # Its own session (POSIX) or Job Object (Windows), so the kill below reaches its whole tree.
         try:
-            worker = subprocess.Popen(command, stdin=subprocess.PIPE, text=True, encoding="utf-8",
+            # E10: a .cmd shim (npm, pnpm, yarn) is started as the program it runs, never through cmd.exe.
+            launch, environment = portable.direct_command(command, environment)
+            worker = subprocess.Popen(launch, stdin=subprocess.PIPE, text=True,
+                                      encoding="utf-8",
                                       cwd=getattr(command, "cwd", None) or working or root,
                                       stdout=log, stderr=log, env=environment, **portable.worker_spawn_options(core=False))
         except BaseException:
@@ -1331,14 +1334,17 @@ def run_research_worker(root, command, prompt, log_path, timeout, on_start=None,
         if on_start is not None:
             on_start(time.monotonic())
 
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         pending_input = engine.prompt_input(prompt)
+        timed_out = False
         try:
             while True:
                 if RESEARCH_STOP.is_set():
                     raise InterruptedError("Research interrupted by service shutdown")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    timed_out = True
                     raise subprocess.TimeoutExpired(command, timeout)
                 try:
                     worker.communicate(pending_input, timeout=min(1, remaining))
@@ -1349,6 +1355,10 @@ def run_research_worker(root, command, prompt, log_path, timeout, on_start=None,
             portable.kill_tree(worker.pid)
             worker.wait()
             engine.run_ended(command)   # U1 4: Antigravity's per-run MCP config goes
+            if timed_out:   # A5: stopped at its time limit, its model_calls row all the same
+                log.flush()
+                engine.record_timed_out(log_path, command=command,
+                                        worker="research", seconds=round(time.monotonic() - started, 3))
     if claude:
         # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the exit code; a clean
         # run's answer is written to the command's output file, as Codex's --output-last-message does.
@@ -1671,6 +1681,11 @@ def main(argv=None):
     if argv[:1] == ["agy-hook"]:
         import engines
         return engines.agy_hook_main(argv[1:])
+    # `sidedoor net-check` (hotfix 2026-10-28): one HTTPS GET of OpenRouter's model list through
+    # text_model's urllib path, with this process's trust (tls_setup). The Mac build's release gate
+    # runs it with every default certificate location empty (tools/check_release_tls.py).
+    if argv[:1] == ["net-check"]:
+        return net_check()
     # `sidedoor doctor [--online] [--json]` (E4.T4): the dependency report (doctor.main).
     if argv[:1] == ["doctor"]:
         import doctor
@@ -1908,8 +1923,32 @@ def main(argv=None):
             return run(root, config, database, pipeline, local_only=args.command == "check")
 
 
+def net_check(check=None):
+    """`sidedoor net-check`: prints one JSON line {ok, status, trust, ca_file, error_class,
+    certificate_error, error} and returns 0 when OpenRouter answered over HTTPS (any HTTP status),
+    else 1. `ca_file`: the certificate file tls_setup chose (the bundled one, or the user's), else null."""
+    import text_model
+    import tls_setup
+    trust = tls_setup.state()
+    result = {"ok": False, "status": None, "trust": trust["mode"], "ca_file": trust["ca_file"], "error_class": None,
+              "certificate_error": False, "error": None}
+    try:
+        result["status"] = (check or text_model.check_connection)()
+        result["ok"] = True
+    except text_model.TextModelResponseError as error:
+        result.update(error_class=error.transport_error or type(error).__name__,
+                      certificate_error=error.certificate_error, error=str(error))
+    except Exception as error:
+        result.update(error_class=type(error).__name__, error=str(error)[:300])
+    # Machine contract (hotfix 2026-10-28): the release gate reads this line; stays print.
+    print(json.dumps(result))
+    return 0 if result["ok"] else 1
+
+
 def cli():
     """The `sidedoor` console command (pyproject.toml); the same as `python3.13 orchestrator.py`."""
+    import tls_setup
+    tls_setup.configure()   # HTTPS trust before anything can make a call (tools/sidedoor.py does it first)
     import scheduler_loop
     code = portable.ensure_utf8_mode(scheduler_loop.frozen(), LOG.warning)   # Windows only (W1 a)
     if code is not None:

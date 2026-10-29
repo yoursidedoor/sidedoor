@@ -5,7 +5,9 @@
 
 tools/build_macos.py calls it last (its --sign and --notarize options), after every copy into the
 bundle (browser runtime, pystray/fpdf sources, licences) and after its smoke run, so nothing changes
-the bundle once it is sealed. Standalone it signs an already built app.
+the bundle once it is sealed. Standalone it signs an already built app. Either way the TLS release gate
+(tools/check_release_tls.py) runs on the signed app before anything else, and notarize refuses an app
+that has not passed it.
 
 Contents/MacOS is a code location: codesign takes every file there as code and refuses a data file
 ("code object is not signed at all ... research-prompt.md"). So first every data file and every folder
@@ -13,6 +15,12 @@ holding no Mach-O under Contents/MacOS (prompts, schemas, dashboard assets, the 
 sources, the browser runtime's JavaScript and licence) moves to the same place under
 Contents/Resources, and a relative symlink is left where it was: the program finds every path as
 before, the Mach-O files (the .so modules, the dylibs, Node) stay in Contents/MacOS.
+
+Before signing, every absolute LC_RPATH is deleted with install_name_tool (E6, M6): a build machine's
+folders (/opt/homebrew/lib, Cellar paths, a wheel's CI folder such as /Users/runner/...) exist on no
+user's Mac, and on one that has them dyld would load a library from there. Only relative entries
+(@loader_path, @executable_path, @rpath, $ORIGIN) stay; no file in the bundle loads through @rpath from
+an absolute one (checked on the 0.3.0 and 0.4.0 builds). After signing none may be left.
 
 Signing is inside-out, with the hardened runtime (--options runtime) and a secure timestamp:
   1. every Mach-O in the bundle other than the main executable (the .so extension modules, the
@@ -151,8 +159,35 @@ def relocate_data(app):
     return moved
 
 
+def build_rpaths(app):
+    """[(path, rpath)] for every absolute LC_RPATH in the bundle's Mach-O files."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import check_release_tls
+    found = []
+    for folder, _, files in os.walk(app):
+        for name in sorted(files):
+            path = Path(folder) / name
+            if path.is_symlink() or not is_macho(path):
+                continue
+            for rpath in check_release_tls.load_commands(path)["rpaths"]:
+                if rpath.startswith("/"):
+                    found.append((path, rpath))
+    return found
+
+
+def strip_build_rpaths(app):
+    """Delete each absolute LC_RPATH (E6); returns how many were deleted."""
+    found = build_rpaths(app)
+    for path, rpath in found:
+        result = subprocess.run(["install_name_tool", "-delete_rpath", rpath, str(path)], capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit("install_name_tool -delete_rpath %s %s failed: %s" % (rpath, path, result.stderr.strip()))
+    return len(found)
+
+
 def sign(app, identity):
     app = Path(app)
+    print("deleted %d absolute LC_RPATH entries" % strip_build_rpaths(app))
     moved = relocate_data(app)
     if moved:
         print("moved %d data entries from Contents/MacOS to Contents/Resources (symlinked): %s"
@@ -185,6 +220,10 @@ def sign(app, identity):
         print("  %s  (entitlements: %s)" % (main_executable(app).relative_to(app), main_entitlements.name))
     codesign(identity, [app], main_entitlements)
     verify(app)
+    left = build_rpaths(app)
+    if left:
+        raise SystemExit("absolute LC_RPATH entries in the signed app: "
+                         + "; ".join("%s: %s" % (path.relative_to(app), rpath) for path, rpath in left))
 
 
 def verify(app):
@@ -208,8 +247,12 @@ def run(command, **options):
 
 
 def notarize(app, profile):
-    """Submit, wait, staple, validate, assess. Returns the submission id."""
+    """Submit, wait, staple, validate, assess. Returns the submission id. Refused unless the TLS release
+    gate passed on this app after it was signed (`finish`)."""
     app = Path(app)
+    if app.resolve() not in _GATED:
+        raise SystemExit("not notarizing %s: the TLS release gate has not passed on it (sign_macos.finish runs it)"
+                         % app)
     with tempfile.TemporaryDirectory(prefix="sidedoor-notarize-") as scratch:
         upload = Path(scratch) / (app.stem + ".zip")
         subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(upload)], check=True)
@@ -276,10 +319,24 @@ def release_zip(app, folder):
     return target, digest
 
 
-def finish(app, identity, profile=None, release_dir=None):
-    """What build_macos.py --sign/--notarize runs: sign; then, with a profile, notarize, staple and
-    pack the release zip."""
+_GATED = set()   # apps (resolved paths) that passed the TLS release gate in this process, after signing
+
+
+def tls_gate(app):
+    """The TLS release gate (tools/check_release_tls.py) on the signed app, for its own architecture.
+    Raises SystemExit on failure."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import check_release_tls
+    check_release_tls.check(app, app_arch(app))
+
+
+def finish(app, identity, profile=None, release_dir=None, gate=None):
+    """What build_macos.py --sign/--notarize and this script's main run: sign; the TLS release gate
+    (`gate(app)`, default `tls_gate`; it raises SystemExit on failure), always, so no path notarizes
+    an unchecked app; then, with a profile, notarize, staple and pack the release zip."""
     sign(app, identity)
+    (gate or tls_gate)(app)
+    _GATED.add(Path(app).resolve())
     if profile:
         notarize(app, profile)
         release_zip(app, release_dir or Path(app).parent)
