@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -461,6 +462,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertIn(r"C:\tools", folders)
         self.assertIn(str(Path(r"C:\Users\u\AppData\Roaming") / "npm" / "codex.cmd"), candidates)
 
+    @unittest.skipUnless(sys.platform == "darwin", "the Codex desktop app's CLI is a macOS install")
     def test_the_codex_desktop_apps_own_cli_is_found_on_a_mac(self):
         # E8: the desktop app (com.openai.codex, ChatGPT.app on the owner's Mac) carries its CLI in
         # Contents/Resources/codex-cli/bin; ~/Applications counts too. Never on Windows or Linux.
@@ -475,6 +477,16 @@ class SetupStepsTest(unittest.TestCase):
                 self.assertIn("/Applications/Codex.app/Contents/Resources/codex-cli/bin", setup_steps.install_folders())
             with mock.patch.object(setup_steps.sys, "platform", "linux"):
                 self.assertNotIn(str(folder), setup_steps.install_folders())
+
+    def test_the_codex_desktop_apps_folder_is_never_searched_off_a_mac(self):
+        # E8's negative half, on every platform (Windows ships): the Mac app folder is never searched there.
+        folder = self.home / "Applications" / "ChatGPT.app" / "Contents" / "Resources" / "codex-cli" / "bin"
+        with mock.patch.object(setup_steps.Path, "home", return_value=self.home):
+            for platform in ("win32", "linux"):
+                with self.subTest(platform=platform), mock.patch.object(setup_steps.sys, "platform", platform):
+                    folders = setup_steps.install_folders()
+                    self.assertNotIn(str(folder), folders)
+                    self.assertFalse([f for f in folders if "codex-cli" in f])
 
     def test_codex_is_looked_for_in_local_bin(self):
         with mock.patch.object(setup_steps.Path, "home", return_value=Path("/u")):
@@ -542,7 +554,9 @@ class SetupStepsTest(unittest.TestCase):
     def test_email_check_locks_on_first_pass_and_never_unlocks(self):
         setup_steps.save_profile(valid_form(), self.home)
         # Without Sidedoor's browser runtime (E7.T1) installed, the check says so.
-        with mock.patch.dict(os.environ, {"SIDEDOOR_BROWSER_RUNTIME": str(self.home / "no-runtime")}):
+        # A Codex is found (faked: not this computer's), so the missing browser is what the check reports.
+        with mock.patch.dict(os.environ, {"SIDEDOOR_BROWSER_RUNTIME": str(self.home / "no-runtime")}), \
+                mock.patch.object(setup_steps, "with_codex", lambda config, home=None: config):
             self.assertEqual(setup_steps.run_email_check(self.home)["steps"]["email"]["status"], setup_steps.NOT_BUILT)
         failed = setup_steps.run_email_check(self.home, read=lambda *args: "someone@example.com")["steps"]["email"]
         self.assertEqual((failed["status"], failed["reason"]), ("failed", "mismatch"))

@@ -113,7 +113,7 @@ class Composition(unittest.TestCase):
     def test_the_headless_command_line(self):
         command = browser_runtime.headless_command(self.binary, Path("/p"), UA_141)
         self.assertEqual(command[0], self.binary)              # Chrome itself, no LaunchServices
-        self.assertIn("--user-data-dir=/p", command)           # end_session / holds_profile find it so
+        self.assertIn("--user-data-dir=%s" % Path("/p"), command)   # end_session / holds_profile find it so
         self.assertIn("--remote-debugging-port=0", command)
         for switch in ("--headless=new", "--window-size=1280,900", "--user-agent=" + UA_141,
                        "--disable-blink-features=AutomationControlled", "--disable-renderer-backgrounding"):

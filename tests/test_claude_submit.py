@@ -10,12 +10,12 @@ the pause switch refuses arm under Claude exactly as under Codex.
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
+import fake_executables
 import contextlib
 import io
 import json
 import shutil
 import sqlite3
-import stat
 import sys
 import tempfile
 import time
@@ -47,7 +47,7 @@ def engine_config(config, folder, name):
     """`config` on engine `name` (a fake claude for Claude), with the isolated test browser."""
     value = dict(config, browser_driver=driver(folder))
     if name == "claude":
-        value.update(engine="claude", claude=str(folder / "claude"))
+        value.update(engine="claude", claude=str(folder / ("claude.cmd" if fake_executables.WINDOWS else "claude")))
     else:
         value.pop("engine", None)
     return value
@@ -265,7 +265,7 @@ class SubmitGates(Drill):
 # A fake `claude`: starts the real guard from its --mcp-config entry (the fake @playwright/mcp as its
 # child), arms through it, writes the arm call to its stream as Claude does, then is killed (SIGKILL)
 # before any outcome: what a crash, a closed laptop or a force quit right after arm leaves behind.
-FAKE_CLAUDE = r'''#!%(python)s
+FAKE_CLAUDE = r'''
 import json, os, signal, subprocess, sys
 arguments = sys.argv
 server = json.load(open(arguments[arguments.index("--mcp-config") + 1]))["mcpServers"]["browser"]
@@ -295,7 +295,7 @@ emit({"type": "user", "message": {"content": [{"tool_use_id": "toolu_arm", "type
 '''
 # What the fake claude does after the arm answer: killed (a crash), or the API refuses for its rate limit
 # (a rejected rate_limit_event, then an is_error 429 result; Claude exits 0 on both).
-KILLED = "os.kill(os.getpid(), signal.SIGKILL)"
+KILLED = "os.kill(os.getpid(), getattr(signal, 'SIGKILL', 9))"   # Windows: TerminateProcess
 RATE_LIMITED = """emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
                                                      "resetsAt": 1893456000}})
 emit({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
@@ -304,7 +304,7 @@ sys.exit(0)"""
 
 # S1: a fake claude whose next line after a Bash call is never reached when the live monitor stops the
 # session at that call: it sleeps, then writes a sentinel file, then writes a line.
-BASH_CLAUDE = r'''#!%(python)s
+BASH_CLAUDE = r'''
 import json, sys, time
 sys.stdin.read()
 emit = lambda value: (sys.stdout.write(json.dumps(value) + "\n"), sys.stdout.flush())
@@ -325,11 +325,9 @@ class CrashAndSwitch(Drill):
         scratch = self.folder / "fake"
         scratch.mkdir(exist_ok=True)
         (scratch / "snapshot.yaml").write_text('- button "Submit application" [ref=e1] [cursor=pointer]\n')
-        path = self.folder / "claude"
-        path.write_text(FAKE_CLAUDE % {"python": sys.executable, "mcp": str(FAKE_MCP), "form": json.dumps(FORM),
-                                       "snapshot": str(scratch / "snapshot.yaml"), "calls": str(scratch / "calls.jsonl"),
-                                       "after": after})
-        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        fake_executables.python(self.folder / "claude", FAKE_CLAUDE % {
+            "mcp": str(FAKE_MCP), "form": json.dumps(FORM), "snapshot": str(scratch / "snapshot.yaml"),
+            "calls": str(scratch / "calls.jsonl"), "after": after})
 
     def next_cycle(self, name):
         """The next cycle on engine `name`: applications.process queues the job's next request, which is then
@@ -424,9 +422,7 @@ class LiveBashStop(Drill):
 
     def test_a_bash_call_in_a_submit_kills_the_session_before_its_next_line(self):
         sentinel = self.folder / "sentinel"
-        path = self.folder / "claude"
-        path.write_text(BASH_CLAUDE % {"python": sys.executable, "sentinel": str(sentinel)})
-        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        fake_executables.python(self.folder / "claude", BASH_CLAUDE % {"sentinel": str(sentinel)})
         request_id = self.fixture.prepare_submit()
         config = engine_config(self.fixture.config, self.folder, "claude")
         started = time.monotonic()

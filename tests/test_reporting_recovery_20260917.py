@@ -54,9 +54,9 @@ class BoundedRecoveryReportingTests(unittest.TestCase):
                 self.addCleanup(database.close)
                 if schema:
                     database.execute(schema)
-                before = database.serialize()
+                before = list(database.iterdump())   # not serialize(): some SQLite builds refuse an empty database (Linux CI)
                 result = reporting.bounded_recovery(database, manual.CONFIG, manual.NOW)
-                self.assertEqual(before, database.serialize())
+                self.assertEqual(before, list(database.iterdump()))
                 self.assertIsNone(result["rolling_week"]["counts"]["application"]["abandoned"])
                 self.assertIsNone(result["daily"]["counts"]["research"]["failures"])
                 self.assertIsNone(result["unresolved_submissions"]["count"])

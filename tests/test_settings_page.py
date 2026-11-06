@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -130,7 +131,8 @@ class SettingsPageTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("This page is not built yet.", page)
         self.assertNotIn("<script>", page)
-        self.assertIn("Start Sidedoor when I log in", page)     # E5.T2 (tests/test_login_item.py)
+        if sys.platform in ("darwin", "win32"):   # Start at login is offered on the shipped systems only
+            self.assertIn("Start Sidedoor when I log in", page)     # E5.T2 (tests/test_login_item.py)
         self.assertNotIn("Telegram", page)                       # E6.T9, out of scope
         self.assertEqual(1, sum(1 for route in self.client.app.router.routes if getattr(route, "path", None) == "/settings"))
 
@@ -339,6 +341,9 @@ class SettingsPageTest(unittest.TestCase):
     def test_a_030_email_mismatch_message_names_the_profile_step_by_its_new_number(self):
         # U2: a 0.3.0 setup-state.json saved this text when the profile was step 3 (S1a made it step 4).
         self.ready_for_email_check()
+        chrome = mock.patch.object(setup_steps, "chrome_path", return_value="/chrome")   # not this computer's Chrome
+        chrome.start()
+        self.addCleanup(chrome.stop)
         old = ("Your browser is signed in to a@example.com, but your application email is alex@example.com. Sign in to "
                "alex@example.com in Sidedoor's browser, or change your application email in step 3.")
         setup_steps.record(self.home, "email", "failed", old, reason="mismatch")

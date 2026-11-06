@@ -48,8 +48,19 @@ def _same(path, original):
         original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns)
 
 
+def _lsof():
+    """macOS's lsof; elsewhere (Linux: /usr/bin) the one on PATH. None found: the check cannot run."""
+    if os.path.isfile("/usr/sbin/lsof"):
+        return "/usr/sbin/lsof"
+    import shutil
+    found = shutil.which("lsof")
+    if not found:
+        raise RuntimeError("Cannot verify open log descriptors (no lsof)")
+    return found
+
+
 def _open_files(directory):
-    result = subprocess.run(["/usr/sbin/lsof", "-nP", "-F", "pfn", "+d", str(directory)],
+    result = subprocess.run([_lsof(), "-nP", "-F", "pfn", "+d", str(directory)],
                             capture_output=True, text=True, timeout=15)
     if result.returncode not in (0, 1) or result.stderr:
         raise RuntimeError("Cannot verify open log descriptors")

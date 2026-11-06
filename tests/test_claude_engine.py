@@ -154,8 +154,9 @@ class FindAndProbeTests(unittest.TestCase):
     def test_every_install_location_is_searched(self):
         home = Path.home()
         candidates = setup_steps.claude_candidates(search_path="")
-        for folder in (home / ".local" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin"),
-                       home / ".npm-global" / "bin", home / ".claude" / "local"):
+        # Homebrew's folders and npm's POSIX prefix (~/.npm-global/bin) are not Windows install folders
+        posix = () if os.name == "nt" else (Path("/opt/homebrew/bin"), Path("/usr/local/bin"), home / ".npm-global" / "bin")
+        for folder in (home / ".local" / "bin", home / ".claude" / "local") + posix:
             self.assertIn(str(folder / "claude"), candidates)
 
     def test_found_in_a_dock_launch_with_no_path(self):

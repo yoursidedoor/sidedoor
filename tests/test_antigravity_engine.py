@@ -7,6 +7,7 @@ own files: the real ~/.gemini is never read or written.
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
+import fake_executables
 import json
 import os
 import subprocess
@@ -183,7 +184,8 @@ class OwnerPicksTest(TempHome):
         workspace = self.home / "ws"
         AGY.write_workspace(workspace, {"browser": (["/bin/g"], {"SECRET": "s"}, ["browser_click"])}, ())
         config = workspace / ".agents" / "mcp_config.json"
-        self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+        if not fake_executables.WINDOWS:   # Windows: no owner-only mode bits; the profile folder's ACL keeps it private
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
         command = engines.AntigravityCommand(["agy", "-p", "", "stream-json"], cwd=str(workspace))
         with patch.object(engines.ANTIGRAVITY, "record_model_call"):
             AGY.finish_run(1, "", "boom", command=command, home=self.home)   # a failed run
@@ -310,7 +312,8 @@ class AllowRulesTest(TempHome):
         self.user_config({"notes": {"command": "/bin/notes"}, "cached": {"url": "https://x"}})
         cache = self.home / ".gemini" / "antigravity-cli" / "mcp" / "cached"
         cache.mkdir(parents=True)
-        for name in ("lookup", "*", "a b)", "a?", ""):   # N3b: cache file names are checked too
+        odd = ("a b)", "") if fake_executables.WINDOWS else ("*", "a b)", "a?", "")   # Windows: no * or ? in a file name
+        for name in ("lookup",) + odd:   # N3b: cache file names are checked too
             (cache / (name + ".json")).write_text("{}")
         listed = lambda argv, **k: subprocess.CompletedProcess(argv, 0, json.dumps({"jsonrpc": "2.0", "id": 2, "result": {
             "tools": [{"name": n} for n in ("save_note", "*", "", "a b)", "a?", "x/y")]}}) + "\n", "")
@@ -381,9 +384,7 @@ class AllowRulesTest(TempHome):
     def test_listed_tools_times_out_without_hanging(self):
         AGY_SLOW = engines.AntigravityEngine()
         AGY_SLOW.USER_TOOLS_SECONDS = 1
-        script = self.home / "slow.sh"
-        script.write_text("#!/bin/sh\nsleep 30\n")
-        script.chmod(0o755)
+        script = fake_executables.python(self.home / "slow", "import time\ntime.sleep(30)\n")
         import time
         started = time.monotonic()
         self.assertEqual(AGY_SLOW._listed_tools({"command": str(script)}), set())
@@ -407,8 +408,9 @@ class LauncherTest(TempHome):
         program.chmod(0o755)
         self.assertEqual(setup_steps.find_antigravity(search_path=""), str(program))   # a Dock start: no PATH
         candidates = setup_steps.antigravity_candidates(search_path="")
-        self.assertIn("/opt/homebrew/bin/agy", candidates)
-        self.assertIn("/usr/local/bin/agy", candidates)
+        if not fake_executables.WINDOWS:   # Homebrew's folders: macOS (and Linux) only
+            self.assertIn("/opt/homebrew/bin/agy", candidates)
+            self.assertIn("/usr/local/bin/agy", candidates)
 
     def test_environment_is_the_allowlist(self):
         with patch.dict(os.environ, {"HOME": "/h", "USER": "u", "LOGNAME": "u", "TMPDIR": "/t", "SECRET": "s",
@@ -487,7 +489,7 @@ class LiveTestFixesTest(TempHome):
             return engines.agy_hook(policy, {"conversationId": conversation,
                                              "toolCall": {"name": "read_file", "args": {"Path": str(path)}}})["decision"]
         self.assertEqual(decide(mine), "allow")
-        self.assertEqual(decide("file://" + str(mine)), "allow")
+        self.assertEqual(decide(mine.as_uri()), "allow")
         self.assertEqual(decide(other), "deny")                                  # another run's conversation
         self.assertEqual(decide(mine, conversation=None), "deny")
         self.assertEqual(decide(mine.parent / "link" / "output.txt"), "deny")    # a symlink out
@@ -530,10 +532,10 @@ class ReviewRoundOneTest(TempHome):
         path = self.home / ".gemini" / "antigravity-cli" / "brain" / "c1" / ".system_generated" / "steps" / "1"
         path.mkdir(parents=True)
         (path / "output.txt").write_text("x")
-        saved = str(path / "output.txt")
-        self.assertTrue(AGY.saved_output("file://" + saved, "c1"))
-        for bad in ("file://" + saved + "?/../../../../../../../etc/passwd", "file://" + saved + "#/../x",
-                    "file://" + saved + ";/../../x", saved + "?x", saved.replace("steps/1", "steps/²")):
+        saved, uri = str(path / "output.txt"), (path / "output.txt").as_uri()
+        self.assertTrue(AGY.saved_output(uri, "c1"))
+        for bad in (uri + "?/../../../../../../../etc/passwd", uri + "#/../x",
+                    uri + ";/../../x", saved + "?x", str(path.parent / "²" / "output.txt")):
             self.assertFalse(AGY.saved_output(bad, "c1"), bad)
 
     def test_g3_a_shorter_user_server_never_takes_a_longer_servers_name(self):

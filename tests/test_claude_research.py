@@ -6,6 +6,7 @@ permission denial that exited 0. A fake `claude` executable prints them, so the 
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
+import fake_executables
 import json
 import os
 import tempfile
@@ -55,9 +56,8 @@ def fake_claude(folder, text, code=0):
     (folder / "stream.jsonl").write_text(text, encoding="utf-8")
     path = folder / "bin" / "claude"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/bin/sh\ncat > /dev/null\ncat '%s'\nexit %d\n" % (folder / "stream.jsonl", code))
-    path.chmod(0o755)
-    return str(path)
+    return str(fake_executables.python(path, "import sys\nsys.stdin.read()\nsys.stdout.buffer.write(open(%r, 'rb').read())\n"
+                                             "sys.stdout.flush()\nsys.exit(%d)\n" % (str(folder / "stream.jsonl"), code)))
 
 
 def slow_claude(folder, text):
@@ -66,9 +66,8 @@ def slow_claude(folder, text):
     (folder / "stream.jsonl").write_text(text, encoding="utf-8")
     path = folder / "bin" / "claude"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/bin/sh\ncat '%s'\nexec sleep 30\n" % (folder / "stream.jsonl"))
-    path.chmod(0o755)
-    return str(path)
+    return str(fake_executables.python(path, "import sys, time\nsys.stdout.buffer.write(open(%r, 'rb').read())\n"
+                                             "sys.stdout.flush()\ntime.sleep(30)\n" % str(folder / "stream.jsonl")))
 
 
 def started_stream():

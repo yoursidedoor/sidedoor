@@ -127,6 +127,7 @@ Load command 4
 """
 
 
+@unittest.skipUnless(sys.platform == "darwin", "the Mac build and its release gate run on a Mac only")
 class MacOSMinimumTests(unittest.TestCase):
     """E3, E4, E6, E9: no Homebrew build Python; LSMinimumSystemVersion declared and no Mach-O above it;
     build-machine LC_RPATHs deleted before signing."""

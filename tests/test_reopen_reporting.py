@@ -303,9 +303,9 @@ class ReopenReportingTests(unittest.TestCase):
         import sqlite3
         database = sqlite3.connect(":memory:")
         self.addCleanup(database.close)
-        before = database.serialize()
+        before = list(database.iterdump())   # not serialize(): some SQLite builds refuse an empty database (Linux CI)
         section = reporting.authorized_reopens(database, REPORT_AT)
-        self.assertEqual(before, database.serialize())
+        self.assertEqual(before, list(database.iterdump()))
         self.assertEqual(section["state"], "UNKNOWN_TABLE_ABSENT")
         self.assertIsNone(section["records"])
         self.assertIsNone(section["counts"])

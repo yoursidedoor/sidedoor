@@ -120,8 +120,13 @@ def outside_user_folder(home, platform=None, user_home=None):
     if (platform or sys.platform) != "win32":
         return False
     import ntpath
-    home_text = ntpath.normcase(ntpath.abspath(str(home)))
-    mine = ntpath.normcase(ntpath.abspath(str(user_home or Path.home())))
+
+    def full(path):   # a short 8.3 name (C:\Users\RUNNER~1) is the same folder as its long name
+        try:
+            return ntpath.normcase(ntpath.realpath(str(path)) if sys.platform == "win32" else ntpath.abspath(str(path)))
+        except (OSError, ValueError):
+            return ntpath.normcase(ntpath.abspath(str(path)))
+    home_text, mine = full(home), full(user_home or Path.home())
     try:
         return ntpath.commonpath([home_text, mine]) != mine
     except ValueError:   # another drive
@@ -711,7 +716,8 @@ def check_secure_connection(online=False, check=None):
         import ssl
         default = ssl.get_default_verify_paths()
         trust = dict(trust, mode=tls_setup.USER if tls_setup.user_choice(os.environ) else
-                     tls_setup.DEFAULT if default.cafile or default.capath else tls_setup.NONE)
+                     tls_setup.DEFAULT if default.cafile or default.capath or sys.platform == "win32"   # Windows: ssl loads the OS store
+                     else tls_setup.NONE)
     if online:
         import text_model
         try:

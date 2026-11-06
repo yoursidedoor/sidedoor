@@ -156,7 +156,8 @@ class EngineChoiceTest(unittest.TestCase):
         self.assertNotIn("Antigravity is signed out", self.client.get("/settings").text)
         with mock.patch.object(setup_steps, "find_antigravity", return_value=None):
             self.client.post("/settings/engine", data={"engine": "antigravity"}, headers=HTMX)
-        email = self.client.post("/settings/email", headers=HTMX).text   # G6: the email check names it
+        with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):   # not this computer's Chrome
+            email = self.client.post("/settings/email", headers=HTMX).text   # G6: the email check names it
         self.assertIn("#connection-antigravity", email)
         self.assertIn("Antigravity", email)
 

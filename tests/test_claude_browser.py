@@ -6,11 +6,10 @@ browser_webmail.jsonl: the email check), home paths replaced. Bad sessions are t
 line changed the way Claude writes it (a Bash tool_use, an MCP server that failed to start)."""
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
+import fake_executables
 import json
 import os
 import sqlite3
-import stat
-import sys
 import tempfile
 import threading
 import time
@@ -52,8 +51,13 @@ def with_failed_server(lines):
     return [json.dumps(event) + "\n"] + list(lines[1:])
 
 
+def claude_path(folder):
+    """Where `fake_claude` puts its program in `folder` (on Windows the .cmd fake_executables writes)."""
+    return folder / ("claude.cmd" if fake_executables.WINDOWS else "claude")
+
+
 def config(folder, operation="inspect", **extra):
-    return dict({"claude": str(folder / "claude"), "engine": "claude", "_browser_operation": operation,
+    return dict({"claude": str(claude_path(folder)), "engine": "claude", "_browser_operation": operation,
                  "browser_driver": {"isolated": True, "headless": True, "runtime_dir": str(folder / "runtime")}},
                 **extra)
 
@@ -338,11 +342,8 @@ def fake_claude(folder, lines, delay=0.05):
     """An executable named claude that reads its prompt and writes `lines` as its stream."""
     stream = folder / "stream.jsonl"
     stream.write_text("".join(lines))
-    path = folder / "claude"
-    path.write_text("#!%s\nimport sys, time\nsys.stdin.read()\nfor line in open(%r):\n"
-                    "    sys.stdout.write(line); sys.stdout.flush(); time.sleep(%s)\n" % (sys.executable, str(stream), delay))
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
-    return path
+    return fake_executables.python(folder / "claude", "import sys, time\nsys.stdin.read()\nfor line in open(%r):\n"
+                                   "    sys.stdout.write(line); sys.stdout.flush(); time.sleep(%s)\n" % (str(stream), delay))
 
 
 class Sessions(unittest.TestCase):

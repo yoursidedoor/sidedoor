@@ -292,10 +292,10 @@ class InstallTest(Base):
         self.assertEqual(argv[0], "/bin/sh")
         self.assertFalse(argv[1].startswith(str(self.current)))  # never from inside the bundle
         self.assertEqual(env["SD_TARGET"], str(self.current))
-        self.assertTrue(env["SD_NEW"].endswith("/unpacked/Sidedoor.app"))
-        self.assertTrue(env["SD_TRASH"].endswith("/.Trash/Sidedoor 1.1.0.app"))
+        self.assertEqual(Path(env["SD_NEW"]).parts[-2:], ("unpacked", "Sidedoor.app"))
+        self.assertEqual(Path(env["SD_TRASH"]).parts[-2:], (".Trash", "Sidedoor 1.1.0.app"))
         self.assertEqual(env["SD_PIDS"], str(os.getpid()))
-        self.assertIn("/sidedoor-download-", env["SD_CLEANUP"])  # the zip goes when the helper ends
+        self.assertTrue(Path(env["SD_CLEANUP"]).name.startswith("sidedoor-download-"))  # the zip goes when the helper ends
         for path in (Path(argv[1]).parent, Path(env["SD_CLEANUP"])):
             self.addCleanup(__import__("shutil").rmtree, path, True)
         for _ in range(100):
@@ -334,6 +334,7 @@ class InstallTest(Base):
         self.assertEqual(mac_update.status(), {"state": "failed", "version": "2.0.0", "message": "why"})
 
 
+@unittest.skipIf(os.name == "nt", "the Mac updater's helper is a POSIX shell script (macOS only)")
 class HelperTest(Base):
     """The real HELPER script, on temporary folders, with a recorder in place of /usr/bin/open."""
 

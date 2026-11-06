@@ -1797,7 +1797,8 @@ FOLDER_WORDS = {"application-browser": "Browser session", "application-recovery"
                 "linkedin-contacts": "Contact finder run", "outreach-history": "Outreach history check"}
 # Folders whose kind alone names the run (owner 2026-10-24: "Email check", not "Mailbox check check-x1y2").
 NAMED_BY_KIND = {"email-check", "application-connection-manual", "outreach-history"}
-_DECISION_FOLDER = re.compile(r"application-recovery/(decision-[A-Za-z0-9_]{1,40})")
+# "/" or, in a Windows path stored as JSON, "\\" (one escaped backslash)
+_DECISION_FOLDER = re.compile(r"application-recovery(?:/|\\{1,2})(decision-[A-Za-z0-9_]{1,40})")
 
 
 def run_names(reader):
@@ -1806,7 +1807,7 @@ def run_names(reader):
     Runs list names what each decision was about (owner 2026-10-24). Folders nothing names are absent."""
     keys = {}
     for row in reader.rows("SELECT job_key,detail FROM application_events WHERE event LIKE 'APPLICATION_RECOVERY%' "
-                           "AND detail LIKE '%application-recovery/decision-%'", (), "application_events"):
+                           "AND detail LIKE '%application-recovery%decision-%'", (), "application_events"):
         for folder in set(_DECISION_FOLDER.findall(str(row["detail"] or ""))):
             keys.setdefault(folder, row["job_key"])
     jobs = {}

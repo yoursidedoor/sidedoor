@@ -254,7 +254,7 @@ def _reads(root, job_key, url):
                         text = content.get("text") if isinstance(content, dict) else None
                         read = page_read(text, folder, call.tool)
                         if read and _page_key(read[0]) == page:
-                            yield observed, f"{folder.relative_to(root)}/trace.jsonl#{call.id}", read[0], read[1]
+                            yield observed, f"{folder.relative_to(root).as_posix()}/trace.jsonl#{call.id}", read[0], read[1]
 
 
 def job_description(database, root, job_key=None, url=None, *, opportunity=None, max_chars=MAX_CHARS):

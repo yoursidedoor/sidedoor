@@ -562,7 +562,13 @@ class MacFrontmost:
 
 
 def pid_alive(pid):
-    """True while process `pid` runs (signal 0: nothing is sent)."""
+    """True while process `pid` runs (signal 0: nothing is sent). Windows: os.kill(pid, 0) is
+    CTRL_C_EVENT there (it interrupted the CI test run), so portable's OpenProcess probe instead."""
+    if os.name == "nt":
+        try:
+            return portable.pid_alive(int(pid))
+        except (OSError, ValueError):
+            return True
     try:
         os.kill(int(pid), 0)
     except ProcessLookupError:

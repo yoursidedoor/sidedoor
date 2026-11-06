@@ -196,6 +196,7 @@ class GateRunTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 check_release_tls_windows.check(self.app, run=self.fake(bad, []))
 
+    @unittest.skipUnless(sys.platform == "darwin", "sign_macos.main refuses to run off macOS before signing")
     def test_notarize_never_runs_without_the_gate(self):
         import sign_macos
         calls = []

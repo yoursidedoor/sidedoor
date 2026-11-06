@@ -530,9 +530,13 @@ class Item8WebmailIsReadOnly(unittest.TestCase):
             def scripted(config, prompt, directory, timeout):
                 (directory / "trace.jsonl").write_text("".join(json.dumps(item) + "\n" for item in trace_items))
                 (directory / "output.json").write_text(json.dumps({"signed_in_account": address, "reason": "r"}))
-            found = setup_steps.read_signed_in_account("https://mail.example/", None, root / "p", root=root,
-                                                       config={"codex": "c", "model": "m"}, executor=scripted)
-            check = sorted((root / "reports" / "email-check").glob("check-*/check.json"), key=os.path.getmtime)[-1]
+            before = set((root / "reports" / "email-check").glob("check-*/check.json"))
+            # The run is scripted: no Codex is looked up on this computer (CI has none installed).
+            with mock.patch.object(setup_steps, "with_codex", lambda config, home=None: config):
+                found = setup_steps.read_signed_in_account("https://mail.example/", None, root / "p", root=root,
+                                                           config={"codex": "c", "model": "m"}, executor=scripted)
+            # This run's own check, not the newest by time: Windows can give two quick runs the same mtime.
+            (check,) = set((root / "reports" / "email-check").glob("check-*/check.json")) - before
             return found, json.loads(check.read_text())
         click = event("a", "ok", tool="browser_click", arguments={"target": "e1", "element": "Account"})
         found, check = run([click])
