@@ -17,7 +17,7 @@ Five lists, each read from the record the rest of the product already writes:
   (`approvals.application_control`); Approve saves exactly what the card shows
   (`approvals.approve_application`) and the job is submitted on the next applications pass, which the
   scheduler is asked to start now (`scheduler_loop.run_soon`); Reject closes it (`reject_application`).
-- Couldn't send: approved messages a sending rule then refused (`approvals.refused_after_approval`;
+- Not sent yet: approved messages a sending rule then refused (`approvals.refused_after_approval`;
   owner, 2026-10-22, D3), with the reason in plain words and [Dismiss] (`approvals.dismiss_refused`).
 - Questions for you: `user_decisions` PENDING and unexpired (not the transport test), answered through
   `decision_transport.answer_locally` against the dashboard home's policy. An APPLIED answer is also
@@ -89,7 +89,21 @@ GATE_WORDS = {
     "VERIFIED_MESSAGE_ALREADY_SENT": "A message to this person was already sent.",
     "OTHER_OUTREACH_ACTION_RESERVED": "Another message to this person is already on its way.",
 }
-GENERIC_GATE = "A sending safety rule stopped it. Sidedoor tries it again on later rounds while the rule allows."
+# Owner-approved copy, 2026-11-06. A read that failed for a moment (outreach.cycle writes
+# INSPECTION_RETRY_WAIT; PROVIDER_SNAPSHOT_INCOMPLETE waits on a later read too), a LinkedIn session
+# or setup hold, and a message whose send result is not known yet.
+PROVIDER_WAIT = "LinkedIn didn't respond. Sidedoor will try again automatically."
+RECONNECT = "Reconnect LinkedIn in Settings. Sidedoor sends it after that."
+LICENSE = "Your license needs attention. Open Settings, then License."
+CHECKING_SENT = "Checking whether this was sent. Sidedoor won't send it twice."
+GATE_WORDS.update({
+    "INSPECTION_RETRY_WAIT": PROVIDER_WAIT,
+    "PROVIDER_SNAPSHOT_INCOMPLETE": PROVIDER_WAIT,
+    "SENDER_READY_MISSING": RECONNECT,   # outreach.action_gates: the inspection did not show the sender ready
+    "SENDER_NOT_READY": RECONNECT,       # outreach.provider_gates: the HeyReach LinkedIn sender is not signed in
+    "UNRESOLVED_ACTION_NO_RETRY": CHECKING_SENT,
+})
+GENERIC_GATE = "Sidedoor couldn't send this. Dismiss it, or email support@yoursidedoor.com."
 FORM_NOT_READABLE_WORDS = ("Sidedoor cannot read this application form. Make it readable (sign in to the employer's "
                            "application site in Sidedoor's browser, or check the form loads there), then answer with "
                            "a short note and Sidedoor reads the form again.")
@@ -275,13 +289,40 @@ def _clamp(page, total, size):
     return min(max(1, page), pages), pages
 
 
+def _hold_line(database, action_id):
+    """The line for an action whose last inspection read stopped on a setup hold or the LinkedIn
+    session, else None. The cycle records those under INSPECTION_RETRY_WAIT (unipile_port.SetupHold
+    codes) or INSPECTION_INVALID_PROOF (linkedin_port.SessionInvalid), with the cause on the read row.
+    A license hold says LICENSE; LinkedIn not connected, an expired session or no sender say RECONNECT."""
+    import unipile_port
+    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outreach_read_retries'").fetchone():
+        return None
+    row = database.execute("SELECT last_error FROM outreach_read_retries WHERE action_id=? AND phase='INSPECTION'",
+                           (action_id,)).fetchone()
+    error = row[0] if row and isinstance(row[0], str) else ""
+    if error in {cls.code for cls in (unipile_port.LicenseHold, unipile_port.LicenseRequired, unipile_port.LicenseRefused)}:
+        return LICENSE
+    if (error in {cls.code for cls in (unipile_port.SetupHold, unipile_port.LinkedInNotConnected, unipile_port.SenderNotConfigured)}
+            or error.split(":")[0] == "SessionInvalid"):
+        return RECONNECT
+    return None
+
+
+def refused_reasons(database, item):
+    """The plain lines for a refused-after-approval item (Approvals and Networking): each gate's words,
+    an inspection stopped by a setup hold or the LinkedIn session told by its cause (`_hold_line`)."""
+    held = _hold_line(database, item["action_id"])
+    return list(dict.fromkeys(held if held and gate in ("INSPECTION_RETRY_WAIT", "INSPECTION_INVALID_PROOF")
+                              else GATE_WORDS.get(gate, GENERIC_GATE) for gate in item["gates"])) or [GENERIC_GATE]
+
+
 def refused(database, only=None, page=1):
     found = []
     offset = 0 if only is not None else (page - 1) * REFUSED_LIMIT
     for item in approvals.refused_after_approval(database, REFUSED_LIMIT if only is None else 500, offset):
         if only is not None and item["action_id"] != only:
             continue
-        reasons = list(dict.fromkeys(GATE_WORDS.get(gate, GENERIC_GATE) for gate in item["gates"])) or [GENERIC_GATE]
+        reasons = refused_reasons(database, item)
         found.append(dict(item, dom=dom("refused", item["action_id"]), reasons=reasons, role=_role_line(None, item["company"]),
                           kind=PURPOSE_WORDS.get(item["purpose"], "Message"), linkedin=linkedin_url(item["profile"]),
                           approved=overview_page._utc(item["approved_at"]) if item["approved_at"] else None))

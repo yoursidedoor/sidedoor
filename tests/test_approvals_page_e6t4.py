@@ -409,13 +409,68 @@ class MessagesWaiting(PageBase):
             self.db.execute("UPDATE outreach_actions SET state='BLOCKED',result=? WHERE action_id='invite-k'",
                             (json.dumps(["PENDING_INVITATION_PRESENT"]),))
         card = self.card(self.page(), "invite-k")
-        self.assertIn("Couldn't send", card)
+        self.assertIn("Not sent yet", card)
         self.assertIn("An invitation to this person is already pending.", card)
         self.assertNotIn("PENDING_INVITATION_PRESENT", card)
         response = self.post("/approvals/refused/dismiss", {"action_id": "invite-k", "payload_hash": self.shown("invite-k")}, HTMX)
         self.assertIn("Dismissed.", response)
         self.assertIsNone(self.card(self.page(), "invite-k"))
         self.assertEqual(self.state("invite-k"), "BLOCKED")                   # dismissing never sends
+
+    def refused_card(self, gates, last_error=None):
+        self.review()
+        self.hold("invite-k", "kim", note(100))
+        self.send("invite-k", note(100))
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET state='BLOCKED',result=? WHERE action_id='invite-k'", (json.dumps(gates),))
+            if last_error is not None:
+                self.db.execute("""INSERT OR REPLACE INTO outreach_read_retries(action_id,phase,state,attempts,last_error,updated_at)
+                    VALUES ('invite-k','INSPECTION','RETRY_WAIT',1,?,?)""", (last_error, NOW.isoformat()))
+        return self.card(self.page(), "invite-k")
+
+    # Owner-approved copy, 2026-11-06.
+    def test_refused_temporary_read_failure_says_it_retries(self):
+        card = self.refused_card(["INSPECTION_RETRY_WAIT"], "UnipileHTTPError: HTTP_502: bad gateway")
+        self.assertIn("LinkedIn didn't respond. Sidedoor will try again automatically.", card)
+
+    def test_refused_session_or_setup_hold_says_reconnect(self):
+        card = self.refused_card(["INSPECTION_RETRY_WAIT"], "LINKEDIN_NOT_CONNECTED")
+        self.assertIn("Reconnect LinkedIn in Settings. Sidedoor sends it after that.", card)
+        self.assertNotIn("didn't respond", card)
+
+    def test_refused_license_hold_says_license_and_linkedin_hold_says_reconnect(self):
+        self.refused_card(["INSPECTION_RETRY_WAIT"], "LICENSE_REQUIRED")
+        for error, line, other in (("LICENSE_REQUIRED", "Your license needs attention. Open Settings, then License.", "Reconnect LinkedIn"),
+                                   ("LICENSE_INVALID", "Your license needs attention. Open Settings, then License.", "Reconnect LinkedIn"),
+                                   ("LICENSE_HOLD", "Your license needs attention. Open Settings, then License.", "Reconnect LinkedIn"),
+                                   ("LINKEDIN_NOT_CONNECTED", "Reconnect LinkedIn in Settings. Sidedoor sends it after that.", "license"),
+                                   ("SENDER_NOT_CONFIGURED", "Reconnect LinkedIn in Settings. Sidedoor sends it after that.", "license")):
+            with self.db:
+                self.db.execute("UPDATE outreach_read_retries SET last_error=? WHERE action_id='invite-k'", (error,))
+            card = self.card(self.page(), "invite-k")
+            self.assertIn(line, card, error)
+            self.assertNotIn(other, card, error)
+
+    def test_refused_session_invalid_and_sender_not_ready_say_reconnect(self):
+        card = self.refused_card(["INSPECTION_INVALID_PROOF", "SENDER_READY_MISSING"], "SessionInvalid: HTTP_401")
+        self.assertIn("Reconnect LinkedIn in Settings. Sidedoor sends it after that.", card)
+        self.assertNotIn("couldn't send", card)
+
+    def test_refused_heyreach_sender_not_ready_says_reconnect(self):
+        card = self.refused_card(["SENDER_NOT_READY"])
+        self.assertIn("Reconnect LinkedIn in Settings. Sidedoor sends it after that.", card)
+
+    def test_refused_unknown_send_result_says_it_is_checking(self):
+        card = self.refused_card(["UNRESOLVED_ACTION_NO_RETRY"])
+        self.assertIn("Checking whether this was sent. Sidedoor won't send it twice.", card)
+
+    def test_refused_unknown_code_falls_back_without_promising_a_retry(self):
+        card = self.refused_card(["SOMETHING_NEW"])
+        self.assertIn("Sidedoor couldn't send this. Dismiss it, or email support@yoursidedoor.com.", card)
+        self.assertNotIn("again", card)
+        page = self.page()
+        self.assertIn("Not sent yet.</h2>", page)
+        self.assertIn("You approved these. Sidedoor hasn't sent them yet.", page)
 
     def test_d3_an_unapproved_blocked_message_is_not_listed(self):
         action = invite("invite-l", "lou", note(100))

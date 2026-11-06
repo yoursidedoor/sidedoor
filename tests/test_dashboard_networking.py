@@ -637,6 +637,28 @@ class ReviewFixesTest(Page, unittest.TestCase):
         self.assertIn('class="chip chip-error">Needs you', page)
         self.assertIn("This person asked not to be contacted.", page)
 
+    def refused_only(self, gates):
+        self.open_store(self.root)
+        item = {"action_id": "invite-q", "payload_hash": "h", "recipient": "Quinn Example", "company": "Acme",
+                "purpose": "INVITE", "message": "Hi Quinn.", "profile": url("quinn-q"), "approved_at": at(4), "gates": gates}
+        return mock.patch.object(approvals, "refused_after_approval", return_value=[item])
+
+    def test_n13b_an_approved_message_waiting_says_not_sent_yet(self):
+        with self.refused_only(["INSPECTION_RETRY_WAIT"]):
+            quinn = self.entries()[0]
+            needs = self.entries(show="needs_you")
+        self.assertEqual((quinn["status"], quinn["tone"]), ("Not sent yet", "info"))
+        self.assertEqual([entry["dom"] for entry in needs], [quinn["dom"]])   # still under Needs you
+
+    def test_n13c_refused_reasons_read_the_hold_like_approvals(self):
+        with self.refused_only(["INSPECTION_RETRY_WAIT"]):
+            outreach.initialize_actions(self.db)
+            with self.db:
+                self.db.execute("""INSERT INTO outreach_read_retries(action_id,phase,state,attempts,last_error,updated_at)
+                    VALUES ('invite-q','INSPECTION','RETRY_WAIT',1,'LICENSE_REQUIRED',?)""", (at(4),))
+            quinn = self.entries()[0]
+        self.assertEqual(quinn["refused"][0]["reasons"], ["Your license needs attention. Open Settings, then License."])
+
     def test_n14_a_message_that_did_not_go_out_says_what_happens_next(self):
         self.open_store(self.root)
         self.action("invite-n", "ned-n", "INVITE", "CONFIRMED_NOT_SENT", "Hi Ned.", claimed=at(1))

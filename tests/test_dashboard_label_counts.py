@@ -174,7 +174,7 @@ class NetworkingCounts(net_base.Page, unittest.TestCase):
             overview = self.get("/")
         self.assertEqual(sum(contact.refused for contact in contacts), total)
         self.assertEqual(total, 1)
-        self.assertRegex(overview, r'1</span>\s*<span class="overview-needs-what">message couldn\'t send</span>\s*'
+        self.assertRegex(overview, r'1</span>\s*<span class="overview-needs-what">message not sent yet</span>\s*'
                                    r'<a class="button overview-needs-go" href="/approvals#refused">Review</a>')
 
 

@@ -897,6 +897,80 @@ class ReadRetryTests(unittest.TestCase):
         self.assertEqual(self.status("RECONCILIATION")["attempts"], 0)
         self.transport.assert_called_once()
 
+    # 2026-11-06: a 3-second Unipile 502 held 8 approved invitations at INVALID_PROOF for good.
+    OWNER_502 = "UnipileHTTPError: HTTP_502: <html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>"
+
+    def test_unipile_5xx_inspection_waits_with_a_next_date(self):
+        import unipile_port
+        self.adapter.inspector = Mock(side_effect=unipile_port.UnipileHTTPError(502, "<html>502 Bad Gateway nginx</html>"))
+        outreach.enqueue_action(self.database, self.action)
+        self.cycle()
+        read = self.status("INSPECTION")
+        self.assertEqual(read["state"], "RETRY_WAIT")
+        self.assertIsNotNone(read["next_at"])
+        self.assertTrue(read["last_error"].startswith("UnipileHTTPError: HTTP_502: <html>"))
+        state, result = self.database.execute("SELECT state,result FROM outreach_actions").fetchone()
+        self.assertNotIn("INSPECTION_INVALID_PROOF", result)
+        self.adapter.inspector = lambda action, config: dict(self.proof)
+        self.now = engagement.timestamp(read["next_at"])
+        self.cycle()
+        self.transport.assert_called_once()
+
+    def test_unipile_400_inspection_stays_invalid_proof(self):
+        import unipile_port
+        self.adapter.inspector = Mock(side_effect=unipile_port.UnipileHTTPError(400, "bad request"))
+        outreach.enqueue_action(self.database, self.action)
+        self.cycle()
+        self.assertEqual(self.status("INSPECTION")["state"], "INVALID_PROOF")
+        self.assertEqual(self.status("INSPECTION")["last_error"], "UnipileHTTPError: HTTP_400: bad request")
+        self.assertEqual(outreach.reopen_transient_http_reads(self.database, self.now), [])
+        self.assertEqual(self.status("INSPECTION")["state"], "INVALID_PROOF")
+
+    def seed_owner_row(self, last_error=OWNER_502):
+        outreach.enqueue_action(self.database, self.action)
+        with self.database:
+            self.database.execute("UPDATE outreach_actions SET state='BLOCKED',result=? WHERE action_id=?",
+                                  (json.dumps(["INSPECTION_INVALID_PROOF"]), self.action["action_id"]))
+            self.database.execute("""INSERT OR REPLACE INTO outreach_read_retries(action_id,phase,state,attempts,next_at,last_error,updated_at)
+                VALUES (?,'INSPECTION','INVALID_PROOF',0,NULL,?,'2026-11-06T04:33:22+00:00')""", (self.action["action_id"], last_error))
+
+    def test_recovery_reopens_owner_row_once_and_sends_exactly_once(self):
+        self.seed_owner_row()
+        self.assertEqual(outreach.reopen_transient_http_reads(self.database, self.now), [self.action["action_id"]])
+        reopened = self.status("INSPECTION")
+        self.assertEqual((reopened["state"], reopened["next_at"], reopened["last_error"], reopened["attempts"]), ("READY", None, None, 0))
+        self.assertEqual(outreach.reopen_transient_http_reads(self.database, self.now), [])
+        self.assertEqual(self.status("INSPECTION"), reopened)
+        self.cycle()
+        self.transport.assert_called_once()
+        self.assertEqual(self.database.execute("SELECT COUNT(*) FROM outreach_action_claims").fetchone()[0], 1)
+        self.now += dt.timedelta(days=1)
+        self.cycle()
+        self.cycle()
+        self.transport.assert_called_once()
+
+    def test_cycle_runs_the_recovery_then_sends_once(self):
+        self.seed_owner_row()
+        self.assertEqual(self.cycle()["reopened_reads"], [self.action["action_id"]])
+        self.transport.assert_called_once()
+
+    def test_recovery_leaves_an_already_sent_action_untouched(self):
+        outreach.enqueue_action(self.database, self.action)
+        self.cycle()
+        self.transport.assert_called_once()
+        with self.database:
+            self.database.execute("""UPDATE outreach_read_retries SET state='INVALID_PROOF',attempts=0,next_at=NULL,last_error=?
+                WHERE action_id=? AND phase='INSPECTION'""", (self.OWNER_502, self.action["action_id"]))
+        before = self.status("INSPECTION")
+        action_before = self.database.execute("SELECT * FROM outreach_actions").fetchone()
+        self.assertEqual(outreach.reopen_transient_http_reads(self.database, self.now), [])
+        self.assertEqual(self.status("INSPECTION"), before)
+        self.now += dt.timedelta(days=1)
+        self.cycle()
+        self.assertEqual(self.status("INSPECTION"), before)
+        self.assertEqual(tuple(self.database.execute("SELECT * FROM outreach_actions").fetchone())[:5], tuple(action_before)[:5])
+        self.transport.assert_called_once()
+
     def test_one_backoff_does_not_stop_other_company(self):
         outreach.enqueue_action(self.database, self.action)
         self.adapter.inspector = Mock(side_effect=TimeoutError())

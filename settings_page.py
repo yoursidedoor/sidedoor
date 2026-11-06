@@ -17,6 +17,7 @@ Sections (anchors `#profile`, `#resume`, `#mode`, `#connections`, `#license`, `#
   E8.T2: trial days left, payment retrying, the offline countdown, the clock check, [Check again]).
   [Manage subscription] opens Stripe's customer portal login (`config.json` `billing_portal_url`) in a
   new tab; with no URL configured the section says to email support instead.
+- License also has the opt-in "Share anonymous progress counts" checkbox (E12.T2, `progress_share`).
 - Start at login: Setup step 10's checkbox (`setup_steps.start_at_login`, `login_view`; E5.T2).
 
 Nothing here judges content: Python only fits values to controls (owner, 2026-10-07/10-21).
@@ -40,6 +41,7 @@ import resume_intake
 import credentials
 import setup_steps
 import paths
+import progress_share
 import user_profile
 
 SECTIONS = ("profile", "answers", "resume", "mode", "connections", "license", "login")
@@ -340,7 +342,9 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           portal=str(config.get("billing_portal_url") or "").strip(),
                           portal_line=PORTAL_LINE, no_portal=NO_PORTAL,
                           keychain_wait=setup_steps.keys_waiting(home),
-                          offer_file=credentials.offer_file(setup_steps._home(home)))
+                          offer_file=credentials.offer_file(setup_steps._home(home)),
+                          # E12.T2: opt-in progress counts with the daily license check, off by default
+                          share_progress=progress_share.enabled(home), share_progress_label=progress_share.LABEL)
         elif name == "mode":
             import approvals  # the mode as the send path reads it (E6.T2 review fix P13)
             result.update(not_recalled=NOT_RECALLED, state=dict(state, mode=approvals.install_mode(root, home)))
@@ -607,6 +611,14 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         return kept_answer(request, key, "Removed. The next application that needs this asks you again on Approvals."
                            if removed else "That answer was already removed.")
 
+    # --- Progress counts (E12.T2, `progress_share`) ---------------------------------------------------
+
+    @app.post("/settings/progress")
+    async def share_progress(request: Request):
+        form = await request.form()
+        await run_in_threadpool(progress_share.set_enabled, form.get("enabled") == "on", home)
+        return await run_in_threadpool(respond, request, "license")
+
     # --- Start at login (Setup step 10, E5.T2) -------------------------------------------------------
 
     @app.post("/settings/login")
@@ -840,6 +852,15 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         # A refused key stays in its (hidden) box so it can be fixed without pasting it again.
         return respond(request, "license", {"key_box": key if isinstance(key, str) else ""} if refused else None,
                        also=also)
+
+    @app.post("/settings/license/check")
+    async def license_check(request: Request):
+        # E13 P1: [Check again] in Settings > License: one heartbeat (license_clock.check_now), then
+        # the section, the banners and the chip in place, like [Activate].
+        import license_clock
+        result = await run_in_threadpool(license_clock.check_now, home, relay_url)
+        await run_in_threadpool(_sync_license_pause, root, home)
+        return respond(request, "license", {"check_message": license_clock.check_message(result, license_clock.view(home))})
 
     @app.post("/settings/license/activate")
     async def license_activate(request: Request):

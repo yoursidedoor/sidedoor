@@ -240,7 +240,7 @@ def banner(home=None):
             notice = None
     except Exception:
         notice = None
-    found = _banner(home)
+    found = _banner(home) or _required_banner(home)
     if notice:
         if found is None:
             return {"tone": "warning", "text": notice, "dismiss_notice": True, "update_phase": "notice"}
@@ -291,6 +291,31 @@ def _banner(home):
                  "action_label": "Download", "action_href": available["download_url"], "external": True,
                  "notes": notes[:MAX_NOTES] or None, "dismiss": available["latest"]}
         return _with_update_now(found, available)
+    except Exception:
+        return None
+
+
+DOWNLOAD_PAGE = "https://yoursidedoor.com/download.html"
+
+
+def _required_banner(home):
+    """E12.T5: the relay's signed "update required" flag (`license_clock.update_required`) shows the
+    same banner when version.json's offer did not (not fetched yet, or not reachable). Dismissing it
+    hides it like any offer of that version."""
+    try:
+        import license_clock
+        minimum = license_clock.update_required(home)
+        if minimum is None:
+            return None
+        state = _read(home)
+        dismissed = parse_version(state.get("dismissed"))
+        if dismissed is not None and dismissed >= parse_version(minimum):
+            return None
+        available = state.get("available") if isinstance(state.get("available"), dict) else {}
+        href = available.get("download_url") if _allowed_download(available.get("download_url")) else DOWNLOAD_PAGE
+        return {"tone": "info", "text": "Please update Sidedoor to version %s or newer." % minimum,
+                "update_phase": "available", "action_label": "Download", "action_href": href, "external": True,
+                "notes": None, "dismiss": minimum}
     except Exception:
         return None
 

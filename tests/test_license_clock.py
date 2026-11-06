@@ -18,6 +18,7 @@ import license_clock
 import license_fixtures
 import scheduler_control
 import scheduler_loop
+import time
 import setup_steps
 
 
@@ -134,6 +135,16 @@ class WorkedExamples(ClockCase):
         before = (self.home / setup_steps.ENTITLEMENT_FILE).read_text()
         self.assertEqual(before, (self.home / setup_steps.ENTITLEMENT_FILE).read_text())  # nothing unsigned stored
 
+    def test_a_bad_signature_says_license_problem_not_offline(self):
+        self.activate()
+        self.relay.mode = "garbage"   # the relay answers 200 but the entitlement doesn't verify
+        self.assertEqual(self.heartbeat(), "offline")   # the same 72-hour grace as offline
+        message = license_clock.check_message("offline", self.view())
+        self.assertEqual(message, "There's a problem with your license. Please email support@yoursidedoor.com.")
+        self.relay.mode = "down"
+        self.assertEqual(self.heartbeat(), "offline")
+        self.assertIn("Still can't reach", license_clock.check_message("offline", self.view()))
+
     def test_3_clock_set_back_30_days_never_extends_the_trial(self):
         self.activate("trialing", trial_end=self.true + dt.timedelta(days=14))
         self.true = at("2026-11-01T10:00:00")
@@ -202,6 +213,18 @@ class WorkedExamples(ClockCase):
         self.activate()
         with mock.patch.object(license_clock, "hardware_id", lambda: "ANOTHER-COMPUTER"):
             self.assertEqual(self.view()["problem"], "signature")
+
+    def test_l10_a_bad_signature_on_activate_says_license_problem_not_unreachable(self):
+        self.relay.mode = "garbage"   # a 200 whose signature does not verify
+        state = setup_steps.activate_license(KEY, self.home, "https://relay.test", post=self.relay)
+        self.assertEqual(state["steps"]["license"]["message"], license_clock.BAD_SIGNATURE_TEXT)
+
+    def test_l10_a_bad_signature_on_the_automatic_reactivation_records_signature(self):
+        self.activate()
+        self.relay.mode = "garbage"
+        with mock.patch.object(license_clock, "hardware_id", lambda: "ANOTHER-COMPUTER"):
+            self.assertEqual(self.heartbeat(), "offline")   # same grace as before
+        self.assertEqual(license_clock.heartbeat_record(self.home)["last_error"], license_clock.SIGNATURE)
 
     def test_4_paused_the_heartbeat_still_runs_on_its_own_timer(self):
         self.activate()
@@ -844,6 +867,295 @@ class DashboardTest(ClockCase):
         overview = client.get("/").text
         self.assertIn('href="https://yoursidedoor.com" target="_blank"', overview)
 
+    def test_e13_paused_trial_shows_add_a_card_with_the_portal(self):
+        portal = json.loads((ROOT / "config.json").read_text())["billing_portal_url"]
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.activate("trialing", trial_end=self.true + dt.timedelta(days=1))
+        self.finished()
+        self.relay.status = "paused"   # Stripe paused it at the trial's end: no card
+        self.heartbeat()
+        value = self.view()
+        self.assertEqual((value["state"], value["paused"], value["label"]), ("expired", True, "Trial ended"))
+        self.assertEqual(license_clock.pause_reason(value), "expired")
+        banner = license_clock.banner(value)
+        self.assertEqual((banner["text"], banner["action_label"], banner["action_href"], banner["external"]),
+                         ("Your trial ended. Add a card to keep going.", "Add a card", portal, True))
+        self.assertIsNone(banner["second"])
+        client = self.client()
+        link = 'href="%s" target="_blank" rel="noopener noreferrer">Add a card' % portal
+        for path in ("/", "/settings"):
+            page = client.get(path).text
+            self.assertIn("Your trial ended. Add a card to keep going.", page, path)
+            self.assertIn(link, page, path)
+            self.assertNotIn("Renew", page, path)
+        self.assertIn('id="paywall-renew"', client.get("/").text)   # the Overview paywall
+        self.assertIn(">Check again<", client.get("/settings").text)
+        # The relay resumes it once a card is added; the next check restores the license.
+        self.relay.status = "active"
+        license_clock._last_check["mono"] = None
+        self.heartbeat()
+        self.assertEqual((self.view()["state"], self.view()["paused"]), ("active", False))
+
+    def paused_then_card_added(self):
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.activate("trialing", trial_end=self.true + dt.timedelta(days=1))
+        self.finished()
+        self.relay.status = "paused"
+        self.heartbeat()
+        client = self.client()
+        self.relay.status = "active"   # the relay resumed it after a card
+        license_clock._last_check["mono"] = None
+        return client
+
+    def test_e13_p1_check_again_in_settings_refreshes_the_section_banner_and_chip(self):
+        client = self.paused_then_card_added()
+        page = client.get("/settings").text
+        self.assertIn('action="/settings/license/check"', page)
+        with mock.patch.object(setup_steps, "_post_json", self.relay), \
+                mock.patch.object(license_clock, "_post", self.relay):
+            response = client.post("/settings/license/check", headers={"hx-request": "true",
+                                                                       "origin": "http://127.0.0.1:47823"})
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        self.assertIn('id="license"', body)                       # the section, in place
+        self.assertIn('id="banners" hx-swap-oob="true"', body)    # the top banner
+        self.assertIn('id="chips" hx-swap-oob="true"', body)      # the chip
+        self.assertIn("License OK: Active.", body)
+        for gone in ("Trial ended", "Add a card", "Your trial ended"):
+            self.assertNotIn(gone, body)
+
+    def test_e13_p1_check_again_on_the_paused_paywall_reloads_overview(self):
+        client = self.paused_then_card_added()
+        page = client.get("/").text
+        self.assertIn('action="/license/check?paywall=1"', page)
+        with mock.patch.object(setup_steps, "_post_json", self.relay), \
+                mock.patch.object(license_clock, "_post", self.relay):
+            response = client.post("/license/check?paywall=1", data={"next": "/"},
+                                   headers={"hx-request": "true", "origin": "http://127.0.0.1:47823"})
+        self.assertEqual(response.headers.get("HX-Redirect"), "/")
+        self.assertNotIn("Your trial ended", client.get("/").text)
+
+    def paused_trial(self):
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.activate("trialing", trial_end=self.true + dt.timedelta(days=1))
+        self.finished()
+        self.relay.status = "paused"
+        self.heartbeat()
+        license_clock._last_check["mono"] = None
+        return self.client()
+
+    def test_g1_the_paywall_names_todays_pages(self):
+        page = self.paused_trial().get("/").text
+        self.assertIn("Networking &amp; Referrals, Applications, and Failures and logs stay readable.", page)
+        self.assertNotIn("Sent, Applications and logs", page)
+
+    def test_r1_a_paused_key_activates_to_trial_ended_in_setup_and_settings(self):
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.relay.status = "paused"   # bought, then installed after the activation cap paused it
+        client = self.client()
+        headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
+        with mock.patch.object(setup_steps, "_post_json", self.relay):
+            setup = client.post("/setup/license", data={"key": KEY}, headers=headers).text
+            settings_ = client.post("/settings/license/change", data={"key": KEY}, headers=headers).text
+        setup_pages, settings_pages = (setup, client.get("/setup").text), (settings_, client.get("/settings").text)
+        for page in setup_pages + settings_pages:
+            self.assertIn("Trial ended", page)
+            self.assertIn("Your trial ended. Add a card to keep going.", page)
+            self.assertIn(">Check again<", page)
+            for wrong in ("not valid", "Active: Active", "Active: Trial"):
+                self.assertNotIn(wrong, page)
+        for page in setup_pages:   # owner: no [Add a card] in Setup's license step (the banner keeps its own)
+            step = page.split('id="step-1"')[1].split("</li>")[0]
+            self.assertNotIn("Add a card</a>", step)
+            self.assertIn(">Check again<", step)
+        for page in settings_pages:
+            self.assertIn('id="renew-license" href=', page)
+            self.assertIn('target="_blank" rel="noopener noreferrer">Add a card</a>', page)
+        self.assertEqual((self.view()["state"], self.view()["paused"], self.view()["usable"]), ("expired", True, False))
+
+    def test_c1_while_paused_a_bad_key_in_settings_shows_its_error_and_the_trial_ended_note_shows_once(self):
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.relay.status = "paused"
+        client = self.client()
+        headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
+        with mock.patch.object(setup_steps, "_post_json", self.relay):
+            page = client.post("/settings/license/change", data={"key": KEY}, headers=headers).text
+            section = page.split('id="license"')[1].split("</section>")[0]
+            self.assertEqual(section.count("Your trial ended. Add a card to keep going."), 1)   # the status line only
+            self.relay.mode = "invalid"   # a mistyped or canceled key pasted while paused
+            page = client.post("/settings/license/change", data={"key": "SD-WRONG"}, headers=headers).text
+        self.assertIn("This key is not valid or its subscription has ended.", page)
+        self.assertIn("Trial ended", page)
+
+    def test_r11_setup_while_paused_has_no_buy_or_paste_prompt_but_keeps_the_key_field(self):
+        def step(page):
+            return page.split('id="step-1"')[1].split("</li>")[0]
+        prompt, buy = "Paste the license key you got after buying.", "Buy a license"
+        before = step(self.client().get("/setup").text)   # no key yet: unchanged
+        self.assertIn(prompt, before)
+        self.assertIn(buy, before)
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.relay.status = "paused"
+        with mock.patch.object(setup_steps, "_post_json", self.relay):
+            self.client().post("/setup/license", data={"key": KEY},
+                               headers={"hx-request": "true", "origin": "http://127.0.0.1:47823"})
+        paused = step(self.client().get("/setup").text)
+        self.assertIn("Trial ended", paused)
+        self.assertNotIn(prompt, paused)
+        self.assertNotIn(buy, paused)
+        for kept in ('id="license-key"', ">Activate<", ">Check again<"):
+            self.assertIn(kept, paused)
+
+    CARD_TEXT = "Your payment didn't go through. Add a card to keep going."
+    CARD_HTML = "Your payment didn&#39;t go through. Add a card to keep going."
+
+    def test_d1_past_due_keeps_working_with_a_warning_banner_to_add_a_card(self):
+        portal = json.loads((ROOT / "config.json").read_text())["billing_portal_url"]
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.activate("past_due")
+        self.finished()
+        value = self.view()
+        self.assertEqual((value["state"], value["usable"], value["text"]), ("payment_retrying", True, self.CARD_TEXT))
+        self.assertIsNone(license_clock.pause_reason(value))
+        banner = license_clock.banner(value)
+        self.assertEqual((banner["tone"], banner["text"], banner["action_label"], banner["action_href"]),
+                         ("warning", self.CARD_TEXT, "Add a card", portal))
+        client = self.client()
+        link = 'href="%s" target="_blank" rel="noopener noreferrer">Add a card' % portal
+        overview, settings_ = client.get("/").text, client.get("/settings").text
+        self.assertNotIn('id="paywall-renew"', overview)   # no paywall: Sidedoor works
+        self.assertIn('banner-warning', overview)
+        for page in (overview, settings_):
+            self.assertIn(self.CARD_HTML, page)
+            self.assertIn(link, page)
+        self.assertNotIn('hx-trigger="click from:#renew-license"', settings_)
+
+    def test_d2_unpaid_is_the_paused_paywall_with_payment_words_and_d3_canceled_keeps_renew(self):
+        line = "Just added a card? It can take a minute to update."
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.activate("active")
+        self.finished()
+        self.relay.status = "unpaid"   # renewals failed: Stripe left it unpaid
+        self.heartbeat()
+        value = self.view()
+        self.assertEqual((value["state"], value["usable"], value["text"]), ("expired", False, self.CARD_TEXT))
+        self.assertEqual([action["label"] for action in value["actions"]], ["Add a card", "Check again"])
+        self.assertEqual(license_clock.pause_reason(value), "expired")
+        client = self.client()
+        overview, settings_, setup = client.get("/").text, client.get("/settings").text, client.get("/setup").text
+        self.assertIn('id="paywall-renew"', overview)
+        for page in (overview, settings_):
+            self.assertIn(self.CARD_HTML, page)
+            self.assertIn(">Add a card</a>", page)
+            self.assertIn(">Check again<", page)
+            self.assertNotIn("Renew", page)
+        step = setup.split('id="step-1"')[1].split("</li>")[0]
+        for gone in ("Add a card</a>", "Buy a license", "Paste the license key you got after buying."):
+            self.assertNotIn(gone, step)
+        self.assertIn(">Check again<", step)
+        headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
+        license_clock._last_check["mono"] = None
+        with mock.patch.object(setup_steps, "_post_json", self.relay), \
+                mock.patch.object(license_clock, "_post", self.relay):
+            self.assertIn(line, client.post("/settings/license/check", headers=headers).text)
+        self.relay.status = "canceled"   # D3: unchanged
+        license_clock._last_check["mono"] = None
+        self.heartbeat()
+        self.assertEqual((self.view()["label"], self.view()["action"]["label"]), ("Expired", "Renew"))
+        self.assertIn(">Renew<", client.get("/").text)
+
+    def test_h1_the_background_heartbeat_clears_the_trial_ended_record_without_check_again(self):
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.relay.status = "paused"
+        client = self.client()
+        headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
+        with mock.patch.object(setup_steps, "_post_json", self.relay):
+            client.post("/setup/license", data={"key": KEY}, headers=headers)
+        self.assertEqual(setup_steps.load_state(self.home)["steps"]["license"]["status"], "needs_you")
+        self.relay.status = "active"   # a card was added; the user never clicks [Check again]
+        license_clock._last_check["mono"] = None
+        scheduler_loop.start_license_heartbeat(self.home / "root", home=self.home, post=self.relay)
+        self.addCleanup(scheduler_loop.stop_license_heartbeat)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and setup_steps.load_state(self.home)["steps"]["license"]["status"] != "done":
+            time.sleep(0.05)
+        self.assertEqual(setup_steps.load_state(self.home)["steps"]["license"]["status"], "done")
+        for page in (client.get("/settings").text, client.get("/setup").text):
+            self.assertNotIn("Your trial ended", page)
+
+    def test_f1_after_a_card_the_check_clears_the_trial_ended_and_payment_records(self):
+        headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
+        for status in ("paused", "unpaid"):
+            with self.subTest(status):
+                self.true = dt.datetime.now(UTC).replace(microsecond=0)
+                self.relay.status = status
+                client = self.client()
+                with mock.patch.object(setup_steps, "_post_json", self.relay), \
+                        mock.patch.object(license_clock, "_post", self.relay):
+                    client.post("/setup/license", data={"key": KEY}, headers=headers)
+                    self.relay.status = "active"   # a card was added; Stripe resumed it
+                    license_clock._last_check["mono"] = None
+                    checked = client.post("/settings/license/check", headers=headers).text
+                self.assertIn("License OK: Active.", checked)
+                for page in (checked, client.get("/settings").text, client.get("/setup").text):
+                    for gone in ("Your trial ended", "Your payment didn", "Trial ended", "Payment failed"):
+                        self.assertNotIn(gone, page)
+                self.assertEqual(setup_steps.load_state(self.home)["steps"]["license"]["status"], "done")
+
+    def test_e2_an_unpaid_key_activates_to_the_payment_state_in_setup_and_settings(self):
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.relay.status = "unpaid"
+        client = self.client()
+        headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
+        with mock.patch.object(setup_steps, "_post_json", self.relay):
+            setup = client.post("/setup/license", data={"key": KEY}, headers=headers).text
+        settings_ = client.get("/settings").text
+        step = client.get("/setup").text.split('id="step-1"')[1].split("</li>")[0]
+        for page in (setup, step, settings_):
+            self.assertIn("Payment failed", page)
+            self.assertIn(self.CARD_HTML, page)
+            self.assertIn(">Check again<", page)
+            for wrong in ("Your trial ended", "not valid", "Active: Active"):
+                self.assertNotIn(wrong, page)
+        for gone in ("Add a card</a>", "Buy a license", "Paste the license key you got after buying."):
+            self.assertNotIn(gone, step)
+        self.assertIn(">Add a card</a>", settings_)
+        section = settings_.split('id="license"')[1].split("</section>")[0]
+        self.assertEqual(section.count(self.CARD_HTML), 1)
+
+    def test_r3_check_again_still_paused_says_a_card_can_take_a_minute(self):
+        line = "Just added a card? It can take a minute to update."
+        client = self.paused_trial()
+        self.assertNotIn(line, client.get("/settings").text)
+        headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
+        with mock.patch.object(setup_steps, "_post_json", self.relay), \
+                mock.patch.object(license_clock, "_post", self.relay):
+            self.assertIn(line, client.post("/settings/license/check", headers=headers).text)
+            license_clock._last_check["mono"] = None
+            self.assertIn(line, client.post("/license/check?paywall=1", data={"next": "/"}, headers=headers).text)
+            self.relay.status = "canceled"   # a plain Expired never gets the line
+            license_clock._last_check["mono"] = None
+            self.assertNotIn(line, client.post("/settings/license/check", headers=headers).text)
+
+    def test_r4_the_paused_add_a_card_in_settings_opens_no_checkout_guide(self):
+        page = self.paused_trial().get("/settings").text
+        self.assertIn(">Add a card</a>", page)
+        self.assertNotIn('hx-trigger="click from:#renew-license"', page)
+
+    def test_e13_p2_the_paused_paywall_has_no_pause_button(self):
+        self.true = dt.datetime.now(UTC).replace(microsecond=0)
+        self.activate("trialing", trial_end=self.true + dt.timedelta(days=1))
+        self.finished()
+        self.relay.status = "paused"
+        self.heartbeat()
+        page = self.client().get("/").text
+        self.assertIn("Your trial ended. Add a card to keep going.", page)
+        self.assertNotIn('action="/pause"', page)
+        self.relay.status = "canceled"   # a plain Expired keeps [Pause] (PW1)
+        license_clock._last_check["mono"] = None
+        self.heartbeat()
+        self.assertIn('action="/pause"', self.client().get("/").text)
+
     def test_check_again_runs_the_heartbeat_and_returns_to_the_page(self):
         self.true = dt.datetime.now(UTC).replace(microsecond=0) - dt.timedelta(hours=80)
         self.activate()
@@ -923,7 +1235,7 @@ class DashboardTest(ClockCase):
         section = page[page.index('id="license"'):]
         section = section[:section.index("</section>")]
         self.assertIn('id="renew-license" href="https://yoursidedoor.com" target="_blank"', section)
-        self.assertIn('hx-post="/license/check"', section)
+        self.assertIn('hx-post="/settings/license/check"', section)   # E13 P1: the section swaps in place
         self.assertIn("Paid and still seeing this? Email support@yoursidedoor.com.", section)
         self.assertNotRegex(section, r"\d{4}-\d\d-\d\dT\d\d:\d\d")  # no raw ISO times
         self.assertRegex(section, r"<dt>Good until</dt><dd>[A-Za-z]*\s?[A-Za-z]* ?\d?\d?,? ?\d\d:\d\d</dd>")

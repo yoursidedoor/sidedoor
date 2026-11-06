@@ -17,6 +17,7 @@ from unittest import mock
 
 import license_fixtures
 import run_locks
+import license_clock
 import setup_steps
 
 # A private file's mode: Windows keeps only the read-only bit (0o666 when writable); its privacy
@@ -374,7 +375,8 @@ class SetupStepsTest(unittest.TestCase):
         for body in (forged, other_key):
             step, _ = self.activate(200, body)
             self.assertEqual(step["status"], "failed")
-            self.assertIn("license server", step["message"])
+            # L10: a 200 whose signature doesn't verify for this key is a license problem, not "unreachable".
+            self.assertEqual(step["message"], license_clock.BAD_SIGNATURE_TEXT)
             self.assertFalse((self.home / "license.key").exists())
 
     def test_license_failures(self):

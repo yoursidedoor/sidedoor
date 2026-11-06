@@ -47,10 +47,10 @@
 
 {% if v.refused or v.paging.refused.total %}
 <section class="card approvals-section" id="refused" aria-labelledby="refused-title">
-  <h2 id="refused-title">Couldn't send</h2>
-  <p class="muted">You approved these, then a sending rule stopped them.</p>
+  <h2 id="refused-title">Not sent yet.</h2>
+  <p class="muted">You approved these. Sidedoor hasn't sent them yet.</p>
   {% for r in v.refused %}{% with item = r, f = cards.get(r.dom) %}{% include "approvals_refused.html" %}{% endwith %}{% endfor %}
-  {{ pager(v, "refused", "messages that couldn't send") }}
+  {{ pager(v, "refused", "messages not sent yet") }}
 </section>
 {% endif %}
 

@@ -52,7 +52,10 @@ clock clears within the hour), and when woken (`request_check`). The
 [Check again] buttons run `check_now`: never two checks at once and at most one a minute. A page
 render never calls the relay: `view` reads the stored files only.
 
-`POST /license/heartbeat` {key, machine} (relay/server.py): 200 with a signed entitlement; 401
+`POST /license/heartbeat` {key, machine, version[, milestones]} (relay/server.py; `heartbeat_body`:
+`milestones` only while the user turned on progress counts, E12.T2): 200 with a signed entitlement
+(with `update_required` and `min_version` when the relay's MIN_APP_VERSION is above `version`,
+E12.T5: `update_required`, shown by `update_check.banner`); 401
 LICENSE_INVALID (unknown key); 403 MACHINE_NOT_ACTIVATED. `POST /license/activate` likewise
 counts a 401 as refused only with LICENSE_INVALID in its body. Any other answer (a 5xx, a 401 with
 another body, a malformed or unverifiable answer, a broken connection, a timeout) is "offline"
@@ -421,6 +424,7 @@ def _post(url, body):
 
 
 CERTIFICATE = "CERTIFICATE"   # T7: last_error when the relay's secure connection could not be verified
+SIGNATURE = "SIGNATURE"   # last_error when the relay answered 200 but its entitlement didn't verify (still offline grace)
 _CERTIFICATE_FAILURE = {"error": CERTIFICATE}   # `_call`'s answer for that (never a relay answer: status None)
 
 
@@ -447,7 +451,8 @@ def activate(key, home=None, relay_url=None, post=None, now=None, to_file=False)
     """`POST /license/activate {key, machine}` under the check lock, so an older key's heartbeat in
     flight can never store over the new key. Returns (outcome, entitlement fields or None): "ok"
     (key and entitlement stored), "invalid" (401), "activation_limit" (409), "certificate" (the relay's
-    secure connection could not be verified, T7) or "offline"."""
+    secure connection could not be verified, T7), "signature" (a 200 whose signature does not verify,
+    L10) or "offline"."""
     with _check_lock:
         stored = _load(home)[0]
         claimed = (_claims(stored) or {}).get("machine") if isinstance(stored, dict) else None
@@ -498,6 +503,8 @@ def _activate(key, home, relay_url, post, now, replaces=None, to_file=False, **e
         return "activation_limit", None
     if status is None and parsed is _CERTIFICATE_FAILURE:
         return "certificate", None
+    if status == 200 and isinstance(parsed, dict) and "signature" in parsed:
+        return "signature", None   # L10: answered and signed, but the signature doesn't verify
     return "offline", None
 
 
@@ -537,11 +544,11 @@ def _check(home, relay_url, post, now):
                                reactivated_from=claimed)
         if outcome in ("invalid", "activation_limit"):
             _record(home, now, outcome, key, reactivated_from=claimed)
-        elif outcome in ("offline", "certificate"):   # a certificate failure is offline, said plainly (T7)
-            _record(home, now, "offline", key, code=CERTIFICATE if outcome == "certificate" else None)
+        elif outcome in ("offline", "certificate", "signature"):   # offline grace, each said plainly (T7, L10)
+            _record(home, now, "offline", key, code={"certificate": CERTIFICATE, "signature": SIGNATURE}.get(outcome))
             return "offline"
         return outcome
-    status, parsed = _call(post, relay_url + "/license/heartbeat", {"key": key, "machine": machine})
+    status, parsed = _call(post, relay_url + "/license/heartbeat", heartbeat_body(key, machine, home))
     if status == 200 and check_signed(parsed, key, machine) is not None:
         with _write_lock:
             if setup_steps.license_key(home) != key:
@@ -553,9 +560,32 @@ def _check(home, relay_url, post, now):
     elif status == 403:
         result = "machine"
     else:
-        result = "offline"
-    _record(home, now, result, key, code=_error(parsed) or ("HTTP_%s" % status if status else "UNREACHABLE"))
+        result = "offline"   # a signed 200 that doesn't verify too (section 11): same grace, its own message
+    signed = status == 200 and isinstance(parsed, dict) and "signature" in parsed
+    code = SIGNATURE if signed else _error(parsed) or ("HTTP_%s" % status if status else "UNREACHABLE")
+    _record(home, now, result, key, code=code)
     return result
+
+
+def heartbeat_body(key, machine, home=None):
+    """{key, machine, version}, plus `milestones` only while the user turned on progress counts
+    (E12.T2, `progress_share`). `version` lets the relay sign an update flag (E12.T5)."""
+    import progress_share
+    import version
+    return dict({"key": key, "machine": machine, "version": version.current()}, **progress_share.heartbeat_fields(home))
+
+
+def update_required(home=None):
+    """E12.T5: the relay's signed "update required" flag: the minimum version when the stored
+    entitlement (signature, key and machine verified on this read) carries `update_required` and
+    this install is older than its `min_version`; else None."""
+    import update_check
+    value = entitlement(home) or {}
+    minimum = value.get("min_version")
+    wanted, installed = update_check.parse_version(minimum), update_check.parse_version(update_check.installed_version())
+    if value.get("update_required") is True and wanted and installed and installed < wanted:
+        return minimum
+    return None
 
 
 def _record(home, now, result, key, code=None, **extra):
@@ -584,8 +614,12 @@ def check_message(result, value):
     if result == "offline" and value.get("certificate"):   # T7
         return ("Still can't verify the license server's secure connection on this computer. Run Report a "
                 "problem so we can see why.")
+    if result == "offline" and value.get("bad_signature"):
+        return BAD_SIGNATURE_TEXT
     if result == "offline":
         return "Still can't reach the license server. Check your internet; Sidedoor tries again every hour."
+    if value["state"] == "expired" and value.get("paused"):   # R3: still paused after [Check again]
+        return PAUSED_CHECK_TEXT
     if result in ("ok", "recent") and value["state"] in ("trial", "active", "payment_retrying"):
         return "License OK: %s." % value["label"]
     return value["text"]
@@ -795,14 +829,15 @@ def view(home=None, now=None):
      (the main way forward: {"label", "href"} or {"label", "post"}; None when nothing is needed),
      "actions" (every way forward, for Settings > License), "support" (a support line or None),
      "trial_days_left", "trial_end", "offline", "hours_left", "valid_until", "last_check" (signed
-     server time of the last good check), "last_attempt", "status" (Stripe's)}. Reads files only;
+     server time of the last good check), "last_attempt", "status" (Stripe's), "paused" (expired
+     because Stripe paused the subscription at the trial's end, E13.T3, or left it unpaid, D2: [Add a card])}. Reads files only;
      never calls the relay."""
     local = _now(now)
     key = setup_steps.license_key(home)
     stored, record = _load(home)
     result = {"state": "no_license", "problem": None, "usable": False, "trial_days_left": None, "trial_end": None,
               "offline": False, "hours_left": None, "valid_until": None, "last_check": None, "last_attempt": None,
-              "status": None}
+              "status": None, "paused": False}
     if not key:
         waiting = setup_steps.keys_waiting(home)
         if waiting:
@@ -861,11 +896,15 @@ def view(home=None, now=None):
     result["hours_left"] = max(0, math.ceil(left / 3600))
     result["offline"] = last_result == "offline"
     result["certificate"] = result["offline"] and record.get("last_error") == CERTIFICATE   # T7
+    result["bad_signature"] = result["offline"] and record.get("last_error") == SIGNATURE
     result["usable"] = value["valid"] is True and left > 0
     if last_result == "machine":
         return _dress(dict(result, state="license_problem", problem="machine"))
     if value["valid"] is not True or (last_result == "invalid" and left <= 0):
-        return _dress(dict(result, state="expired", usable=False))
+        # E13.T3: Stripe paused the subscription at the trial's end (no card yet); a card resumes it.
+        # D2: renewals failed and Stripe left it unpaid; a card (paying the invoice) brings it back.
+        return _dress(dict(result, state="expired", usable=False,
+                           paused=value["valid"] is False and value.get("status") in CARD_STATUSES))
     if last_result == "invalid":
         return _dress(dict(result, state="license_problem", problem="invalid"))
     if left <= 0:
@@ -889,6 +928,29 @@ OPEN_LICENSE = {"label": "Open License", "href": SETTINGS_LICENSE}
 RENEW = {"label": "Renew", "href": setup_steps.WEBSITE_URL, "external": True}
 CLOCK_TEXT = ("License problem: your computer's clock looks wrong. Set your date and time to update automatically, "
               "then click Check again.")
+PAUSED_TEXT = "Your trial ended. Add a card to keep going."
+PAYMENT_TEXT = "Your payment didn't go through. Add a card to keep going."   # D1 past_due, D2 unpaid
+CARD_STATUSES = {"paused", "unpaid"}   # expired, and a card brings the subscription back ("paused" in `view`)
+PAUSED_CHECK_TEXT = "Just added a card? It can take a minute to update."
+
+
+def portal_url():
+    """The Stripe customer portal login the app already uses (`config.json` `billing_portal_url`)."""
+    try:
+        import resources
+        return str(resources.read_json("config.json").get("billing_portal_url") or "").strip() or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def add_card():
+    """E13.T3: [Add a card] opens the customer portal in a new tab (the website if none is configured)."""
+    return {"label": "Add a card", "href": portal_url() or setup_steps.WEBSITE_URL, "external": True}
+
+
+BAD_SIGNATURE_TEXT = "There's a problem with your license. Please email %s." % setup_steps.SUPPORT_EMAIL
+
+
 SUPPORT_LINE = "Paid and still seeing this? Email %s." % setup_steps.SUPPORT_EMAIL
 
 
@@ -923,15 +985,16 @@ def _dress(result):
         label, tone, href, action = "Active", "success", SETTINGS_LICENSE, None
         text = "Active." + offline_note
     elif state == "payment_retrying":
-        label, tone, href, action = "Payment retrying", "warning", SETTINGS_LICENSE, OPEN_LICENSE
-        text = ("Your last payment didn't go through and Stripe is retrying it. Sidedoor keeps working meanwhile; "
-                "update your card with Manage subscription in Settings > License to keep it running." + offline_note)
-        actions = []
+        # D1: Sidedoor keeps working (past_due stays valid); [Add a card] opens the portal.
+        label, tone, href, action = "Payment retrying", "warning", SETTINGS_LICENSE, add_card()
+        text = PAYMENT_TEXT + offline_note
     elif state == "grace":
         label, tone, href, action = "Offline, %s left" % _plural(hours, "hour"), "warning", SETTINGS_LICENSE, CHECK_AGAIN
         if result.get("certificate"):   # T7: not the internet
             text = ("Sidedoor couldn't verify the license server's secure connection on this computer. It keeps "
                     "working for %s more. Run Report a problem so we can see why." % _plural(hours, "hour"))
+        elif result.get("bad_signature"):
+            text = "%s Sidedoor keeps working for %s more." % (BAD_SIGNATURE_TEXT, _plural(hours, "hour"))
         else:
             text = ("Sidedoor couldn't reach the license server. It keeps working for %s more; check your internet."
                     % _plural(hours, "hour"))
@@ -940,9 +1003,16 @@ def _dress(result):
         if result.get("certificate"):   # T7
             text = ("Sidedoor is paused: it couldn't verify the license server's secure connection on this computer "
                     "for 3 days. Run Report a problem so we can see why; Sidedoor resumes on its own once it connects.")
+        elif result.get("bad_signature"):
+            text = "Sidedoor is paused. " + BAD_SIGNATURE_TEXT
         else:
             text = ("Sidedoor could not reach the license server for 3 days. Check your internet; Sidedoor resumes on "
                     "its own once it connects.")
+    elif state == "expired" and result.get("paused"):
+        unpaid = result.get("status") == "unpaid"   # D2
+        label, tone, href, action = ("Payment failed" if unpaid else "Trial ended"), "error", SETTINGS_LICENSE, add_card()
+        text = PAYMENT_TEXT if unpaid else PAUSED_TEXT
+        actions = [action, CHECK_AGAIN]   # after adding the card, check without waiting a day
     elif state == "expired":
         label, tone, href, action = "Expired", "error", SETTINGS_LICENSE, RENEW
         text = "Sidedoor is paused. Renew to continue."
@@ -1004,7 +1074,7 @@ def chip(home=None, now=None):
     return {"label": value["label"], "tone": value["tone"], "href": value["href"]}
 
 
-BANNERS = {"expired", "grace_spent", "license_problem"}
+BANNERS = {"expired", "grace_spent", "license_problem", "payment_retrying"}
 
 
 def banner(value):
@@ -1014,9 +1084,10 @@ def banner(value):
     if value["state"] not in BANNERS:
         return None
     second = None
-    if value["state"] == "expired":
+    if value["state"] == "expired" and not value.get("paused"):
         second = {"label": "Bought a new key? Paste it here", "href": SETTINGS_LICENSE}
     text = "This computer is not activated on your key." if value["problem"] == "machine" else value["text"]
     action = value["action"]
-    return {"tone": "error", "text": text, "action_label": action["label"], "action_href": action.get("href"),
+    tone = "warning" if value["state"] == "payment_retrying" else "error"   # D1: Sidedoor still works
+    return {"tone": tone, "text": text, "action_label": action["label"], "action_href": action.get("href"),
             "action_post": action.get("post"), "external": bool(action.get("external")), "second": second}

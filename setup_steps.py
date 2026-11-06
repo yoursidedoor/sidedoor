@@ -1232,6 +1232,12 @@ def activate_license(key, home=None, relay_url=RELAY_URL, post=None, to_file=Fal
                                             to_file=to_file and credentials.offer_file(_home(home)))
     if outcome == "keychain":   # the relay accepted it but the keychain refused it: nothing stored
         return _refused(home, keychain_refusal(home) or credentials.SAVE_BROKEN)
+    if outcome == "ok" and value.get("valid") is not True and value.get("status") in license_clock.CARD_STATUSES:
+        # R1/E2: the trial ended without a card (paused) or a failed renewal ran out of retries (unpaid):
+        # stored, and shown as "Trial ended" / "Payment failed" with [Check again] (`license_clock.view`),
+        # never as active or invalid. `settle_license_record` replaces it once the license is usable.
+        return record(home, "license", "needs_you", license_clock.PAYMENT_TEXT if value.get("status") == "unpaid"
+                      else license_clock.PAUSED_TEXT)
     if outcome == "ok":
         label = "Trial" if value.get("status") == "trialing" else "Active"
         # No raw UTC time here: Settings > License shows "Good until" in the user's time zone.
@@ -1243,9 +1249,26 @@ def activate_license(key, home=None, relay_url=RELAY_URL, post=None, to_file=Fal
         message = "This key is already used on 2 computers. Email %s to free a computer." % SUPPORT_EMAIL
     elif outcome == "certificate":   # T7: not the internet (license_clock.activate)
         message = CERTIFICATE_FAILED % "the license server's"
+    elif outcome == "signature":     # L10: the relay answered, its signature didn't verify
+        message = license_clock.BAD_SIGNATURE_TEXT
     else:
         message = "Could not reach the license server. Check your internet and try again."
     return record(home, "license", "failed", message)
+
+
+def settle_license_record(home=None):
+    """F1: the license step's "Trial ended" / "Payment failed" record (needs_you, written only by an
+    activation of a key waiting for a card) is replaced by the normal done line once the license is
+    usable again, so no add-a-card text stays on Setup or Settings after the card went through."""
+    saved = load_state(home)["steps"].get("license") or {}
+    if saved.get("status") != "needs_you":
+        return None
+    import license_clock
+    view = license_clock.view(home)
+    if not view["usable"]:
+        return None
+    label = "Trial" if view.get("state") == "trial" else "Active"
+    return record(home, "license", "done", "Active: %s." % label)
 
 
 def license_done(home=None, now=None):

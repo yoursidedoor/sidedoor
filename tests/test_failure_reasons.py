@@ -5,6 +5,7 @@ start running code"). Headlines and next steps are unchanged; Report a problem s
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
 import contextlib
+import datetime as dt
 import io
 import json
 import logging
@@ -221,8 +222,12 @@ class Reasons(pages.GatherBase):
         self.assertTrue(summary["raised_at"].startswith("test_failure_reasons.py:"))
 
     def test_report_a_problem_still_sends_codes_only(self):
-        task(self.database, "t3", "message_writer", "RETRY_WAIT", at(9, 5), "SUBSCRIPTION_EXECUTOR_FAILED", next_at=at(11),
-             events=[("RETRY_WAIT", detail("SUBSCRIPTION_EXECUTOR_FAILED", error="secret detail text"), at(9))])
+        # Dated from now: the Failures page shows only the last RECENT_DAYS, so a fixed date expires (K1).
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        task(self.database, "t3", "message_writer", "RETRY_WAIT", now - dt.timedelta(hours=2), "SUBSCRIPTION_EXECUTOR_FAILED",
+             next_at=now + dt.timedelta(hours=1),
+             events=[("RETRY_WAIT", detail("SUBSCRIPTION_EXECUTOR_FAILED", error="secret detail text"),
+                      now - dt.timedelta(hours=2, minutes=5))])
         self.database.commit()
         codes = report_problem.failure_codes(self.database, pages.CONFIG, pages.NOT_RUNNING)
         self.assertEqual(codes, ["RETRY:message_writer"])

@@ -67,7 +67,7 @@
         {% else %}<p class="muted">No messages on record yet.</p>{% endif %}
         {% for r in c.refused %}
         <div class="net-refused">
-          <p><strong>Couldn't send:</strong> {{ r.kind }}. {{ r.reasons|join(" ") }} <a href="/approvals#refused">See it on Approvals</a></p>
+          <p><strong>Not sent yet:</strong> {{ r.kind }}. {{ r.reasons|join(" ") }} <a href="/approvals#refused">See it on Approvals</a></p>
           {% if r.text %}<p class="net-text">{{ r.text }}</p>{% endif %}
         </div>
         {% endfor %}

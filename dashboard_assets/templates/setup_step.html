@@ -139,9 +139,14 @@
   <p class="muted">You can change this any time in Settings.</p>
 
   {% elif step.key == "license" %}
-  <p class="why">Paste the license key you got after buying.</p>
+  {% if not step.license_paused %}<p class="why">Paste the license key you got after buying.</p>{% endif %}
   {% if step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_notice }}</p>{% endif %}
   {% if step.keychain_wait and step.keychain_wait != step.keychain_notice %}<p class="note note-warning" role="status">{{ step.keychain_wait }}</p>{% endif %}
+  {% if step.license_paused %}
+  {# R1: the key is real but the trial ended without a card (Stripe paused it). No [Add a card] here
+     (owner, 2026-11-06): Settings, the Overview paywall and the banner keep theirs. #}
+  {% with check_next="/setup", check_label="Check again", check_action="/license/check?paywall=1" %}{% include "license_check.html" %}{% endwith %}
+  {% endif %}
   {% if not step.keychain_wait or step.offer_file %}
   <form method="post" action="/setup/license" hx-post="/setup/license" hx-target="#step-{{ step.number }}" hx-swap="outerHTML" hx-disabled-elt="find button">
     <label for="license-key">License key</label>
@@ -150,8 +155,10 @@
     {% if step.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
     <span class="htmx-indicator muted">Checking...</span>
   </form>
+  {% if not step.license_paused %}{# R11: not while the trial ended: the key is bought already #}
   <p>No key yet? <a class="button button-highlight" id="buy-license" href="{{ step.website }}" target="_blank" rel="noopener noreferrer">Buy a license</a></p>
   <span hx-get="/setup/guide/license" hx-trigger="click from:#buy-license" hx-target="#guide-panel"></span>
+  {% endif %}
   {% endif %}
   <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
 

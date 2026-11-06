@@ -1,5 +1,6 @@
 {# [Check again] (E8.T2): one heartbeat; htmx shows the result in place, the button is disabled while it runs. #}
-<form method="post" action="/license/check" hx-post="/license/check" hx-target="find .license-check-result" hx-swap="innerHTML" hx-disabled-elt="find button" class="license-check">
+{# `check_action`/`check_target`/`check_swap`: Settings > License posts to its own route and swaps the whole section (E13 P1). #}
+<form method="post" action="{{ check_action or '/license/check' }}" hx-post="{{ check_action or '/license/check' }}" hx-target="{{ check_target or 'find .license-check-result' }}" hx-swap="{{ check_swap or 'innerHTML' }}" hx-disabled-elt="find button" class="license-check">
   <input type="hidden" name="next" value="{{ check_next or '/' }}">
   <button class="button" type="submit">{{ check_label or 'Check again' }}</button>
   <span class="htmx-indicator muted">Checking…</span>

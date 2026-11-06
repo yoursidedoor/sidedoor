@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidedoor"
-version = "0.4.0"
+version = "0.4.1"
 description = "Referral-first job-search agent for engineers that runs on your machine."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -151,7 +151,7 @@ py-modules = [
     "pipeline_routing",
     "portable",
     "posting_judge",
-    "provider_limits",
+    "progress_share", "provider_limits",
     "provider_pacing",
     "reconciliation",
     "referrals",

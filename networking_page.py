@@ -110,6 +110,7 @@ STATUS = {"closed": ("Closed", "muted"), "opted_out": ("Opted out", "muted"), "r
           "invite_sent": ("Invitation sent", "info"),
           "queued": ("Invitation queued", "muted"),
           "uncertain": ("Couldn't confirm it went out", "warning"), "failed": ("Couldn't send", "error"),
+          "not_sent_yet": ("Not sent yet", "info"),   # approved, then held (Approvals' "Not sent yet" cards)
           "none": ("Nothing sent yet", "muted")}
 REFERRAL_WORDS = {"AGREED": ("Referral agreed", "success"), "DECLINED": ("Referral declined", "muted")}
 PURPOSE_WORDS = {"INVITE": "Invitation note", "INITIAL": "Message", "FIRST_MESSAGE": "First message",
@@ -471,8 +472,10 @@ class Contact:
                 self._status = "queued"
             elif self.uncertain:
                 self._status = "uncertain"
-            elif self.failed or self.refused:
+            elif self.failed:
                 self._status = "failed"
+            elif self.refused:
+                self._status = "not_sent_yet"
             else:
                 self._status = "none"
         return self._status
@@ -870,8 +873,7 @@ def entry(reader, contact, notes, refused, now=None, zone=None, queued=None):
         found["sequence"] = None
     found["refused"] = [{"kind": _word(pages.PURPOSE_WORDS, item["purpose"], "Message"),
                          "text": item["message"] if isinstance(item["message"], str) else None,
-                         "reasons": list(dict.fromkeys(pages.GATE_WORDS.get(gate, pages.GENERIC_GATE)
-                                                       for gate in item["gates"])) or [pages.GENERIC_GATE]}
+                         "reasons": pages.refused_reasons(reader.database, item)}
                         for identity, item in refused.values() if identity in contact.ids]
     return found
 

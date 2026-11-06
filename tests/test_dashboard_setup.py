@@ -233,7 +233,7 @@ class SetupPageTest(unittest.TestCase):
         step7 = page[page.index('id="step-7"'):page.index('id="step-8"')]   # locked until the license (step 1)
         self.assertIn("sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.", step7)
         guide = self.client.get("/setup/guide/license", headers={"hx-request": "true"}).text
-        self.assertIn("CLAIM_NOT_FOUND", guide)
+        self.assertIn("your key isn't ready yet", guide)
         now = license_fixtures.dt.datetime.now(license_fixtures.dt.timezone.utc)
         answer = license_fixtures.signed("SD-SECRETKEY", setup_steps.machine_id(self.home), now, status="trialing")
         with mock.patch.object(setup_steps, "_post_json", return_value=(200, json.dumps(answer).encode())) as post:

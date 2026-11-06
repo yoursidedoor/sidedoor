@@ -196,6 +196,7 @@
   {% set l = x.license %}
   {# One status line (owner, 2026-10-24): the chip, then only what its label does not already say. #}
   <p class="license-status">Status: <span class="chip chip-{{ x.chip.tone }}">{{ x.chip.label }}</span>{% if x.status_detail and x.has_key and not x.keychain_wait %} <span class="{{ 'license-status-' ~ x.view.tone }}">{{ x.status_detail }}</span>{% endif %}</p>
+  {% if x.check_message %}<p class="note note-info" role="status">{{ x.check_message }}</p>{% endif %}
   {% if x.keys_removed %}<p class="note note-warning" role="status">{{ x.keys_removed }}</p>{% endif %}
   {% if x.keychain_notice %}<p class="note note-warning" role="status">{{ x.keychain_notice }}</p>{% endif %}
   {% if x.keychain_wait %}
@@ -211,10 +212,10 @@
   {% if x.has_key %}
   {% for action in x.view.actions %}
   {% if action.post %}
-  {% with check_next="/settings", check_label=action.label %}{% include "license_check.html" %}{% endwith %}
+  {% with check_next="/settings", check_label=action.label, check_action="/settings/license/check", check_target="#license", check_swap="outerHTML" %}{% include "license_check.html" %}{% endwith %}
   {% elif action.external %}
   <p><a class="button button-highlight" id="renew-license" href="{{ action.href }}" target="_blank" rel="noopener noreferrer">{{ action.label }}</a></p>
-  <span hx-get="/setup/guide/license" hx-trigger="click from:#renew-license" hx-target="#guide-panel"></span>
+  {% if action.label != "Add a card" %}<span hx-get="/setup/guide/license" hx-trigger="click from:#renew-license" hx-target="#guide-panel"></span>{% endif %}
   {% endif %}
   {% endfor %}
   {% if x.view.support %}<p class="muted">{{ x.view.support }}</p>{% endif %}
@@ -228,7 +229,7 @@
   </dl>
   {% endif %}
   {# A successful check's saved line ("Active: Trial.") repeats the status above; only a refusal is shown. #}
-  {% if l.message and l.status != 'done' %}<p class="note note-error" role="status">{{ l.message }}</p>{% endif %}
+  {% if l.message and l.status != 'done' and not (x.view.paused and l.status == 'needs_you') %}<p class="note note-error" role="status">{{ l.message }}</p>{% endif %}
   {% if x.offer_activate %}
   <form method="post" action="/settings/license/activate" hx-post="/settings/license/activate" hx-target="#license" hx-swap="outerHTML" hx-disabled-elt="find button">
     <button class="button" type="submit">Activate</button> <span class="htmx-indicator muted">Checking...</span>
@@ -256,6 +257,10 @@
   {% else %}
   <p class="muted">{{ x.no_portal }} {{ x.support }}.</p>
   {% endif %}
+  <form method="post" action="/settings/progress" hx-post="/settings/progress" hx-trigger="change" hx-target="#license" hx-swap="outerHTML">
+    <label class="choice"><input type="checkbox" name="enabled" id="s-share-progress"{% if x.share_progress %} checked{% endif %}> <span>{{ x.share_progress_label }}</span></label>
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
   <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
 
 {% elif x.name == "login" %}

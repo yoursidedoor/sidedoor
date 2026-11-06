@@ -618,8 +618,16 @@ the license pause after every step (E8.T3, `sync_license_pause`). Returns
     the heartbeat; a second call in the same process returns the one already running. `root` is
     kept for the hook's signature: the heartbeat's files live in the Sidedoor home."""
     import license_clock
-    return license_clock.start(home=home, relay_url=relay_url, post=post,
-                               after_tick=lambda: sync_license_pause(root, home))
+
+    def after_tick():
+        sync_license_pause(root, home)
+        try:   # H1: a card added without [Check again]: the daily check clears the trial-ended note too
+            import setup_steps
+            setup_steps.settle_license_record(home)
+        except Exception:
+            pass
+
+    return license_clock.start(home=home, relay_url=relay_url, post=post, after_tick=after_tick)
 
 
 def stop_license_heartbeat():

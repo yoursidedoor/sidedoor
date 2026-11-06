@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import re
 import secrets
 import urllib.error
 
@@ -757,6 +758,31 @@ def resume_read(database, action_id, phase, now=None):
     return changed.rowcount == 1
 
 
+# 2026-11-06: before `_read_error` knew unipile_port.UnipileHTTPError, a provider 5xx/429 on an
+# inspection read was saved as INVALID_PROOF, which never retries (8 approved invitations held by a
+# 3-second Unipile 502). This reopens exactly those reads, once, the way resume_read does. Only
+# INSPECTION reads of an unclaimed PENDING/BLOCKED action: an inspection only observes before a
+# send, the cycle re-inspects a BLOCKED action whose read is READY, and the claim (immutable, one
+# per action) still stands between that read and any send. Idempotent: a reopened row has no
+# last_error, so it never matches again; a 400 or a malformed proof is never matched.
+_TRANSIENT_READ_ERROR = re.compile(r"^(?:UnipileHTTPError: )?HTTP_(\d{3})(?::|$)")
+
+
+def reopen_transient_http_reads(database, now=None):
+    """Reopen INSPECTION reads stuck at INVALID_PROOF by a transient HTTP status. Returns the action ids."""
+    reopened = []
+    rows = database.execute("""SELECT reads.action_id,reads.last_error FROM outreach_read_retries AS reads
+        JOIN outreach_actions AS actions ON actions.action_id=reads.action_id
+        WHERE reads.phase='INSPECTION' AND reads.state='INVALID_PROOF'
+        AND actions.state IN ('PENDING','BLOCKED') AND actions.claimed_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM outreach_action_claims AS claims WHERE claims.action_id=reads.action_id)""").fetchall()
+    for action_id, last_error in rows:
+        found = _TRANSIENT_READ_ERROR.match(last_error or "")
+        if found and _transient_status(int(found.group(1))) and resume_read(database, action_id, "INSPECTION", now):
+            reopened.append(action_id)
+    return reopened
+
+
 # Owner, 2026-09-21: "there should be no exhaustion on reads. Only next date, until it is
 # reconciled." A read that only OBSERVES costs one read; giving up permanently costs the
 # OUTCOME, forever. One contact's connection request was sent and finished on LinkedIn, but
@@ -857,6 +883,11 @@ def _setup_hold_codes():
                                  unipile_port.LinkedInNotConnected, unipile_port.SenderNotConfigured)}
 
 
+def _transient_status(status):
+    """408, 425, 429 and every 5xx: the provider could not answer now, not a malformed proof."""
+    return type(status) is int and (status in {408, 425, 429} or 500 <= status <= 599)
+
+
 def _read_error(error):
     if isinstance(error, TimeoutError) and getattr(error, "code", None) == "OUTREACH_AI_SHARED_BUDGET_EXHAUSTED":
         return "RETRY_WAIT", "OUTREACH_AI_SHARED_BUDGET_EXHAUSTED"
@@ -868,8 +899,14 @@ def _read_error(error):
     if isinstance(error, NotImplementedError):
         return "ADAPTER_UNAVAILABLE", "UNSUPPORTED_READ_ADAPTER"
     if isinstance(error, urllib.error.HTTPError):
-        transient = error.code in {408, 425, 429} or 500 <= error.code <= 599
-        return ("RETRY_WAIT" if transient else "INVALID_PROOF"), "HTTP_" + str(error.code)
+        return ("RETRY_WAIT" if _transient_status(error.code) else "INVALID_PROOF"), "HTTP_" + str(error.code)
+    if isinstance(error, unipile_port.UnipileHTTPError):
+        # The Unipile port raises its own error for a refused read, not an HTTPError, so a 502 from a
+        # 3-second outage (2026-11-06) fell through to INVALID_PROOF and held 8 approved invitations
+        # for good. The same status rule as HTTPError; the recorded detail is kept as before.
+        detail = str(error).strip()
+        return (("RETRY_WAIT" if _transient_status(error.status) else "INVALID_PROOF"),
+                type(error).__name__ + (": " + detail[:300] if detail else ""))
     if isinstance(error, (TimeoutError, ConnectionError, urllib.error.URLError)):
         return "RETRY_WAIT", type(error).__name__
     if isinstance(error, ValueError) and str(error) in INPUT_BOUND_READ_ERRORS:
@@ -2025,6 +2062,9 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
     released = approvals.release_unreadable_holds(database)
     if closed or released:
         result["approvals"] = {"closed": closed, "released": released}
+    reopened = reopen_transient_http_reads(database, now)
+    if reopened:
+        result["reopened_reads"] = reopened
     limit = config.get("outreach_max_items_per_cycle", 60)
     if type(limit) is not int or not 1 <= limit <= 60:
         limit = 60

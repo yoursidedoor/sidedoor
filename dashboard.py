@@ -160,6 +160,10 @@ def sync_license_pause(root=None, home=None):
         scheduler_loop.sync_license_pause(root, home)
     except Exception:
         pass
+    try:   # F1: a card brought it back: the trial-ended / payment record gives way to the done line
+        setup_steps.settle_license_record(home)
+    except Exception:
+        pass
 
 
 def set_user_pause(root, on, reason):
@@ -515,10 +519,21 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         if request.headers.get("hx-request") == "true":
             context = layout("overview", "Overview")
             view = license_clock.view(home)
+            if request.query_params.get("paywall") and view["state"] != "expired":
+                # E13 P1: [Check again] on the paywall (or Setup's paused license step) lifted it: the
+                # page loads again in full.
+                response = HTMLResponse("")
+                back = form.get("next")
+                response.headers["HX-Redirect"] = back if isinstance(back, str) and back in pages else "/"
+                return response
             message = license_clock.check_message(result, view)
             return HTMLResponse('<span class="license-check-message" role="status">%s</span>' % html.escape(message)
                                 + templates.get_template("chips.html").render(mode=context["mode"],
-                                                                              license=context["license"], oob=True))
+                                                                              license=context["license"], oob=True)
+                                # E13 P1: a license banner the check lifted goes at once; one still
+                                # showing stays, so the message beside its button stays readable.
+                                + (templates.get_template("banners.html").render(banners=context["banners"], oob=True)
+                                   if license_clock.banner(view) is None else ""))
         back = form.get("next") if isinstance(form.get("next"), str) else "/"
         return RedirectResponse(back if back in pages else "/", status_code=303)
 
@@ -596,6 +611,10 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             status = "done" if progress["done"][number] else ("failed" if status == "failed" else "not_started")
             import license_clock  # LA4: a saved message with a raw UTC time shows it in local time
             message = license_clock.local_message(saved, config).get("message")
+            license_view = license_clock.view(home)
+            if license_view["paused"]:   # R1: the trial ended (Stripe paused it): [Add a card], [Check again]
+                status, message = "needs_you", license_view["text"]
+                extra = dict(extra or {}, license_paused=license_view)
         elif number == 6 and status == "done" and not progress["done"][6]:
             status, message = "failed", "%s is not installed." % setup_steps.ENGINE_LABELS[engine]
         elif number == 8:
@@ -611,6 +630,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                          login_supported=login["supported"], login_retry=login.get("retry"),
                          login_retry_label=login.get("retry_label"))
         label, tone = STATUS.get(status, STATUS["not_started"])
+        if (extra or {}).get("license_paused"):
+            label, tone = extra["license_paused"]["label"], extra["license_paused"]["tone"]
         locked = progress["locked"].get(number)
         if locked:
             label, tone = "Needs step %d first" % locked, "muted"

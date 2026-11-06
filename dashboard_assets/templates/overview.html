@@ -56,10 +56,13 @@
   <section class="card paywall" aria-labelledby="paywall-title">
     <h2 id="paywall-title">Sidedoor is paused</h2>
     <p>{{ paywall.text }}</p>
-    <p class="muted">Sent, Applications and logs stay readable. Renewing is a new checkout that issues a new key.</p>
+    <p class="muted">Networking &amp; Referrals, Applications, and Failures and logs stay readable.{% if not paywall.paused %} Renewing is a new checkout that issues a new key.{% endif %}</p>
     <p><a class="button button-highlight" id="paywall-renew" href="{{ paywall.action.href }}" target="_blank" rel="noopener noreferrer">{{ paywall.action.label }}</a></p>
-    <span hx-get="/setup/guide/license" hx-trigger="click from:#paywall-renew" hx-target="#guide-panel"></span>
-    {% if paywall_pause and paywall_pause.user_paused_since %}
+    {% if not paywall.paused %}<span hx-get="/setup/guide/license" hx-trigger="click from:#paywall-renew" hx-target="#guide-panel"></span>{% endif %}
+    {% if paywall.paused %}
+    {# E13.T3: trial ended (Stripe paused it): no [Pause]; [Check again] after adding the card reloads Overview. #}
+    {% with check_next="/", check_label="Check again", check_action="/license/check?paywall=1" %}{% include "license_check.html" %}{% endwith %}
+    {% elif paywall_pause and paywall_pause.user_paused_since %}
     <p class="muted paywall-paused">Paused by you since {{ paywall_pause.user_paused_since }}.</p>
     {% else %}
     {{ start_button("card", "/pause", "Pause") }}
@@ -145,7 +148,7 @@
     {% set rows = (("questions", "question to answer", "questions to answer", "/approvals#questions", "Answer"),
                    ("messages", "message to approve", "messages to approve", "/approvals#messages", "Review"),
                    ("applications_held", "application to approve", "applications to approve", "/approvals#applications", "Review"),
-                   ("couldnt_send", "message couldn't send", "messages couldn't send", "/approvals#refused", "Review"),
+                   ("couldnt_send", "message not sent yet", "messages not sent yet", "/approvals#refused", "Review"),
                    ("notes", "note for you", "notes for you", "/approvals#notes", "Read"),
                    ("applications", "application blocked on you", "applications blocked on you", "/applications?show=needs_you", "Open")) %}
     <ul class="overview-needs-list">
