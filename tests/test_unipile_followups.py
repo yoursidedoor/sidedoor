@@ -180,15 +180,40 @@ class StartChat(Base):
         self.assertEqual(len(self.ours()), 1)
         self.assertEqual(len(self.kinds("followup_sent")), 1)
 
-    def test_uncertain_send_that_did_not_land_is_never_resent(self):
+    # Check before resend (owner, 2026-11-06). A start_chat that timed out names no chat, so absence
+    # cannot be read in it (owner pick, review Q1 a): never resent; after 3 checks it ends for good.
+    def test_start_chat_with_no_known_chat_is_never_resent_and_ends_after_three_checks(self):
         self.port.fail("start_chat", "timeout")
         self.first_followup()
         self.assertEqual(self.state(1), "UNCERTAIN_NO_RETRY")
-        self.settle()
-        self.settle()
-        self.assertEqual(self.state(1), "UNCERTAIN_NO_RETRY")
+        for unused in range(8):
+            self.now += dt.timedelta(hours=5)
+            self.run_cycle()
         self.assertEqual(self.port.calls.count("start_chat"), 1)
-        self.assertEqual(self.kinds("followup_sent"), [])
+        self.assertEqual(self.state(1), "UNCERTAIN_NO_RETRY")
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE slot='FOLLOWUP:1'").fetchone()[0])
+        self.assertEqual(result["check_final"]["checks"], 3)
+        self.assertFalse(outreach.checking_before_resend({"purpose": "FOLLOWUP"}, "UNCERTAIN_NO_RETRY", result))
+        read = self.db.execute("SELECT state FROM outreach_read_retries WHERE phase='RECONCILIATION'").fetchone()[0]
+        self.assertEqual(read, "COMPLETE")   # final: never read or sent again
+
+    def test_absence_is_not_read_before_linkedin_had_time_to_catch_up(self):
+        self.port.fail("start_chat", "timeout")
+        self.first_followup()
+        self.now += dt.timedelta(minutes=5)
+        self.run_cycle()
+        self.assertEqual(self.port.calls.count("start_chat"), 1)
+        self.assertEqual(self.state(1), "UNCERTAIN_NO_RETRY")
+
+    def test_a_message_of_ours_with_other_text_since_the_request_counts_as_sent(self):
+        self.port.fail("start_chat", "timeout")
+        self.first_followup()
+        self.port.add_chat(self.person, [(True, "A message the owner wrote by hand.")])
+        for unused in range(3):
+            self.now += dt.timedelta(hours=5)
+            self.run_cycle()
+        self.assertEqual(self.port.calls.count("start_chat"), 1)
+        self.assertEqual(self.state(1), "CONFIRMED_SENT")
 
     def test_unreadable_chats_wait_without_sending(self):
         self.now = engagement.business_days_after(INVITED, 3)
@@ -232,6 +257,121 @@ class ExistingChat(Base):
         self.assertNotIn("start_chat", self.port.calls)
         self.assertEqual(len(self.ours()), 3)
 
+    # Check before resend (owner, 2026-11-06) for a follow-up sent into a known chat (send_message).
+    def unclear_first(self, times=1):
+        self.now = engagement.business_days_after(INVITED, 3)
+        self.accept_with_note_in_chat()
+        self.port.fail("send_message", "timeout", times=times)
+        self.run_cycle()
+        self.assertEqual(self.state(1), "UNCERTAIN_NO_RETRY")
+
+    def test_not_landed_is_checked_then_sent_once_more(self):
+        self.unclear_first()
+        self.settle()
+        self.assertEqual(self.port.calls.count("send_message"), 2)
+        self.assertEqual(self.state(1), "ACKNOWLEDGED_UNCONFIRMED")
+        self.settle()
+        self.assertEqual(self.state(1), "CONFIRMED_SENT")
+        self.assertEqual(self.port.calls.count("send_message"), 2)
+        self.assertEqual(len(self.ours()), 2)   # the invitation note and one follow-up
+        self.assertEqual(len(self.kinds("followup_sent")), 1)
+
+    def test_landed_is_found_and_never_sent_twice(self):
+        self.now = engagement.business_days_after(INVITED, 3)
+        self.accept_with_note_in_chat()
+        self.port.fail("send_message", "timeout_after_write")
+        self.run_cycle()
+        for unused in range(3):
+            self.settle()
+        self.assertEqual(self.state(1), "CONFIRMED_SENT")
+        self.assertEqual(self.port.calls.count("send_message"), 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM outreach_action_claims WHERE action_id=("
+                                         "SELECT action_id FROM outreach_actions WHERE slot='FOLLOWUP:1')").fetchone()[0], 1)
+
+    def test_a_failed_check_sends_nothing_and_is_read_again_later(self):
+        self.unclear_first()
+        self.port.fail("chats", "timeout")
+        self.settle()
+        self.assertEqual(self.port.calls.count("send_message"), 1)
+        self.settle()   # the next read, 15 minutes on (the claim's proof is still fresh)
+        self.assertEqual(self.port.calls.count("send_message"), 2)
+
+    def test_an_incomplete_listing_never_shows_absence_and_is_read_again(self):
+        self.unclear_first()
+        self.port.fail("chats", "incomplete_page")
+        self.settle()
+        self.assertEqual(self.port.calls.count("send_message"), 1)
+        read = self.db.execute("SELECT state FROM outreach_read_retries WHERE phase='RECONCILIATION'").fetchone()[0]
+        self.assertEqual(read, "RETRY_WAIT")   # read again later, not held for good
+        self.settle()   # the next read, 15 minutes on (the claim's proof is still fresh)
+        self.assertEqual(self.port.calls.count("send_message"), 2)
+
+    def test_attempt_three_is_sent_after_a_complete_absence_read_past_75_minutes(self):
+        # Review N1: the resend's history is its own fresh complete read, not the claim's (1 hour old).
+        claimed = self.now = engagement.business_days_after(INVITED, 3)
+        self.accept_with_note_in_chat()
+        self.port.fail("send_message", "timeout", times=2)
+        self.run_cycle()
+        for unused in range(6):
+            self.settle()
+        self.assertEqual(self.port.calls.count("send_message"), 3)
+        third = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE slot='FOLLOWUP:1'").fetchone()[0])
+        self.assertGreater(engagement.timestamp(third["message_retries"][-1]["started_at"]) - claimed, dt.timedelta(minutes=75))
+        self.now += dt.timedelta(hours=5)   # the next read on the read backoff
+        self.run_cycle()
+        self.assertEqual(self.state(1), "CONFIRMED_SENT")
+        self.assertEqual(len(self.kinds("followup_sent")), 1)
+
+    def test_never_written_row_delayed_past_75_minutes_is_sent_on_its_own_fresh_read(self):
+        # Review F1: a row whose request was never written is sent later with its own complete chats read
+        # as the history, so the delay never makes it stale.
+        self.unclear_first()
+        row = self.db.execute("SELECT action_id,result FROM outreach_actions WHERE slot='FOLLOWUP:1'").fetchone()
+        result = json.loads(row["result"])
+        result.pop("provider_request")
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET result=? WHERE action_id=?", (json.dumps(result), row["action_id"]))
+        self.now += dt.timedelta(minutes=90)
+        self.run_cycle()
+        self.assertEqual(self.port.calls.count("send_message"), 2)
+        self.assertEqual(self.state(1), "ACKNOWLEDGED_UNCONFIRMED")
+
+    def test_never_written_followup_after_the_owner_wrote_by_hand_is_not_sent(self):
+        # Review L1, follow-up: the same rule on the fresh_history path.
+        self.unclear_first()
+        row = self.db.execute("SELECT action_id,result FROM outreach_actions WHERE slot='FOLLOWUP:1'").fetchone()
+        result = json.loads(row["result"])
+        result.pop("provider_request")
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET result=? WHERE action_id=?", (json.dumps(result), row["action_id"]))
+        self.now += dt.timedelta(minutes=30)
+        next(iter(self.port.chat_log.values()))["messages"].append(
+            {"is_sender": True, "text": "Hi, writing myself.", "sent_at": self.now.isoformat()})
+        self.now += dt.timedelta(minutes=60)
+        self.run_cycle()
+        self.assertEqual(self.port.calls.count("send_message"), 1)
+        self.assertEqual(self.state(1), "CANCELLED_BEFORE_SEND")
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE slot='FOLLOWUP:1'").fetchone()[0])
+        self.assertIn("VERIFIED_MESSAGE_ALREADY_SENT", result["provider_guard"]["gates"])
+        self.assertIs(result["check_before_resend_cancelled"], True)
+
+    def test_contact_replied_during_the_wait_ends_it_cancelled(self):
+        self.unclear_first()
+        chat = next(iter(self.port.chat_log))
+        self.port.chat_log[chat]["messages"].append({"is_sender": False, "text": "Thanks, not now.", "sent_at": self.now.isoformat()})
+        self.settle()
+        self.assertEqual(self.port.calls.count("send_message"), 1)
+        self.assertEqual(self.state(1), "CANCELLED_BEFORE_SEND")
+
+    def test_three_attempts_then_it_stops(self):
+        self.unclear_first(times=3)
+        for unused in range(8):
+            self.now += dt.timedelta(hours=5)
+            self.run_cycle()
+        self.assertEqual(self.port.calls.count("send_message"), 3)
+        self.assertEqual(self.state(1), "CONFIRMED_NOT_SENT")
+        self.assertEqual(self.kinds("followup_sent"), [])
+
     def test_unrecorded_message_of_ours_holds_the_followup(self):
         self.now = engagement.business_days_after(INVITED, 3)
         self.accept_with_note_in_chat()
@@ -269,7 +409,11 @@ class AfterPortInitial(Base):
                                    "identity_source": "https://example.test/person", "team_source": "https://example.test/team"}}
         outreach.enqueue_action(self.db, action)
         self.db.commit()
-        adapter = outreach_agent.Adapter(ROOT, self.db, self.config, client, judge, port=self.port)
+        self.initial_adapter = adapter = outreach_agent.Adapter(ROOT, self.db, self.config, client, judge, port=self.port)
+        self.initial_cycles()
+
+    def initial_cycles(self):
+        adapter = self.initial_adapter
         for unused in range(2):
             outreach.cycle(self.db, self.config, adapter, self.now, purpose="INITIAL")
             self.now += dt.timedelta(minutes=20)
@@ -285,6 +429,283 @@ class AfterPortInitial(Base):
         self.assertEqual((self.port.calls.count("send_message"), self.port.calls.count("start_chat")), (2, 0))
         self.assertEqual(len(self.port.chat_log[self.chat]["messages"]), 2)
         self.heyreach.call.assert_not_called()
+
+
+class UnclearPortInitial(AfterPortInitial):
+    """Check before resend for a direct message into an existing chat (INITIAL, send_message over
+    outreach_agent): the same read-first rule as the follow-up."""
+
+    def invite(self):
+        self.port.fail("send_message", "timeout")
+        super().invite()
+
+    def initial_cycles(self):
+        outreach.cycle(self.db, self.config, self.initial_adapter, self.now, purpose="INITIAL")
+        self.assertEqual(self.initial_state(), "UNCERTAIN_NO_RETRY")
+
+    def initial_state(self):
+        return self.db.execute("SELECT state FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0]
+
+    def test_followup_one_goes_into_the_chat_over_the_port(self):
+        pass   # covered by AfterPortInitial
+
+    def drive(self, minutes):
+        self.now += dt.timedelta(minutes=minutes)
+        return outreach.cycle(self.db, self.config, self.initial_adapter, self.now, purpose="INITIAL")
+
+    def test_not_shown_after_the_wait_is_sent_once_more_then_confirmed(self):
+        self.assertEqual(self.port.calls.count("send_message"), 1)
+        self.assertEqual(self.port.chat_log[self.chat]["messages"], [])
+        self.drive(60)
+        self.assertEqual(self.port.calls.count("send_message"), 2)
+        self.drive(60)
+        self.assertEqual(self.initial_state(), "CONFIRMED_SENT")
+        self.assertEqual(len(self.port.chat_log[self.chat]["messages"]), 1)
+        self.assertEqual(self.port.calls.count("send_message"), 2)
+
+    def test_landed_send_is_found_and_never_sent_twice(self):
+        # The first attempt reached LinkedIn after all (the chat shows it): confirmed by the read alone.
+        self.port.chat_log[self.chat]["messages"].append(
+            {"is_sender": True, "text": "Hi, I would like to talk about your platform work.", "sent_at": self.now.isoformat()})
+        self.drive(60)
+        self.drive(60)
+        self.assertEqual(self.initial_state(), "CONFIRMED_SENT")
+        self.assertEqual(self.port.calls.count("send_message"), 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM outreach_action_claims WHERE action_id='initial-1'").fetchone()[0], 1)
+
+
+    TEXT = "Hi, I would like to talk about your platform work."
+
+    def writes(self):
+        return self.port.calls.count("send_message")
+
+    def guard(self):
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        return result["provider_guard"]["gates"]
+
+    def chat_messages(self):
+        return self.port.chat_log[self.chat]["messages"]
+
+    def test_contact_wrote_a_neutral_message_and_ours_is_absent_resent_once(self):
+        self.chat_messages().append({"is_sender": False, "text": "Hello there.", "sent_at": self.now.isoformat()})
+        self.drive(20)
+        self.assertEqual(self.writes(), 2)
+        self.drive(20)
+        self.assertEqual(self.initial_state(), "CONFIRMED_SENT")
+        self.assertEqual([item["text"] for item in self.chat_messages() if item["is_sender"]], [self.TEXT])
+
+    def test_contact_replied_during_the_wait_is_cancelled_not_stuck(self):
+        self.chat_messages().append({"is_sender": False, "text": "Please stop.", "sent_at": self.now.isoformat()})
+        engagement.record_event(self.db, engagement.unipile_message_event(
+            self.chat, {"sender": "CORRESPONDENT", "body": "Please stop.", "createdAt": self.now.isoformat()},
+            PROFILE, self.config["sender_id"], OWNER, self.now.isoformat()))
+        self.drive(20)
+        self.assertEqual(self.initial_state(), "CANCELLED_BEFORE_SEND")
+        self.assertEqual(self.writes(), 1)
+        self.assertIn("REPLY_REQUIRES_CONTEXT", self.guard())
+
+    def test_two_copies_shown_count_as_sent(self):
+        for unused in range(2):
+            self.chat_messages().append({"is_sender": True, "text": self.TEXT, "sent_at": self.now.isoformat()})
+        self.drive(20)
+        self.drive(20)
+        self.assertEqual(self.initial_state(), "CONFIRMED_SENT")
+        self.assertEqual(self.writes(), 1)
+
+    def test_no_saved_request_is_sent_once_through_the_first_send(self):
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        result.pop("provider_request")   # nothing was written: the request is saved before the one write
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET result=? WHERE action_id='initial-1'", (json.dumps(result),))
+        with patch("outreach_agent.port_send_gates", wraps=outreach_agent.port_send_gates) as gates:
+            self.drive(20)
+        gates.assert_called_once()
+        self.assertEqual(self.writes(), 2)
+        self.assertEqual(self.initial_state(), "ACKNOWLEDGED_UNCONFIRMED")
+        self.drive(20)
+        self.assertEqual(self.initial_state(), "CONFIRMED_SENT")
+        self.assertEqual(self.writes(), 2)
+
+    def test_never_written_row_waits_out_an_outage_then_is_sent_once(self):
+        # Review F1: the fresh history read fails during the outage -> nothing sent, read again; after
+        # it, more than 75 minutes on, it is sent once (not cancelled as stale).
+        import unipile_port
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        result.pop("provider_request")
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET result=? WHERE action_id='initial-1'", (json.dumps(result),))
+        with patch.object(self.port, "chats", side_effect=unipile_port.UnipileHTTPError(503)):
+            for unused in range(5):
+                self.drive(20)
+        self.assertEqual(self.writes(), 1)
+        self.assertEqual(self.initial_state(), "UNCERTAIN_NO_RETRY")
+        self.drive(4 * 60)   # the next read on the read backoff, after the outage
+        self.assertEqual(self.writes(), 2)
+        self.assertEqual(self.initial_state(), "ACKNOWLEDGED_UNCONFIRMED")
+
+    def test_never_written_row_after_the_owner_wrote_by_hand_is_not_sent_and_shown(self):
+        # Review L1: the fresh read shows a message from the user's own account since the approval.
+        import unipile_port
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        result.pop("provider_request")
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET result=? WHERE action_id='initial-1'", (json.dumps(result),))
+        with patch.object(self.port, "chats", side_effect=unipile_port.UnipileHTTPError(503)):
+            self.drive(20)
+            self.chat_messages().append({"is_sender": True, "text": "Hi, writing myself.", "sent_at": self.now.isoformat()})
+            self.drive(20)
+        self.drive(4 * 60)
+        self.assertEqual(self.writes(), 1)
+        self.assertEqual(self.initial_state(), "CANCELLED_BEFORE_SEND")
+        self.assertEqual(self.guard(), ["VERIFIED_MESSAGE_ALREADY_SENT"])
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        self.assertIs(result["check_before_resend_cancelled"], True)
+
+    def test_another_chat_read_only_in_part_shows_no_absence(self):
+        # Review S1: any chat of the person not read in full, not only the target, means no resend.
+        import linkedin_port
+        other = self.port.add_chat(self.person, [(False, "An older thread.")])
+        original = self.port.messages
+
+        def partial(chat_id):
+            thread = original(chat_id)
+            return linkedin_port.Thread(chat_id, thread.messages, False, thread.raw) if chat_id == other else thread
+
+        with patch.object(self.port, "messages", side_effect=partial):
+            for unused in range(3):
+                self.drive(20)
+        self.assertEqual(self.writes(), 1)
+        self.drive(60)   # the next read on the read backoff, every chat read in full
+        self.assertEqual(self.writes(), 2)
+
+    def test_an_ended_row_is_never_read_or_acted_on_again(self):
+        # Review S3: a row with check_final returns its final state without a read or a send.
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        result["check_final"] = {"reason": "UNDECIDED_AFTER_7_DAYS"}
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET result=? WHERE action_id='initial-1'", (json.dumps(result),))
+        action = json.loads(self.db.execute("SELECT payload FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        calls = len(self.port.calls)
+        answer = followup.port_receipt(self.initial_adapter, action, "unipile-initial:", self.config)
+        self.assertEqual(answer, {"state": followup.FINAL, "final_state": "UNCERTAIN_NO_RETRY"})
+        self.assertEqual(len(self.port.calls), calls)
+
+    def test_a_403_during_the_check_sends_nothing_and_is_read_again(self):
+        import unipile_port
+        with patch.object(self.port, "chats", side_effect=unipile_port.UnipileHTTPError(403)):
+            self.drive(20)
+        self.assertEqual(self.writes(), 1)
+        read = self.db.execute("SELECT state FROM outreach_read_retries WHERE phase='RECONCILIATION'").fetchone()[0]
+        self.assertEqual(read, "RETRY_WAIT")
+        self.drive(20)
+        self.assertEqual(self.writes(), 2)
+
+    def test_sender_changed_is_cancelled(self):
+        self.initial_adapter.config = dict(self.config, sender_id=456)
+        self.drive(20)
+        self.assertEqual(self.initial_state(), "CANCELLED_BEFORE_SEND")
+        self.assertEqual(self.writes(), 1)
+        guard = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        self.assertIn("SENDER_CHANGED", guard["provider_guard"]["gates"])
+
+    def test_suppression_added_during_the_wait_is_cancelled(self):
+        with self.db:
+            # The send left its own handoff record on this identity; the user now excludes the person.
+            self.db.execute("INSERT OR REPLACE INTO suppressions VALUES (?,?)", (profile_key(PROFILE), "Excluded by the user"))
+        self.drive(20)
+        self.assertEqual(self.initial_state(), "CANCELLED_BEFORE_SEND")
+        self.assertEqual(self.writes(), 1)
+        self.assertEqual(self.guard(), ["SUPPRESSED_CONTACT"])
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        self.assertIs(result["check_before_resend_cancelled"], True)   # shown on Networking as "Not sent: ..."
+
+    def read_row(self):
+        return self.db.execute("SELECT state,next_at FROM outreach_read_retries WHERE action_id='initial-1' "
+                               "AND phase='RECONCILIATION'").fetchone()
+
+    def test_a_held_legacy_read_is_reopened_once_and_then_checked(self):
+        # Review D-2: a read earlier code held at INVALID_PROOF is reopened; the reopen itself sends nothing.
+        self.drive(5)   # too soon to resend: the read is now on record
+        with self.db:
+            self.db.execute("""UPDATE outreach_read_retries SET state='INVALID_PROOF',attempts=0,next_at=NULL,
+                last_error='IncompletePage: INCOMPLETE_PAGE' WHERE action_id='initial-1' AND phase='RECONCILIATION'""")
+            # Review T2: a held HeyReach INITIAL read and a held REPLY read are not reopened.
+            for action_id, payload in (("heyreach-1", {"action_id": "heyreach-1", "purpose": "INITIAL", "provider": "heyreach"}),
+                                       ("reply-1", {"action_id": "reply-1", "purpose": "REPLY", "provider": "unipile"})):
+                self.db.execute("INSERT INTO outreach_actions(action_id,identity,slot,payload,payload_hash,state,result) "
+                                "VALUES (?,?,?,?,?,'UNCERTAIN_NO_RETRY',?)",
+                                (action_id, "linkedin.com/in/" + action_id, action_id, json.dumps(payload), "h",
+                                 json.dumps({"reply_send_errors": []})))
+                self.db.execute("INSERT INTO outreach_read_retries(action_id,phase,state,updated_at) "
+                                "VALUES (?,'RECONCILIATION','INVALID_PROOF',?)", (action_id, self.now.isoformat()))
+        self.assertEqual(outreach.reopen_check_before_resend_reads(self.db, self.now), ["initial-1"])
+        held = dict(self.db.execute("SELECT action_id,state FROM outreach_read_retries WHERE action_id IN ('heyreach-1','reply-1')"))
+        self.assertEqual(held, {"heyreach-1": "INVALID_PROOF", "reply-1": "INVALID_PROOF"})
+        self.assertEqual(outreach.reopen_check_before_resend_reads(self.db, self.now), [])
+        self.assertEqual(tuple(self.read_row()), ("RETRY_WAIT", None))
+        self.assertEqual(self.writes(), 1)
+        with self.db:
+            self.db.execute("UPDATE outreach_read_retries SET state='ADAPTER_UNAVAILABLE' WHERE action_id='initial-1'")
+        self.drive(20)
+        self.assertEqual(self.writes(), 2)
+
+    def test_still_undecided_after_seven_days_ends_without_a_resend(self):
+        import unipile_port
+        with patch.object(self.port, "chats", side_effect=unipile_port.UnipileHTTPError(503)):
+            for unused in range(17):
+                self.drive(12 * 60)
+        self.assertEqual(self.writes(), 1)
+        self.assertEqual(self.initial_state(), "UNCERTAIN_NO_RETRY")
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        self.assertEqual(result["check_final"]["reason"], "UNDECIDED_AFTER_7_DAYS")
+        self.assertEqual(self.read_row()[0], "COMPLETE")
+        self.drive(12 * 60)
+        self.assertEqual(self.writes(), 1)
+
+    def test_nothing_written_is_checking_then_did_not_go_out_after_seven_days(self):
+        # Review D-4: no request was ever written; it shows as checking and ends CONFIRMED_NOT_SENT.
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        result.pop("provider_request")
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET result=? WHERE action_id='initial-1'", (json.dumps(result),))
+        action = json.loads(self.db.execute("SELECT payload FROM outreach_actions WHERE action_id='initial-1'").fetchone()[0])
+        self.assertTrue(outreach.checking_before_resend(action, "UNCERTAIN_NO_RETRY", result))
+        self.drive(8 * 24 * 60)
+        self.assertEqual(self.initial_state(), "CONFIRMED_NOT_SENT")
+        self.assertEqual(self.writes(), 1)
+
+    def test_two_readers_of_one_request_started_row_send_once(self):
+        # Review X-1: the resend's CAS includes the stored result, so a second reader holding the same
+        # snapshot never sends too.
+        self.now += dt.timedelta(minutes=20)
+        with self.db:
+            self.db.execute("UPDATE outreach_actions SET state='REQUEST_STARTED' WHERE action_id='initial-1'")
+        state, raw = self.db.execute("SELECT state,result FROM outreach_actions WHERE action_id='initial-1'").fetchone()
+        claim = dict(self.db.execute("SELECT * FROM outreach_action_claims WHERE action_id='initial-1'").fetchone())
+        action = json.loads(claim["payload"])
+        observation = followup.port_observation(self.port, PROFILE)
+        request = json.loads(raw)["provider_request"]
+        original, inner = self.port.send_message, []
+
+        def send_while_another_reader_runs(chat_id, text):
+            if not inner:
+                inner.append(followup._resend_after_check(self.initial_adapter, action, claim, state, raw, json.loads(raw),
+                                                          request, observation, self.now))
+            return original(chat_id, text)
+
+        with patch.object(self.port, "send_message", side_effect=send_while_another_reader_runs):
+            followup._resend_after_check(self.initial_adapter, action, claim, state, raw, json.loads(raw), request,
+                                         observation, self.now)
+        self.assertEqual(inner, [None])
+        self.assertEqual(self.writes(), 2)   # the first send and exactly one resend
+        self.assertEqual([item["text"] for item in self.chat_messages() if item["is_sender"]], [self.TEXT])
+
+    def test_target_chat_missing_from_the_listing_is_never_resent(self):
+        del self.port.chat_log[self.chat]
+        for unused in range(4):
+            self.drive(20)
+        self.assertEqual(self.writes(), 1)
+        self.assertEqual(self.initial_state(), "UNCERTAIN_NO_RETRY")
 
 
 class UnipileInactivity(unittest.TestCase):
@@ -332,3 +753,21 @@ class UnipileInactivity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OursSince(unittest.TestCase):
+    """Review L1/L3: a fresh read shows a message the user may have written since the approval."""
+    proof = {"checked_at": "2026-11-06T10:00:00Z"}
+
+    def read(self, sender, at="2026-11-06T11:00:00Z"):
+        return {"observations": [{"messages": [{"sender": sender, "createdAt": at}]}]}
+
+    def test_ours_after_the_approval_counts(self):
+        self.assertTrue(followup.ours_since(self.read("ME"), self.proof))
+
+    def test_a_message_whose_sender_cannot_be_read_counts(self):
+        self.assertTrue(followup.ours_since(self.read(None), self.proof))
+
+    def test_the_contacts_message_and_older_messages_do_not(self):
+        self.assertFalse(followup.ours_since(self.read("CORRESPONDENT"), self.proof))
+        self.assertFalse(followup.ours_since(self.read("ME", "2026-11-06T09:00:00Z"), self.proof))

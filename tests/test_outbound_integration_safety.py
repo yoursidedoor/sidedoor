@@ -277,7 +277,10 @@ class OutboundIntegrationSafetyTests(unittest.TestCase):
                 self.assertEqual(self.reconciler.call_count, before + 1)
                 self.assertNotEqual(self.action_row()["state"], "CONFIRMED_SENT")
                 self.assertEqual(self.database.execute("SELECT count(*) FROM engagement_events").fetchone()[0], 0)
-                self.assertTrue(outreach.resume_read(self.database, self.action["action_id"], "RECONCILIATION", self.now))
+                # A failed check is read again later (check before resend, owner 2026-11-06); read it now.
+                self.assertEqual(self.retry_row("RECONCILIATION")["state"], "RETRY_WAIT")
+                with self.database:
+                    self.database.execute("UPDATE outreach_read_retries SET next_at=NULL WHERE phase='RECONCILIATION'")
 
     def test_campaign_create_timeout_never_creates_again_or_launches(self):
         self.prepare_campaign()
@@ -554,9 +557,10 @@ class OutboundIntegrationSafetyTests(unittest.TestCase):
         self.reconciler.side_effect = NotImplementedError("mock unsupported receipt decoder")
         for unused in range(6):
             self.run_action(self.restart())
+        # Read again on the read backoff (check before resend, owner 2026-11-06); never a send.
         self.reconciler.assert_called_once()
-        self.assertEqual(self.retry_row("RECONCILIATION")["attempts"], 0)
-        self.assertEqual(self.retry_row("RECONCILIATION")["state"], "ADAPTER_UNAVAILABLE")
+        self.assertEqual(self.retry_row("RECONCILIATION")["state"], "RETRY_WAIT")
+        self.assertIsNotNone(self.retry_row("RECONCILIATION")["next_at"])
         self.assertEqual(self.action_row()["state"], "ACKNOWLEDGED_UNCONFIRMED")
         self.transport.assert_called_once()
 

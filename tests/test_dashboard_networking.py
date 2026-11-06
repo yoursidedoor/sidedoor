@@ -34,6 +34,7 @@ if DEPENDENCIES:
     from fastapi.testclient import TestClient
 
     import dashboard
+    import approvals_page
     import networking_page
 
 ORIGIN = {"origin": f"http://127.0.0.1:{PORT}"}
@@ -613,7 +614,9 @@ class ReviewFixesTest(Page, unittest.TestCase):
 
     def test_n12_uncertain_sends_say_so_and_are_not_waiting(self):
         self.open_store(self.root)
-        self.action("follow-u", "una-u", "FOLLOWUP", "UNCERTAIN_NO_RETRY", "Following up.", claimed=at(3))
+        # Review T1: the real HeyReach shape (provider heyreach, no provider_request) is not checked first.
+        self.action("follow-u", "una-u", "FOLLOWUP", "UNCERTAIN_NO_RETRY", "Following up.", claimed=at(3),
+                    provider="heyreach")
         with self.db:
             self.db.execute("INSERT INTO outreach_attempts VALUES ('linkedin.com/in/old-o',11,'UNCERTAIN_NO_RETRY',?,NULL)",
                             (at(2),))
@@ -623,6 +626,87 @@ class ReviewFixesTest(Page, unittest.TestCase):
         self.assertEqual(found["Someone on LinkedIn"]["status"], "Couldn't confirm it went out")
         self.assertEqual(self.entries(show="waiting"), [])
         self.assertIn("won't send it again", self.get())
+
+    def test_check_before_resend_items_say_sidedoor_is_checking(self):
+        # Owner-approved line (2026-11-06) for an unclear send Sidedoor reads before any retry.
+        self.open_store(self.root)
+        request = {"provider_request": {"route": "unipile", "operation": "send_message", "started_at": at(3)}}
+        self.action("follow-c", "cal-c", "FOLLOWUP", "UNCERTAIN_NO_RETRY", "Following up.", claimed=at(3), result=request)
+        self.action("invite-d", "dee-d", "INVITE", "INVITE_RETRY_WAIT", "Hi Dee.", claimed=at(4),
+                    result={"attempts": [{"started_at": at(4), "outcome": "UNCERTAIN"}]})
+        found = {entry["name"]: entry for entry in self.entries()}
+        line = "Checking whether this was sent. Sidedoor won't send it twice."
+        self.assertEqual(networking_page.CHECKING_SENT, line)
+        self.assertEqual(approvals_page.CHECKING_SENT, line)
+        self.assertEqual(found["Cal Example"]["conversation"][0]["state"], line)
+        self.assertEqual(found["Dee Example"]["conversation"][0]["state"], line)
+        self.assertEqual((found["Cal Example"]["status"], found["Dee Example"]["status"]), ("Checking", "Checking"))
+        self.assertIn(line, self.get())
+        # Review D-5: a checking contact is in the Waiting filter, not the "still sending" count.
+        self.assertEqual(sorted(entry["name"] for entry in self.entries(show="waiting")), ["Cal Example", "Dee Example"])
+        self.assertEqual(self.entries(show="sending"), [])
+
+    def test_a_send_the_check_stopped_says_not_sent_with_its_reason(self):
+        # Review N1: a CANCELLED_BEFORE_SEND reached from check before resend is shown with the gate's words.
+        self.open_store(self.root)
+        guarded = {"provider_request": {"route": "unipile"}, "check_before_resend_cancelled": True,
+                   "provider_guard": {"gates": ["OPT_OUT"]}}
+        self.action("follow-g", "gus-g", "FOLLOWUP", "CANCELLED_BEFORE_SEND", "Following up.", claimed=at(3), result=guarded)
+        unknown = dict(guarded, provider_guard={"gates": ["SOMETHING_NEW"]})
+        self.action("follow-h", "hal-h", "FOLLOWUP", "CANCELLED_BEFORE_SEND", "Following up.", claimed=at(3), result=unknown)
+        self.action("follow-i", "ida-i", "FOLLOWUP", "CANCELLED_BEFORE_SEND", "Following up.", claimed=at(3),
+                    result={"provider_guard": {"gates": ["OPT_OUT"]}})   # not from the check: not listed
+        found = {entry["name"]: entry for entry in self.entries()}
+        self.assertEqual(found["Gus Example"]["conversation"][0]["state"], "Not sent: This person asked not to be contacted.")
+        self.assertEqual(found["Hal Example"]["conversation"][0]["state"],
+                         "Not sent: Sidedoor couldn't send this. Email support@yoursidedoor.com if you need it sent.")
+        self.assertNotIn("Ida Example", found)
+
+    def test_a_reply_retry_reply_ended_stays_visible(self):
+        # Review F2: a reply retry_reply ended is shown with its reason.
+        self.open_store(self.root)
+        checks = {"reply_retry_checks": [{"checked_at": at(4), "outcome": "ABSENT"}]}
+        self.action("reply-j", "jo-j", "REPLY", "CANCELLED", "Thanks!", claimed=at(3),
+                    result=dict(checks, reply_terminal="REPLY_SEND_FAILED_AFTER_3_ATTEMPTS"))
+        self.action("reply-k", "kit-k", "REPLY", "CANCELLED", "Thanks!", claimed=at(3),
+                    result=dict(checks, reply_terminal="REPLY_NEWER_CONVERSATION_ACTIVITY"))
+        self.action("reply-l", "lee-l", "REPLY", "CANCELLED_BEFORE_SEND", "Thanks!", claimed=at(3),
+                    result=dict(checks, provider_guard={"gates": ["OPT_OUT"]}))
+        self.action("reply-m", "max-m", "REPLY", "CANCELLED", "Thanks!", claimed=at(3), result={"other": 1})
+        found = {entry["name"]: entry for entry in self.entries()}
+        self.assertEqual(found["Jo Example"]["conversation"][0]["state"], networking_page.NOT_SENT_WORDS[None])
+        self.assertEqual(found["Kit Example"]["conversation"][0]["state"],
+                         "Not sent: The conversation moved on after this reply was written.")
+        self.assertEqual(found["Lee Example"]["conversation"][0]["state"], "Not sent: This person asked not to be contacted.")
+        self.assertNotIn("Max Example", found)
+
+    def test_reply_endings_have_their_own_lines(self):
+        # Review L2 (owner-approved copy).
+        self.open_store(self.root)
+        checks = {"reply_retry_checks": [{"checked_at": at(4), "outcome": "OTHER_ANSWER"}]}
+        self.action("reply-n", "ned-n", "REPLY", "CANCELLED", "Thanks!", claimed=at(3),
+                    result=dict(checks, reply_terminal="REPLY_THREAD_ALREADY_ANSWERED_BY_ANOTHER_MESSAGE"))
+        self.action("reply-o", "oz-o", "REPLY", "CANCELLED", "Thanks!", claimed=at(3),
+                    result=dict(checks, reply_terminal="REPLY_NEWER_CONVERSATION_ACTIVITY"))
+        self.action("reply-p", "pat-p", "REPLY", "CANCELLED", "Thanks!", claimed=at(3),
+                    result=dict(checks, reply_terminal="SOMETHING_NEW"))
+        found = {entry["name"]: entry for entry in self.entries()}
+        self.assertEqual(found["Ned Example"]["conversation"][0]["state"], "Not sent: This conversation was already answered.")
+        self.assertEqual(found["Oz Example"]["conversation"][0]["state"],
+                         "Not sent: The conversation moved on after this reply was written.")
+        self.assertEqual(found["Pat Example"]["conversation"][0]["state"],
+                         "Not sent: Sidedoor couldn't send this. Email support@yoursidedoor.com if you need it sent.")
+
+    def test_check_before_resend_that_ended_unconfirmed_says_so(self):
+        # Owner pick (review Q1 a): a start_chat whose chat was never found ends for good.
+        self.open_store(self.root)
+        result = {"provider_request": {"route": "unipile", "operation": "start_chat", "started_at": at(3)},
+                  "check_final": {"checks": 3, "reason": "START_CHAT_CHAT_UNKNOWN"}}
+        self.action("follow-f", "fay-f", "FOLLOWUP", "UNCERTAIN_NO_RETRY", "Following up.", claimed=at(3), result=result)
+        found = {entry["name"]: entry for entry in self.entries()}
+        self.assertEqual(found["Fay Example"]["conversation"][0]["state"],
+                         "Couldn't confirm it went out. Check LinkedIn; Sidedoor won't resend it.")
+        self.assertEqual(found["Fay Example"]["status"], "Couldn't confirm it went out")
 
     def test_n13_a_refused_message_needs_you(self):
         self.open_store(self.root)

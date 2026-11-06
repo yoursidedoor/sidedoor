@@ -125,6 +125,25 @@ class ReplyRetryIntegrityTests(unittest.TestCase):
             self.assertEqual("CANCELLED", action["state"])
             self.assertEqual("REPLY_NOT_DELIVERED_NO_MORE_SENDS", json.loads(action["result"])["reply_terminal"])
 
+    def test_unreadable_no_more_sends_reply_ends_for_good_after_seven_days(self):
+        # Review F3: still unreadable 7 days after the first attempt -> check_final, read COMPLETE, never resent.
+        with manual.isolated_boundaries(), manual.Fixture() as fixture:
+            self.failed_first_attempt(fixture)
+            fixture.rooms["thread-1"]["totalMessages"] += 1      # the read is partial
+            for unused in range(17):
+                fixture.cycle(seconds=12 * 3600)
+            action = fixture.actions()[0]
+            result = json.loads(action["result"])
+            self.assertEqual("UNCERTAIN_NO_RETRY", action["state"])
+            self.assertEqual("REPLY_UNREADABLE_AFTER_7_DAYS", result["check_final"]["reason"])
+            read = fixture.database.execute("SELECT state FROM outreach_read_retries WHERE action_id=? AND phase='RECONCILIATION'",
+                                            (action["action_id"],)).fetchone()
+            self.assertEqual("COMPLETE", read[0])
+            fixture.rooms["thread-1"]["totalMessages"] -= 1      # readable again: still ended, nothing sent
+            fixture.cycle(seconds=12 * 3600)
+            self.assertEqual(1, len(fixture.requests))
+            self.assertEqual("UNCERTAIN_NO_RETRY", fixture.actions()[0]["state"])
+
     def test_delivered_reply_behind_a_long_unreadable_thread_is_still_confirmed(self):
         with manual.isolated_boundaries(), manual.Fixture() as fixture:
             fixture.seed()

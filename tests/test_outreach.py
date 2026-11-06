@@ -537,11 +537,13 @@ class GuardContractTests(unittest.TestCase):
                 target[field] = value
                 self.adapter.reconciler = Mock(return_value=receipt)
                 result = self.cycle()
-                self.assertEqual(result["items"][0]["read_retry"]["state"], "INVALID_PROOF")
+                # A failed check is read again later (check before resend, owner 2026-11-06), never held for good.
+                self.assertEqual(result["items"][0]["read_retry"]["state"], "RETRY_WAIT")
                 self.assertEqual(self.database.execute("SELECT state FROM outreach_actions").fetchone()[0], "ACKNOWLEDGED_UNCONFIRMED")
                 self.assertEqual(self.claim(), original_claim)
                 self.assertEqual(self.database.execute("SELECT count(*) FROM engagement_events").fetchone()[0], 0)
-                self.assertTrue(outreach.resume_read(self.database, self.action["action_id"], "RECONCILIATION", self.now))
+                with self.database:
+                    self.database.execute("UPDATE outreach_read_retries SET next_at=NULL WHERE phase='RECONCILIATION'")
         self.transport.assert_called_once()
 
     def assert_unresolved_backoff(self, changes, gate):
@@ -870,12 +872,12 @@ class ReadRetryTests(unittest.TestCase):
         self.cycle()
         self.now += dt.timedelta(days=1)
         self.cycle(self.restart())
-        self.adapter.reconciler.assert_called_once()
-        self.assertEqual(self.status("RECONCILIATION")["attempts"], 0)
-        self.assertEqual(self.status("RECONCILIATION")["state"], "ADAPTER_UNAVAILABLE")
+        # A failed check is read again on the read backoff (check before resend, owner 2026-11-06); nothing is sent.
+        self.assertEqual(self.adapter.reconciler.call_count, 2)
+        self.assertEqual(self.status("RECONCILIATION")["state"], "RETRY_WAIT")
         self.transport.assert_called_once()
 
-    def test_malformed_inspection_and_receipt_are_not_transient_retries(self):
+    def test_malformed_inspection_is_terminal_and_receipt_is_read_again(self):
         self.adapter.inspector = Mock(return_value=["invalid"])
         outreach.enqueue_action(self.database, self.action)
         self.cycle()
@@ -892,9 +894,9 @@ class ReadRetryTests(unittest.TestCase):
         self.cycle()
         self.now += dt.timedelta(minutes=20)
         self.cycle()
-        self.adapter.reconciler.assert_called_once()
-        self.assertEqual(self.status("RECONCILIATION")["state"], "INVALID_PROOF")
-        self.assertEqual(self.status("RECONCILIATION")["attempts"], 0)
+        # A malformed receipt is read again later (check before resend, owner 2026-11-06), never resent.
+        self.assertEqual(self.adapter.reconciler.call_count, 2)
+        self.assertEqual(self.status("RECONCILIATION")["state"], "RETRY_WAIT")
         self.transport.assert_called_once()
 
     # 2026-11-06: a 3-second Unipile 502 held 8 approved invitations at INVALID_PROOF for good.

@@ -27,9 +27,11 @@ Sources (why each is the record the product itself treats as that fact):
   REQUEST_STARTED, ACKNOWLEDGED_DELIVERY_UNCONFIRMED or INVITE_RETRY_WAIT (Overview's INVITE_WAITING,
   which Sidedoor still settles; an INVITE LinkedIn acknowledged reads "Invitation sent", owner 2026-10-24);
   its "Invitations sending" filter lists the INVITE ones, the ones
-  Overview's "waiting for confirmation" counts. UNCERTAIN_NO_RETRY and unsettled HeyReach launches
-  (`outreach_attempts` CLAIMED, DISPATCHING, ACKNOWLEDGED_DELIVERY_UNCONFIRMED, UNCERTAIN_NO_RETRY) are
-  never sent again: "couldn't confirm it went out", not Waiting. "Did not go out": CONFIRMED_NOT_SENT
+  Overview's "waiting for confirmation" counts. An unclear send Sidedoor reads before any retry
+  (`outreach.checking_before_resend`: check before resend, owner 2026-11-06) is "Checking" with the
+  line CHECKING_SENT. Any other UNCERTAIN_NO_RETRY and unsettled HeyReach launches (`outreach_attempts`
+  CLAIMED, DISPATCHING, ACKNOWLEDGED_DELIVERY_UNCONFIRMED, UNCERTAIN_NO_RETRY) are not sent again by
+  Sidedoor: "couldn't confirm it went out", not Waiting. "Did not go out": CONFIRMED_NOT_SENT
   (the action stays on record, so `research_workflow.prior_contact_record` never drafts the person
   again). "Couldn't send": `approvals.refused_after_approval` (the Approvals cards), which needs you.
 - the judge's verdict and "approved by you": the newest DECISION row of `outreach_agent_audit` for the
@@ -92,7 +94,17 @@ FILTER_KEYS = {key for key, _ in FILTERS}
 KINDS = ("accepted", "followup_sent", "inbound", "initial_sent", "opt_out", "outbound_observed")
 MESSAGE_PURPOSES = ("INVITE", "INITIAL", "FIRST_MESSAGE", "FOLLOWUP", "URGENT", "REPLY")
 SENDING = tuple(overview.INVITE_WAITING)            # acknowledged or in flight; Sidedoor still settles these
-UNCERTAIN = ("UNCERTAIN_NO_RETRY",)                 # never resent; kept for reconciliation only
+UNCERTAIN = ("UNCERTAIN_NO_RETRY",)                 # not sent again unless it is checking (outreach.checking_before_resend)
+CHECK_ONLY = ("ACKNOWLEDGED_UNCONFIRMED",)          # listed only while it is checking
+# A send the check-before-resend path's checks stopped (followup_execution: check_before_resend_cancelled).
+CHECK_CANCELLED = ("CANCELLED_BEFORE_SEND", "CANCELLED")   # listed only when `stopped_words` names it
+# Review F1b: Networking's own fallback for "Not sent: ..." (Approvals keeps approvals_page.GENERIC_GATE).
+NOT_SENT_FALLBACK = "Sidedoor couldn't send this. Email support@yoursidedoor.com if you need it sent."
+# Review F2: a reply retry_reply ended because it never arrived says "Did not go out".
+REPLY_DID_NOT_GO_OUT = ("REPLY_SEND_FAILED_AFTER_3_ATTEMPTS", "REPLY_NOT_DELIVERED_NO_MORE_SENDS")
+# Review L2 (owner-approved copy): the other two ways retry_reply ends a reply.
+REPLY_ENDED_WORDS = {"REPLY_THREAD_ALREADY_ANSWERED_BY_ANOTHER_MESSAGE": "Not sent: This conversation was already answered.",
+                     "REPLY_NEWER_CONVERSATION_ACTIVITY": "Not sent: The conversation moved on after this reply was written."}
 NOT_SENT = ("CONFIRMED_NOT_SENT",)
 QUEUED = ("PENDING",)
 ACKNOWLEDGED = "ACKNOWLEDGED_DELIVERY_UNCONFIRMED"                               # an invitation not started yet (owner, 2026-10-24: list it)
@@ -109,6 +121,7 @@ STATUS = {"closed": ("Closed", "muted"), "opted_out": ("Opted out", "muted"), "r
           "invited": ("Invited, waiting for acceptance", "info"), "sending": ("Sending…", "warning"),
           "invite_sent": ("Invitation sent", "info"),
           "queued": ("Invitation queued", "muted"),
+          "checking": ("Checking", "warning"),
           "uncertain": ("Couldn't confirm it went out", "warning"), "failed": ("Couldn't send", "error"),
           "not_sent_yet": ("Not sent yet", "info"),   # approved, then held (Approvals' "Not sent yet" cards)
           "none": ("Nothing sent yet", "muted")}
@@ -117,6 +130,9 @@ PURPOSE_WORDS = {"INVITE": "Invitation note", "INITIAL": "Message", "FIRST_MESSA
                  "FOLLOWUP": "Follow-up", "URGENT": "Follow-up", "REPLY": "Your reply"}
 SENDING_WORDS = "Sending… LinkedIn took the request; Sidedoor has not seen it arrive yet."
 UNCERTAIN_WORDS = "Sidedoor couldn't confirm this went out, and it won't send it again."
+CHECKING_SENT = "Checking whether this was sent. Sidedoor won't send it twice."   # approvals_page.CHECKING_SENT
+# Check before resend ended without finding a start_chat's chat (owner pick, review Q1 a).
+UNCONFIRMED_FINAL_WORDS = "Couldn't confirm it went out. Check LinkedIn; Sidedoor won't resend it."
 # A CONFIRMED_NOT_SENT action stays on record, and research_workflow.prior_contact_record refuses anyone
 # with an outreach action, so Sidedoor never drafts this person again.
 NOT_SENT_WORDS = {"INVITE": "Did not go out: Sidedoor checked and the invitation never arrived. Sidedoor won't invite "
@@ -184,6 +200,7 @@ class Person:
         self.sending_unacked = False   # a sending message other than an acknowledged invitation
         self.queued = False        # an INVITE action still PENDING
         self.uncertain = False
+        self.checking = False      # an unclear send Sidedoor reads before any retry
         self.failed = False
         self.refused = 0
         self.referral = None       # (state, updated_at)
@@ -201,7 +218,7 @@ class Person:
         """On this page: a message of ours (sent, sending, queued invitation, failed, refused), a referral or an
         open note."""
         ours = any(self.kinds.get(kind) for kind in ("initial_sent", "followup_sent", "outbound_observed"))
-        return bool(ours or self.sending or self.queued or self.uncertain or self.failed or self.refused or self.referral is not None
+        return bool(ours or self.sending or self.queued or self.uncertain or self.checking or self.failed or self.refused or self.referral is not None
                     or self.notes)
 
 
@@ -237,14 +254,23 @@ def people(reader):
         if payload is not None and payload.get("purpose") != "REPLY" and (source, source_id) not in reconciled:
             if (person := get(identity)) is not None:
                 person.observed += 1
-    states = SENDING + UNCERTAIN + NOT_SENT + QUEUED
-    for identity, text, state, claimed_at in reader.rows(
-            "SELECT identity,payload,state,claimed_at FROM outreach_actions WHERE state IN (%s)" % _marks(states), states,
+    import outreach
+    states = SENDING + UNCERTAIN + NOT_SENT + QUEUED + CHECK_ONLY + CHECK_CANCELLED
+    for identity, text, state, claimed_at, saved in reader.rows(
+            "SELECT identity,payload,state,claimed_at,result FROM outreach_actions WHERE state IN (%s)" % _marks(states), states,
             "outreach_actions"):
         payload = _object(text)
         if payload is None or payload.get("purpose") not in MESSAGE_PURPOSES or (person := get(identity)) is None:
             continue
-        if state in QUEUED:
+        if outreach.checking_before_resend(payload, state, _object(saved)):
+            person.checking = True
+        elif state in CHECK_ONLY:
+            continue
+        elif state in CHECK_CANCELLED:
+            if stopped_words(payload, state, _object(saved) or {}) is None:
+                continue
+            person.failed = True
+        elif state in QUEUED:
             if payload.get("purpose") != "INVITE":
                 continue
             person.queued = True
@@ -433,6 +459,7 @@ class Contact:
         self.sending_unacked = any(person.sending_unacked for person in own)
         self.queued = any(person.queued for person in own)
         self.uncertain = any(person.uncertain for person in own)
+        self.checking = any(person.checking for person in own)
         self.failed = any(person.failed for person in own)
         self.refused = sum(person.refused for person in own)
         referrals = [person.referral for person in own if person.referral]
@@ -466,6 +493,8 @@ class Contact:
                 self._status = "messaged"
             elif kinds.get("initial_sent"):
                 self._status = "invited"
+            elif self.checking:
+                self._status = "checking"
             elif self.sending:
                 self._status = "sending" if self.sending_unacked else "invite_sent"
             elif self.queued:
@@ -486,7 +515,7 @@ class Contact:
         if show == "replied_today":
             return self.last_inbound is not None and start is not None and start <= self.last_inbound < end
         if show == "waiting":
-            return self.status() in ("invited", "sending", "invite_sent", "queued")
+            return self.status() in ("invited", "sending", "invite_sent", "queued", "checking")
         if show == "sending":
             return self.status() == "sending"   # the "Sending…" badge (owner 2026-10-24: counts by label)
         if show == "referral_agreed":
@@ -547,7 +576,7 @@ def _search_texts(reader):
 
 def _actions(reader, ids):
     return {row["action_id"]: dict(row, action=_object(row["payload"]) or {}) for row in reader.rows(
-        "SELECT action_id,identity,payload,state,claimed_at FROM outreach_actions WHERE identity IN (%s)" % _marks(ids),
+        "SELECT action_id,identity,payload,state,claimed_at,result FROM outreach_actions WHERE identity IN (%s)" % _marks(ids),
         tuple(ids), "outreach_actions")}
 
 
@@ -556,7 +585,7 @@ def _action(reader, actions, action_id):
         return None
     if action_id in actions:
         return actions[action_id]
-    row = reader.rows("SELECT action_id,identity,payload,state,claimed_at FROM outreach_actions WHERE action_id=?",
+    row = reader.rows("SELECT action_id,identity,payload,state,claimed_at,result FROM outreach_actions WHERE action_id=?",
                       (action_id,), "outreach_actions")
     if not row:
         return None
@@ -613,6 +642,35 @@ def _reconciled(reader, source, source_id):
                             (source, source_id), "engagement_outbound_reconciliations"))
 
 
+def not_sent_words(gates):
+    """ "Not sent: <reason>": each code's plain words (approvals_page.GATE_WORDS, as Approvals' "Not sent
+    yet" cards), else Networking's fallback (NOT_SENT_FALLBACK)."""
+    pages = _pages()
+    codes = [gate for gate in gates or [] if isinstance(gate, str)]
+    words = list(dict.fromkeys(pages.GATE_WORDS.get(gate, NOT_SENT_FALLBACK) for gate in codes)) or [NOT_SENT_FALLBACK]
+    return "Not sent: " + " ".join(words)
+
+
+def stopped_words(action, state, result):
+    """The line for a send stopped after it was claimed, or None when it is not one to show: a send the
+    check-before-resend checks stopped (followup_execution: check_before_resend_cancelled), or a reply
+    reply_execution.retry_reply ended (review F2)."""
+    guard = result.get("provider_guard") if isinstance(result.get("provider_guard"), dict) else {}
+    if state == "CANCELLED_BEFORE_SEND" and result.get("check_before_resend_cancelled") is True:
+        return not_sent_words(guard.get("gates"))
+    if action.get("purpose") == "REPLY" and ("reply_terminal" in result or "reply_retry_checks" in result):
+        if state == "CANCELLED":
+            terminal = result.get("reply_terminal")
+            if terminal in REPLY_DID_NOT_GO_OUT:
+                return NOT_SENT_WORDS[None]
+            if terminal in REPLY_ENDED_WORDS:
+                return REPLY_ENDED_WORDS[terminal]
+            return not_sent_words([terminal])
+        if state == "CANCELLED_BEFORE_SEND":
+            return not_sent_words(guard.get("gates"))
+    return None
+
+
 def conversation(reader, ids, actions):
     """Every message of the conversation, oldest first: ours (sent, sending, failed) and theirs."""
     items, ours = [], []
@@ -663,13 +721,20 @@ def conversation(reader, ids, actions):
                 for item in ours)):
             continue
         items.append({"at": at, "who": "you", "label": SEEN_IN_INBOX, "text": text, "state": None, "judge": None})
+    import outreach
     for row in actions.values():
         action, state = row["action"], row["state"]
         purpose = action.get("purpose")
-        if purpose not in MESSAGE_PURPOSES or state not in SENDING + UNCERTAIN + NOT_SENT:
+        # Check before resend (owner, 2026-11-06): an unclear send Sidedoor reads before any retry.
+        saved = _object(row.get("result")) or {}
+        checking = outreach.checking_before_resend(action, state, saved)
+        stopped = stopped_words(action, state, saved) if state in CHECK_CANCELLED else None
+        if purpose not in MESSAGE_PURPOSES or (state not in SENDING + UNCERTAIN + NOT_SENT and not checking and not stopped):
             continue
-        words = SENDING_WORDS if state in SENDING else UNCERTAIN_WORDS if state in UNCERTAIN else \
-            NOT_SENT_WORDS.get(purpose if purpose == "INVITE" else None)
+        final = bool(saved.get("check_final"))
+        words = CHECKING_SENT if checking else stopped if stopped else UNCONFIRMED_FINAL_WORDS if final \
+            else SENDING_WORDS if state in SENDING else UNCERTAIN_WORDS if state in UNCERTAIN \
+            else NOT_SENT_WORDS.get(purpose if purpose == "INVITE" else None)
         items.append({"at": overview._utc(row["claimed_at"]) if row["claimed_at"] else None, "who": "you",
                       "label": _word(PURPOSE_WORDS, purpose, "Message"),
                       "text": _text(action.get("note")) or _text(action.get("message")), "state": words,

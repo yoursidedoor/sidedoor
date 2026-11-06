@@ -922,6 +922,33 @@ def proof_gates(database, config, action, proof, now=None):
     return sorted(set(gates))
 
 
+def final_send_gates(database, config, action, identity, proof, now):
+    """The Unipile follow-up's final checks after its thread read (`thread_gates`): closure, freshness,
+    stops, the action guard and suppressions. Used by the first send (`_send_unipile`) and by a
+    resend after a check (`_resend_after_check`)."""
+    import inactivity_closure
+    gates = list(inactivity_closure.send_gates(database, config, action["profile"], now))
+    if not isinstance(proof, dict) or not outreach._fresh(proof.get("checked_at"), now, config.get("outreach_history_max_age_seconds", 3600)):
+        gates.append("DIRECT_HISTORY_MISSING_OR_STALE")
+    if not outreach._fresh(action.get("verification", {}).get("verified_at"), now, config.get("outreach_content_max_age_seconds", 604800)):
+        gates.append("CONTENT_OR_IDENTITY_VERIFICATION_STALE")
+    stopped = engagement.stop_state(database, action["profile"])
+    if stopped:
+        gates.append(stopped)
+    gates.extend(outreach.action_gates(database, config, action, proof if isinstance(proof, dict) else {}, now))
+    own_suppressions = {identity, "name:" + name_key(action["recipient"])}
+    identities = sorted(set(engagement.identity_keys(database, action["profile"])) | own_suppressions)
+    if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='suppressions'").fetchone():
+        placeholders = ",".join("?" for unused in identities)
+        for suppression in database.execute("SELECT identity,reason FROM suppressions WHERE identity IN (" + placeholders + ")", identities):
+            if outreach._followup_suppression_allowed(database, action["profile"], suppression[1]):
+                continue
+            if (suppression[0] not in own_suppressions
+                    or suppression[1] != "Handoff historical outreach; never repeat initial contact"):
+                gates.append("SUPPRESSED_CONTACT")
+    return gates
+
+
 class FollowupAdapter(reply_execution.Adapter):
     """Same provider, send claims, and receipt reconciler; scoped thread inspector."""
 
@@ -1098,10 +1125,10 @@ class FollowupAdapter(reply_execution.Adapter):
                 return result
         return super()._transport(operation, arguments)
 
-    def _send_unipile(self, action_id, config):
+    def _send_unipile(self, action_id, config, fresh_history=False):
         """outreach_provider.Provider.send_claimed for a FOLLOWUP, over the port: the same final thread
         read and stops, one request after REQUEST_STARTED is committed, and an exception from the
-        write left uncertain for reconciliation (never resent)."""
+        write left uncertain for reconciliation (checked before any resend: port_receipt)."""
         if self.database.in_transaction:
             raise ValueError("Parent must commit REQUEST_STARTED before transport")
         preview = self.database.execute("""SELECT claim.payload,claim.payload_hash,claim.sender_id,action.result
@@ -1127,7 +1154,6 @@ class FollowupAdapter(reply_execution.Adapter):
                 check["gates"].append("PROVIDER_ID_UNKNOWN")
         except Exception as error:
             check.update(error_type=type(error).__name__, observed_at=outreach_provider._now())
-        import inactivity_closure
         self.database.execute("BEGIN IMMEDIATE")
         try:
             row = self.database.execute("SELECT payload,payload_hash,identity,state,result FROM outreach_actions WHERE action_id=?",
@@ -1148,32 +1174,20 @@ class FollowupAdapter(reply_execution.Adapter):
             checked_at = outreach_provider._now()
             now = engagement.timestamp(checked_at)
             proof = json.loads(claim[4])
+            if fresh_history and "raw" in check and ours_since(check["raw"], proof if isinstance(proof, dict) else {}):
+                # Review L1: the user wrote to this person since this message was approved; never sent.
+                check.setdefault("gates", []).append(ALREADY_SENT_GATE)
+            if fresh_history and isinstance(proof, dict) and check.get("observed_at"):
+                # Review F1: a never-written row's first send (followup_execution._first_send) takes its own
+                # complete chats read above as the history, so an outage delay never makes it stale.
+                proof = dict(proof, checked_at=check["observed_at"])
             result["provider_followup_check"] = check
             if "error_type" in check:
                 self.database.execute("UPDATE outreach_actions SET state='UNCERTAIN_NO_RETRY',result=? WHERE action_id=? AND state='REQUEST_STARTED'",
                                       (json.dumps(result, sort_keys=True), action_id))
                 self.database.commit()
                 raise ValueError("Final follow-up thread read unavailable; reconcile without retry")
-            gates = list(check["gates"])
-            gates.extend(inactivity_closure.send_gates(self.database, config, action["profile"], now))
-            if not isinstance(proof, dict) or not outreach._fresh(proof.get("checked_at"), now, config.get("outreach_history_max_age_seconds", 3600)):
-                gates.append("DIRECT_HISTORY_MISSING_OR_STALE")
-            if not outreach._fresh(action.get("verification", {}).get("verified_at"), now, config.get("outreach_content_max_age_seconds", 604800)):
-                gates.append("CONTENT_OR_IDENTITY_VERIFICATION_STALE")
-            stopped = engagement.stop_state(self.database, action["profile"])
-            if stopped:
-                gates.append(stopped)
-            gates.extend(outreach.action_gates(self.database, config, action, proof, now))
-            own_suppressions = {claim[2], "name:" + name_key(action["recipient"])}
-            identities = sorted(set(engagement.identity_keys(self.database, action["profile"])) | own_suppressions)
-            if self.database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='suppressions'").fetchone():
-                placeholders = ",".join("?" for unused in identities)
-                for suppression in self.database.execute("SELECT identity,reason FROM suppressions WHERE identity IN (" + placeholders + ")", identities):
-                    if outreach._followup_suppression_allowed(self.database, action["profile"], suppression[1]):
-                        continue
-                    if (suppression[0] not in own_suppressions
-                            or suppression[1] != "Handoff historical outreach; never repeat initial contact"):
-                        gates.append("SUPPRESSED_CONTACT")
+            gates = list(check["gates"]) + final_send_gates(self.database, config, action, claim[2], proof, now)
             if gates:
                 result["provider_guard"] = {"checked_at": checked_at, "gates": sorted(set(gates))}
                 self.database.execute("UPDATE outreach_actions SET state='CANCELLED_BEFORE_SEND',result=? WHERE action_id=? AND state='REQUEST_STARTED'",
@@ -1203,21 +1217,151 @@ class FollowupAdapter(reply_execution.Adapter):
     def reconcile(self, action, config):
         if not self._unipile(action):
             return super().reconcile(action, config)
-        return port_receipt(self, action, "unipile-followup:")
+        return port_receipt(self, action, "unipile-followup:", config)
 
 
-def port_receipt(adapter, action, receipt_prefix):
-    """The claim-bound receipt of a message sent over the port (a Unipile FOLLOWUP, or FIRST_MESSAGE in
-    outreach_agent): one read of the person's chats; exactly one message of ours with the claimed text,
-    sent after the request started (within the drift window), is SENT; anything else is UNKNOWN and is
-    never resent."""
+# Check before resend (owner, 2026-11-06: "the right thing is to check the message was sent first
+# before deciding to retry"). A message whose send was unclear (UNCERTAIN_NO_RETRY: timeout, dropped
+# connection, 5xx; ACKNOWLEDGED_UNCONFIRMED not shown yet; REQUEST_STARTED left by a crash) is read
+# again: a message of ours since the request -> sent. Not shown, with the target chat read in full,
+# once LinkedIn had time to catch up (sequence.retry_due_at: the draft campaigns' 15/60-minute
+# backoff) -> every first-send check again, then sent again under the same claim, at most
+# outreach.WRITE_ATTEMPT_LIMIT (3) attempts in all; then CONFIRMED_NOT_SENT. A read that fails or
+# cannot be complete decides nothing and is read again later; it never sends. A start_chat whose chat
+# is not known (no acknowledgement named it) is never resent: after UNLOCATED_CHECKS checks that find
+# no message of ours it ends for good (owner pick, review Q1 a).
+MESSAGE_CHECK_STATES = ("UNCERTAIN_NO_RETRY", "ACKNOWLEDGED_UNCONFIRMED", "REQUEST_STARTED")
+UNLOCATED_CHECKS = 3
+FINAL = "UNCONFIRMED_FINAL"
+# Review round 2 (D-3, D-4): an unclear send still undecided this long after its first attempt ends for
+# good, never resent ("Couldn't confirm it went out"); a row with nothing written ends CONFIRMED_NOT_SENT.
+UNDECIDED_LIMIT = dt.timedelta(days=7)
+
+
+ALREADY_SENT_GATE = "VERIFIED_MESSAGE_ALREADY_SENT"   # approvals_page.GATE_WORDS: "A message to this person was already sent."
+
+
+def ours_since(observation, proof):
+    """Review L1: True when a fresh read shows a message from the user's own account to this person after
+    the inspection that approved this message (the original proof's checked_at). A message of ours whose
+    time cannot be read counts, and so does one whose sender cannot be read (it may be the user's own);
+    messages from the contact never do."""
+    try:
+        approved = engagement.timestamp(proof.get("checked_at"))
+    except (AttributeError, TypeError, ValueError):
+        approved = None
+    for read in (observation or {}).get("observations", []):
+        for message in read.get("messages") or []:
+            if message.get("sender") not in ("ME", None):
+                continue
+            try:
+                if approved is None or engagement.timestamp(message["createdAt"]) > approved:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                return True
+    return False
+
+
+def _first_at(claim, request):
+    """When the first attempt started (the request), else the claim."""
+    for value in ((request or {}).get("started_at") if isinstance(request, dict) else None, claim["claimed_at"]):
+        try:
+            return engagement.timestamp(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _end_unconfirmed(database, action, state, raw, result, now, reason):
+    """The final "couldn't confirm" end: UNCERTAIN_NO_RETRY with check_final, never resent; the read is
+    then COMPLETE (outreach._reconcile_action). None when the row changed meanwhile."""
+    result["check_final"] = {"at": now.isoformat(), "reason": reason,
+                             **({"checks": result["unlocated_checks"]} if "unlocated_checks" in result else {})}
+    if _move(database, action, state, "UNCERTAIN_NO_RETRY", result, raw) is None:
+        return None
+    return {"state": FINAL, "final_state": "UNCERTAIN_NO_RETRY"}
+
+
+def _ack_chat(raw):
+    """The chat id an acknowledgement names (Unipile's ChatStarted {chat_id, message_id}), else None."""
+    value = raw.get("chat_id") if isinstance(raw, dict) else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _target_chat(database, action_id, request, result):
+    """The chat the message was sent into: send_message's chat_id; for start_chat the chat an earlier
+    attempt's acknowledgement named (a retry's saved raw, or the first send's SEND/ACKNOWLEDGMENT audit)."""
+    if request.get("operation") == "send_message":
+        return _ack_chat(request.get("arguments"))
+    for entry in reversed(result.get("message_retries") or []):
+        if _ack_chat(entry.get("raw")):
+            return _ack_chat(entry["raw"])
+    for (record,) in database.execute("""SELECT record FROM outreach_agent_audit WHERE action_id=? AND phase='SEND'
+            AND kind='ACKNOWLEDGMENT' ORDER BY observed_at DESC""", (action_id,)).fetchall():
+        try:
+            found = _ack_chat(json.loads(record).get("raw"))
+        except (ValueError, AttributeError):
+            found = None
+        if found:
+            return found
+    return None
+
+
+def _complete_reads(observation):
+    """{chat_id: messages} for each chat read in full whose every message has a readable time; a chat
+    read only in part, or with an unreadable message time, maps to None."""
+    reads = {}
+    for read in observation.get("observations", []):
+        if read.get("operation") != "messages":
+            continue
+        messages = None
+        if read.get("complete") is True:
+            try:
+                messages = [dict(message, at=engagement.timestamp(message["createdAt"])) for message in read["messages"]]
+            except (KeyError, TypeError, ValueError):
+                messages = None
+        reads[read.get("chat_id")] = messages
+    return reads
+
+
+def port_receipt(adapter, action, receipt_prefix, config=None):
+    """The claim-bound receipt of a message sent over the port (a Unipile FOLLOWUP, or INITIAL/FIRST_MESSAGE
+    in outreach_agent): one read of the person's chats. Any message of ours since the request started
+    (within the drift window) is SENT: the earliest exact copy, else the earliest message of ours (its text
+    may have been altered). Otherwise UNKNOWN; `_resend_after_check` may then send it again, and a row
+    whose request was never written is sent as a first attempt (`_first_send`)."""
     claim = adapter.database.execute("SELECT * FROM outreach_action_claims WHERE action_id=?", (action["action_id"],)).fetchone()
     if not claim:
         raise ValueError("OUTREACH_RECONCILIATION_CLAIM_REQUIRED")
-    saved = adapter.database.execute("SELECT result FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
-    result = json.loads(saved[0]) if saved and saved[0] else {}
-    request = result.get("provider_request") if isinstance(result, dict) else None
-    observation = port_observation(adapter.port, action["profile"])
+    saved = adapter.database.execute("SELECT state,result FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
+    result = json.loads(saved[1]) if saved and saved[1] else {}
+    result = result if isinstance(result, dict) else {}
+    if result.get("check_final"):
+        # Review S3: ended for good; never acted on again.
+        return {"state": FINAL, "final_state": saved[0]}
+    request = result.get("provider_request")
+    if request is None and saved and saved[0] in ("UNCERTAIN_NO_RETRY", "REQUEST_STARTED"):
+        # Nothing was written (the request is committed before the one write): a normal first attempt.
+        return _first_send(adapter, action, saved[0])
+    first_at = _first_at(claim, request)
+
+    def undecided(answer, now):
+        # D-3: still undecided 7 days after the first attempt -> final, never resent.
+        if (saved[0] in MESSAGE_CHECK_STATES and first_at is not None and now - first_at > UNDECIDED_LIMIT):
+            return _end_unconfirmed(adapter.database, action, saved[0], saved[1], result, now, "UNDECIDED_AFTER_7_DAYS") or answer
+        return answer
+
+    try:
+        observation = port_observation(adapter.port, action["profile"])
+    except linkedin_port.IncompletePage:
+        # A listing or thread that could hold more than was read never shows absence: read again later.
+        return undecided({"state": "UNKNOWN", "next_action": "The chats read was incomplete; read them again later; never resend"},
+                         _now())
+    except Exception:
+        ended = undecided(None, _now())
+        if ended is None:
+            raise   # a failed check is read again later (outreach.cycle); it never sends
+        return ended
     now = _now(observation["finished_at"])
     reference = outreach_agent.audit(adapter.database, action["action_id"], "RECONCILIATION", "OBSERVATION", now.isoformat(),
                                      {"original_observation": observation, "request": request})
@@ -1227,16 +1371,194 @@ def port_receipt(adapter, action, receipt_prefix):
             or request.get("payload_hash") != claim["payload_hash"]
             or engagement.timestamp(request["started_at"]) < engagement.timestamp(claim["claimed_at"])):
         return unknown
-    # Our message, as the read shows it, sent after the request started (within the drift window).
+    if observation.get("account", {}).get("valid") is not True:
+        return undecided(unknown, now)
     started = engagement.timestamp(request["started_at"]) - engagement.MESSAGE_TIME_DRIFT
-    shown = [message for message in _port_messages(observation, now) if message["sender"] == "ME"
-             and message["body"] == action["message"] and engagement.timestamp(message["createdAt"]) >= started]
-    if len(shown) != 1:
+    reads = _complete_reads(observation)
+    since = sorted((message for messages in reads.values() if messages for message in messages if message["at"] >= started),
+                   key=lambda message: (message["at"], routing.encoded({key: message[key] for key in ("chat_id", "body")})))
+    ours = [message for message in since if message.get("sender") == "ME"]
+    exact = [message for message in ours if message.get("body") == action["message"]]
+    if ours:
+        message = (exact or ours)[0]
+        return {"independent": True, "action_id": action["action_id"], "identity": claim["identity"],
+                "payload_hash": claim["payload_hash"], "operation": "send_message", "sender_id": claim["sender_id"],
+                "outcome": "SENT", "conversation_id": action["conversation_id"], "chat_id": message["chat_id"],
+                "route": UNIPILE, "receipt_id": receipt_prefix + action["action_id"],
+                "evidence": "outreach_agent_audit:" + reference, "observed_at": observation["finished_at"],
+                "occurred_at": message["createdAt"], "basis": "EXACT_TEXT" if exact else "OUR_MESSAGE_TEXT_DIFFERS"}
+    if any(message.get("sender") not in ("ME", "CORRESPONDENT") for message in since):
+        return undecided(unknown, now)   # a message whose sender the read does not say may be ours
+    attempts = [request] + list(result.get("message_retries") or [])
+    due = sequence.retry_due_at(attempts)
+    if saved[0] not in MESSAGE_CHECK_STATES or due is None or now < due:
         return unknown
-    message = shown[0]
-    return {"independent": True, "action_id": action["action_id"], "identity": claim["identity"],
-            "payload_hash": claim["payload_hash"], "operation": "send_message", "sender_id": claim["sender_id"],
-            "outcome": "SENT", "conversation_id": action["conversation_id"], "chat_id": message["chat_id"],
-            "route": UNIPILE, "receipt_id": receipt_prefix + action["action_id"],
-            "evidence": "outreach_agent_audit:" + reference, "observed_at": observation["finished_at"],
-            "occurred_at": message["createdAt"]}
+    target = _target_chat(adapter.database, action["action_id"], request, result)
+    if target is None:
+        if request.get("operation") != "start_chat":
+            return undecided(unknown, now)
+        # Owner pick (review Q1 a): the chat is not known, so absence cannot be read; never resent.
+        result["unlocated_checks"] = int(result.get("unlocated_checks") or 0) + 1
+        if result["unlocated_checks"] < UNLOCATED_CHECKS:
+            _move(adapter.database, action, saved[0], saved[0], result, saved[1])
+            return unknown
+        return _end_unconfirmed(adapter.database, action, saved[0], saved[1], result, now, "START_CHAT_CHAT_UNKNOWN") or unknown
+    if reads.get(target) is None or any(messages is None for messages in reads.values()):
+        # The target chat, or any other chat of the person (review S1), was not read in full: absence is not shown.
+        return undecided(unknown, now)
+    _resend_after_check(adapter, action, dict(claim), saved[0], saved[1], result, request, observation, now)
+    return unknown
+
+
+def _first_send(adapter, action, state):
+    """A row whose request was never written (UNCERTAIN_NO_RETRY or REQUEST_STARTED with no
+    provider_request): nothing was sent, so it is sent as attempt 1 through the first send itself
+    (`FollowupAdapter._send_unipile` / `outreach_agent.Adapter._send_port`, every first-send check)."""
+    database = adapter.database
+    claim = database.execute("SELECT preflight,claimed_at FROM outreach_action_claims WHERE action_id=?", (action["action_id"],)).fetchone()
+    saved = database.execute("SELECT result FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
+    result = json.loads(saved[0]) if saved and saved[0] else {}
+    result = result if isinstance(result, dict) else {"previous_result": result}
+    now = _now(outreach_provider._now())
+    first_at = _first_at(claim, None) if claim else None
+    if first_at is not None and now - first_at > UNDECIDED_LIMIT:
+        # D-4: nothing was ever written and it still could not go out after 7 days: did not go out.
+        result["not_sent"] = {"at": now.isoformat(), "attempts": 0, "basis": "FIRST_SEND_NOT_MADE_IN_7_DAYS"}
+        _move(database, action, state, "CONFIRMED_NOT_SENT", result, saved[0] if saved else None)
+        return {"state": "UNKNOWN", "first_send": "CONFIRMED_NOT_SENT"}
+    fresh_at = None
+    if action.get("purpose") != "FOLLOWUP":
+        # Review F1: a fresh complete history read of the person first (the inspection's own read,
+        # outreach_agent.Adapter._port_observation); its finish time is the history's checked_at. A read
+        # that fails or is incomplete sends nothing now; the row is read again later.
+        try:
+            observation = adapter._port_observation(action)
+            if (observation.get("account", {}).get("valid") is not True
+                    or any(read.get("complete") is not True for read in observation.get("observations", []))):
+                raise linkedin_port.IncompletePage("FRESH_HISTORY_INCOMPLETE")
+            fresh_at = observation["finished_at"]
+        except Exception as error:
+            return {"state": "UNKNOWN", "first_send": "FRESH_HISTORY_READ_FAILED", "error_type": type(error).__name__,
+                    "next_action": "Read the person's history again later; nothing was sent"}
+        # The action guard execute_claimed runs before the port send (a follow-up's send runs it itself).
+        approved = json.loads(claim[0]) if claim and claim[0] else {}
+        approved = approved if isinstance(approved, dict) else {}
+        proof = dict(approved, checked_at=fresh_at)
+        gates = outreach.action_gates(database, adapter.config, action, proof, now)
+        if ours_since(observation, approved):
+            # Review L1: the user wrote to this person since this message was approved; never sent.
+            gates.append(ALREADY_SENT_GATE)
+        if gates:
+            result["provider_guard"] = {"checked_at": now.isoformat(), "gates": sorted(set(gates))}
+            result["check_before_resend_cancelled"] = True
+            _move(database, action, state, "CANCELLED_BEFORE_SEND", result, saved[0] if saved else None)
+            return {"state": "UNKNOWN", "first_send": "CANCELLED_BEFORE_SEND"}
+    if state != "REQUEST_STARTED" and _move_state(database, action, state, "REQUEST_STARTED") is None:
+        return {"state": "UNKNOWN", "next_action": "The action changed; read it again"}
+    try:
+        if action.get("purpose") == "FOLLOWUP":
+            acknowledged = adapter._send_unipile(action["action_id"], adapter.config, fresh_history=True)
+        else:
+            acknowledged = adapter._send_port(action["action_id"], adapter.config, fresh_checked_at=fresh_at)
+        outreach_agent.audit(database, action["action_id"], "SEND", "ACKNOWLEDGMENT", acknowledged["finished_at"], acknowledged)
+        after = "ACKNOWLEDGED_UNCONFIRMED"
+    except Exception:
+        after = "UNCERTAIN_NO_RETRY"   # a refused check already ended it (CANCELLED_BEFORE_SEND); a write is unknown
+    _move_state(database, action, "REQUEST_STARTED", after)
+    _mark_cancelled(database, action)
+    return {"state": "UNKNOWN", "first_send": after, "next_action": "Read the person's chats for the first attempt"}
+
+
+def _mark_cancelled(database, action):
+    """Mark a CANCELLED_BEFORE_SEND the first send's own checks reached from here, so Networking shows
+    it ("Not sent: <reason>")."""
+    row = database.execute("SELECT result FROM outreach_actions WHERE action_id=? AND state='CANCELLED_BEFORE_SEND'",
+                           (action["action_id"],)).fetchone()
+    result = json.loads(row[0]) if row and row[0] else None
+    if isinstance(result, dict) and not result.get("check_before_resend_cancelled"):
+        result["check_before_resend_cancelled"] = True
+        _move(database, action, "CANCELLED_BEFORE_SEND", "CANCELLED_BEFORE_SEND", result, row[0])
+
+
+def resend_gates(adapter, action, claim, observation, now):
+    """Every first-send check, against the live configuration and account (adapter.config), before
+    a resend: the action guard and, for a follow-up, its thread read and final checks; for an INITIAL or
+    FIRST_MESSAGE the port send's checks. The history is this resend's own complete read (review N1):
+    the claim's proof with checked_at = that observation's finished_at."""
+    database, live = adapter.database, adapter.config
+    proof = json.loads(claim["preflight"]) if claim.get("preflight") else {}
+    proof = dict(proof if isinstance(proof, dict) else {}, checked_at=observation["finished_at"])
+    gates = []
+    if live.get("sender_id") != claim["sender_id"]:
+        gates.append("SENDER_CHANGED")
+    if engagement.closure_status(database, action["profile"]):
+        gates.append("OUTREACH_CLOSED")
+    if action.get("purpose") == "FOLLOWUP":
+        gates.extend(thread_gates(database, live, action, observation, now))
+        gates.extend(final_send_gates(database, live, action, claim["identity"], proof, now))
+    else:
+        gates.extend(outreach.action_gates(database, live, action, proof, now))
+        gates.extend(outreach_agent.port_send_gates(database, live, action, claim["identity"], proof, now))
+    return sorted(set(gates))
+
+
+def _resend_after_check(adapter, action, claim, state, raw, result, request, observation, now):
+    """Send an unclear message again after a complete read of its chat showed nothing of ours since its
+    request (the caller's absence, once due); or end it CONFIRMED_NOT_SENT after the last allowed
+    attempt. Every first-send check runs first (`resend_gates`; refused -> CANCELLED_BEFORE_SEND). The
+    same claim and the same request (operation and arguments) as the first attempt; the request is
+    committed (REQUEST_STARTED, CAS on the state and the stored result read, so two readers never both
+    send) before the one write. Returns the new state,
+    or None when nothing changed."""
+    database = adapter.database
+    retries = result.get("message_retries") or []
+    attempts = [request] + retries
+    if len(attempts) >= outreach.WRITE_ATTEMPT_LIMIT:
+        result["not_sent"] = {"at": now.isoformat(), "attempts": len(attempts), "basis": "CHECK_BEFORE_RESEND"}
+        return _move(database, action, state, "CONFIRMED_NOT_SENT", result, raw)
+    gates = resend_gates(adapter, action, claim, observation, now)
+    if gates:
+        result["provider_guard"] = {"checked_at": now.isoformat(), "gates": gates}
+        result["check_before_resend_cancelled"] = True
+        return _move(database, action, state, "CANCELLED_BEFORE_SEND", result, raw)
+    entry = {"attempt": len(attempts) + 1, "operation": request["operation"], "arguments": request["arguments"],
+             "started_at": outreach_provider._now(), "payload_hash": claim["payload_hash"]}
+    result["message_retries"] = retries + [entry]
+    if _move(database, action, state, "REQUEST_STARTED", result, raw) is None:
+        return None
+    try:
+        arguments = request["arguments"]
+        if request["operation"] == "send_message":
+            ack = adapter.port.send_message(arguments["chat_id"], arguments["text"])
+        else:
+            ack = adapter.port.start_chat(arguments["provider_id"], arguments["text"])
+        entry.update(status="ACKNOWLEDGED_UNCONFIRMED", finished_at=outreach_provider._now(), raw=sequence._jsonable(ack.raw))
+        after = "ACKNOWLEDGED_UNCONFIRMED"
+    except Exception as error:   # a write's exception is UNKNOWN: it may have landed; checked again first
+        entry.update(status="ERROR", finished_at=outreach_provider._now(), error_type=type(error).__name__,
+                     diagnostic=str(error)[:300])
+        after = "UNCERTAIN_NO_RETRY"
+    return _move(database, action, "REQUEST_STARTED", after, result)
+
+
+_ANY = object()
+
+
+def _move(database, action, expected, state, result, expected_result=_ANY):
+    """CAS on the state (and, when given, the stored result text as read)."""
+    with database:
+        if expected_result is _ANY:
+            moved = database.execute("UPDATE outreach_actions SET state=?,result=? WHERE action_id=? AND state=?",
+                                     (state, json.dumps(result, sort_keys=True), action["action_id"], expected)).rowcount
+        else:
+            moved = database.execute("UPDATE outreach_actions SET state=?,result=? WHERE action_id=? AND state=? AND result IS ?",
+                                     (state, json.dumps(result, sort_keys=True), action["action_id"], expected,
+                                      expected_result)).rowcount
+    return state if moved == 1 else None
+
+
+def _move_state(database, action, expected, state):
+    with database:
+        moved = database.execute("UPDATE outreach_actions SET state=? WHERE action_id=? AND state=?",
+                                 (state, action["action_id"], expected)).rowcount
+    return state if moved == 1 else None

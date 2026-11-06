@@ -554,7 +554,8 @@ class InviteNeverResend(Base):
         self.execute()
         self.port.fail("sent_invitations", "incomplete_page", times=6)
         self.hourly(3)
-        self.assertEqual(len(self.port.failures["sent_invitations"]), 3)  # the listing was read 3 times
+        # The listing was read twice: the first pass came before the check-before-resend wait.
+        self.assertEqual(len(self.port.failures["sent_invitations"]), 4)
         self.assertEqual(self.writes(), 1)
         self.assertEqual(self.invite_state("ada-resend"), "INVITE_RETRY_WAIT")
 
@@ -886,6 +887,13 @@ class FollowupBase(Base):
         row = self.database.execute("SELECT state FROM outreach_actions WHERE slot=?", ("FOLLOWUP:%d" % ordinal,)).fetchone()
         return row[0] if row else None
 
+    def assert_final_unlocated(self):
+        """Owner pick (review Q1 a): never resent, and ended for good after 3 checks."""
+        row = self.database.execute("SELECT state,result FROM outreach_actions WHERE slot='FOLLOWUP:1'").fetchone()
+        self.assertEqual(row["state"], "UNCERTAIN_NO_RETRY")
+        self.assertEqual(json.loads(row["result"])["check_final"]["reason"], "START_CHAT_CHAT_UNKNOWN")
+        self.assertEqual(self.followup_writes(), 1)
+
     def ours(self):
         return [message["text"] for chat in self.port.chat_log.values() for message in chat["messages"]
                 if message["is_sender"]]
@@ -931,13 +939,17 @@ class FollowupNeverResend(FollowupBase):
         self.assertEqual(self.followup_writes(), 1)
         self.assertEqual(len(self.ours()), 1)
 
-    def test_timeout_that_did_not_land_is_never_resent(self):
+    def test_start_chat_timeout_with_no_known_chat_is_never_resent(self):
+        # Check before resend, owner pick (review Q1 a): a start_chat names no chat until acknowledged, so
+        # absence cannot be read in it: never resent (it ends for good after 3 checks).
         self.port.fail("start_chat", "timeout")
         self.due_first()
         self.followups(5)
         self.assertEqual(self.state(1), "UNCERTAIN_NO_RETRY")
         self.assertEqual(self.followup_writes(), 1)
         self.assertEqual(self.ours(), [])
+        self.followups(12, minutes=60)
+        self.assert_final_unlocated()
 
     def test_crash_after_claim_with_the_write_landed_is_read_not_resent(self):
         original = self.port.start_chat
@@ -957,7 +969,9 @@ class FollowupNeverResend(FollowupBase):
         self.assertEqual(len(self.ours()), 1)
         self.assertEqual(self.state(1), "CONFIRMED_SENT")
 
-    def test_crash_after_claim_without_the_write_is_never_resent(self):
+    def test_crash_after_claim_without_the_write_is_never_resent_into_an_unknown_chat(self):
+        # Check before resend, owner pick (review Q1 a): a start_chat names no chat until acknowledged, so
+        # absence cannot be read in it: never resent (it ends for good after 3 checks).
         def crash(provider_id, text):
             self.port.calls.append("start_chat")
             raise SystemExit("process killed during the request")
@@ -968,10 +982,12 @@ class FollowupNeverResend(FollowupBase):
             self.followups(1)
         self.port.start_chat = original
         self.restart()
-        self.followups(4)
+        self.followups(8)
         self.assertEqual(self.followup_writes(), 1)
         self.assertEqual(self.ours(), [])
         self.assertNotIn(self.state(1), {"CONFIRMED_SENT", "PENDING"})
+        self.followups(12, minutes=60)
+        self.assert_final_unlocated()
 
     def test_restart_between_claim_and_send_never_sends(self):
         def crash(adapter, database, action_id, config, now=None):
@@ -1184,6 +1200,13 @@ class MessageBase(Base):
         self.assertEqual(len(rows), 1, rows)
         return rows[0]["state"]
 
+    def assert_final_unlocated(self):
+        """Owner pick (review Q1 a): never resent, and ended for good after 3 checks."""
+        row = self.rows(self.SLUG)[0]
+        self.assertEqual(row["state"], "UNCERTAIN_NO_RETRY")
+        self.assertEqual(json.loads(row["result"])["check_final"]["reason"], "START_CHAT_CHAT_UNKNOWN")
+        self.assertEqual(self.writes(), 1)
+
     def refusals(self, slug=None):
         """Every refusal recorded on the person's action (inspection gates, the gates after the claim,
         the final checks in the port send)."""
@@ -1241,12 +1264,13 @@ class InitialNeverResend(InitialBase):
         self.assertEqual(self.writes(), 1)
         self.assertEqual(len(self.ours()), 1)
 
-    def test_timeout_that_did_not_land_is_never_resent(self):
+    def test_timeout_that_did_not_land_is_checked_then_sent_once_more(self):
+        # Check before resend (owner, 2026-11-06): not shown on a complete read after the wait -> sent once more.
         self.port.fail("send_message", "timeout")
         self.messages_hourly(6)
-        self.assertEqual(self.state(), "UNCERTAIN_NO_RETRY")
-        self.assertEqual(self.writes(), 1)
-        self.assertEqual((self.ours(), self.initials()), ([], []))
+        self.assertEqual(self.state(), "CONFIRMED_SENT")
+        self.assertEqual(self.writes(), 2)
+        self.assertEqual((len(self.ours()), len(self.initials())), (1, 1))
 
     def crash_inside_the_write(self, lands):
         original = self.port.send_message
@@ -1272,12 +1296,13 @@ class InitialNeverResend(InitialBase):
         self.assertEqual(self.state(), "CONFIRMED_SENT")
         self.assertEqual((self.writes(), len(self.ours())), (1, 1))
 
-    def test_crash_after_claim_without_the_write_is_never_resent(self):
+    def test_crash_after_claim_without_the_write_is_checked_then_sent_once_more(self):
+        # Check before resend (owner, 2026-11-06): not shown on a complete read after the wait -> sent once more.
         self.crash_inside_the_write(lands=False)
         self.messages_hourly(5)
-        self.assertEqual(self.writes(), 1)
-        self.assertEqual((self.ours(), self.initials()), ([], []))
-        self.assertNotIn(self.state(), {"CONFIRMED_SENT", "PENDING"})
+        self.assertEqual(self.writes(), 2)
+        self.assertEqual((len(self.ours()), len(self.initials())), (1, 1))
+        self.assertEqual(self.state(), "CONFIRMED_SENT")
 
     def test_restart_between_claim_and_send_never_sends(self):
         def crash(adapter, database, action_id, config, now=None):
@@ -1547,12 +1572,16 @@ class FirstMessageNeverResend(FirstMessageBase):
         self.assertEqual(self.state(), "CONFIRMED_SENT")
         self.assertEqual((self.writes(), self.ours()), (1, [self.TEXT]))
 
-    def test_timeout_that_did_not_land_is_never_resent(self):
+    def test_start_chat_timeout_with_no_known_chat_is_never_resent(self):
+        # Check before resend, owner pick (review Q1 a): a start_chat names no chat until acknowledged, so
+        # absence cannot be read in it: never resent (it ends for good after 3 checks).
         self.port.fail("start_chat", "timeout")
         self.messages_hourly(6)
         self.assertEqual(self.state(), "UNCERTAIN_NO_RETRY")
         self.assertEqual(self.writes(), 1)
         self.assertEqual((self.ours(), self.initials()), ([], []))
+        self.messages_hourly(12)
+        self.assert_final_unlocated()
 
     def crash_inside_the_write(self, lands):
         original = self.port.start_chat
@@ -1577,12 +1606,16 @@ class FirstMessageNeverResend(FirstMessageBase):
         self.assertEqual(self.state(), "CONFIRMED_SENT")
         self.assertEqual((self.writes(), self.ours()), (1, [self.TEXT]))
 
-    def test_crash_after_claim_without_the_write_is_never_resent(self):
+    def test_crash_after_claim_without_the_write_is_never_resent_into_an_unknown_chat(self):
+        # Check before resend, owner pick (review Q1 a): a start_chat names no chat until acknowledged, so
+        # absence cannot be read in it: never resent (it ends for good after 3 checks).
         self.crash_inside_the_write(lands=False)
         self.messages_hourly(5)
         self.assertEqual(self.writes(), 1)
         self.assertEqual((self.ours(), self.initials()), ([], []))
         self.assertNotIn(self.state(), {"CONFIRMED_SENT", "PENDING"})
+        self.messages_hourly(12)
+        self.assert_final_unlocated()
 
     def test_restart_between_claim_and_send_never_sends(self):
         def crash(adapter, database, action_id, config, now=None):
@@ -1595,9 +1628,10 @@ class FirstMessageNeverResend(FirstMessageBase):
         self.messages_hourly(4)
         self.assertEqual(self.writes(), 0)
 
-    def test_failed_final_profile_read_sends_nothing_and_is_never_resent(self):
+    def test_failed_final_profile_read_sends_nothing_then_is_sent_once_as_a_first_attempt(self):
         """With no chat, the port send reads the provider id first; a read that fails leaves the action
-        uncertain before any write."""
+        uncertain before any write. Nothing was written, so a later pass sends it as attempt 1 through
+        every first-send check (check before resend, review fix 3)."""
         original = outreach_agent.Adapter._send_port
 
         def fail_lookup_then_send(adapter, action_id, config):
@@ -1607,9 +1641,11 @@ class FirstMessageNeverResend(FirstMessageBase):
         with patch.object(outreach_agent.Adapter, "_send_port", fail_lookup_then_send):
             self.execute()
         self.assertEqual(self.state(), "UNCERTAIN_NO_RETRY")
-        self.messages_hourly(4)
         self.assertEqual(self.writes(), 0)
-        self.assertEqual(self.ours(), [])
+        self.messages_hourly(4)
+        self.assertEqual(self.writes(), 1)
+        self.assertEqual(self.ours(), [self.TEXT])
+        self.assertEqual(self.state(), "CONFIRMED_SENT")
 
     def test_unreadable_chats_never_resend(self):
         self.execute()

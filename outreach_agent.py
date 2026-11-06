@@ -712,9 +712,10 @@ class Adapter(outreach.HeyReachActionAdapter):
         claim = dict(row)
         if self._port_message(action):
             # Read the person's chats: our exact text shown after the request started is the receipt;
-            # anything else stays unknown and is never resent (followup_execution.port_receipt).
+            # an unclear send not shown on a complete read is sent again once due, checked first
+            # (followup_execution.port_receipt, check before resend); anything else stays unknown.
             import followup_execution
-            return followup_execution.port_receipt(self, action, "unipile-" + action["purpose"].lower().replace("_", "-") + ":")
+            return followup_execution.port_receipt(self, action, "unipile-" + action["purpose"].lower().replace("_", "-") + ":", config)
         if action.get("purpose") == "PREPARE_CAMPAIGN":
             import outreach_campaign
             result = outreach_campaign.reconcile_prepared(self.database, config, self.provider.client,
@@ -781,13 +782,14 @@ class Adapter(outreach.HeyReachActionAdapter):
         audit(self.database, self.active_action, "SEND", "ACKNOWLEDGMENT", result["finished_at"], result)
         return result
 
-    def _send_port(self, action_id, config):
+    def _send_port(self, action_id, config, fresh_checked_at=None):
         """outreach_provider.Provider.send_claimed for an INITIAL or FIRST_MESSAGE on the Unipile path: the
         same final checks, one request after REQUEST_STARTED is committed (send_message into the chat on
         file; a FIRST_MESSAGE with none uses start_chat, an INITIAL needs the chat as on HeyReach), and an
-        exception from the write left uncertain for reconciliation, never resent.
+        exception from the write left uncertain for reconciliation (checked before any resend:
+        followup_execution.port_receipt).
         As followup_execution's port send, the provider id for start_chat is read first; a read that
-        fails leaves the action uncertain (reconciled, never resent)."""
+        fails leaves the action uncertain with no request on record (reconciled, never resent)."""
         if self.database.in_transaction:
             raise ValueError("Parent must commit REQUEST_STARTED before transport")
         preview = self.database.execute("""SELECT claim.payload,claim.payload_hash,claim.sender_id,action.result
@@ -807,8 +809,6 @@ class Adapter(outreach.HeyReachActionAdapter):
                 check["observed_at"] = outreach_provider._now()
             except Exception as error:
                 check.update(error_type=type(error).__name__, observed_at=outreach_provider._now())
-        import inactivity_closure
-        from orchestrator import name_key
         self.database.execute("BEGIN IMMEDIATE")
         try:
             row = self.database.execute("SELECT payload,payload_hash,identity,state,result FROM outreach_actions WHERE action_id=?",
@@ -833,6 +833,10 @@ class Adapter(outreach.HeyReachActionAdapter):
             checked_at = outreach_provider._now()
             now = engagement.timestamp(checked_at)
             proof = json.loads(claim[4])
+            if fresh_checked_at and isinstance(proof, dict):
+                # Review F1: a never-written row's first send (followup_execution._first_send) read the
+                # person's history afresh just before; that read is the history's checked_at.
+                proof = dict(proof, checked_at=fresh_checked_at)
             if action["conversation_id"] is None:
                 result["provider_lookup_check"] = check
                 if "error_type" in check:
@@ -840,27 +844,7 @@ class Adapter(outreach.HeyReachActionAdapter):
                                           (json.dumps(result, sort_keys=True), action_id))
                     self.database.commit()
                     raise ValueError("Final profile read unavailable; reconcile without retry")
-            # The checks Provider.send_claimed makes before an INITIAL or FIRST_MESSAGE (an INITIAL's history
-            # was checked before its draft: outreach_history.PRE_DRAFT_CHECKED).
-            gates = list(inactivity_closure.send_gates(self.database, config, action["profile"], now))
-            if (action["purpose"] not in outreach_history.PRE_DRAFT_CHECKED
-                    and outreach_history.blocking_positive(self.database, action["profile"], action["purpose"])):
-                gates.append("KNOWN_PRIOR_OUTREACH_OR_STOP")
-            if not isinstance(proof, dict) or not outreach._fresh(proof.get("checked_at"), now, config.get("outreach_history_max_age_seconds", 3600)):
-                gates.append("DIRECT_HISTORY_MISSING_OR_STALE")
-            if not outreach._fresh(action.get("verification", {}).get("verified_at"), now, config.get("outreach_content_max_age_seconds", 604800)):
-                gates.append("CONTENT_OR_IDENTITY_VERIFICATION_STALE")
-            stopped = engagement.stop_state(self.database, action["profile"])
-            if stopped:
-                gates.append(stopped)
-            own_suppressions = {claim[2], "name:" + name_key(action["recipient"])}
-            identities = sorted(set(engagement.identity_keys(self.database, action["profile"])) | own_suppressions)
-            if self.database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='suppressions'").fetchone():
-                placeholders = ",".join("?" for unused in identities)
-                for suppression in self.database.execute("SELECT identity,reason FROM suppressions WHERE identity IN (" + placeholders + ")", identities):
-                    if (suppression[0] not in own_suppressions
-                            or suppression[1] != "Handoff historical outreach; never repeat initial contact"):
-                        gates.append("SUPPRESSED_CONTACT")
+            gates = port_send_gates(self.database, config, action, claim[2], proof, now)
             if action["conversation_id"] is None and not provider_id:
                 gates.append("PROVIDER_ID_UNKNOWN")
             if gates:
@@ -896,6 +880,34 @@ class Adapter(outreach.HeyReachActionAdapter):
             return super().execute_claimed(database, action_id, config, now)
         finally:
             self.active_action = None
+
+
+def port_send_gates(database, config, action, identity, proof, now):
+    """The checks Provider.send_claimed makes before an INITIAL or FIRST_MESSAGE on the Unipile path (an
+    INITIAL's history was checked before its draft: outreach_history.PRE_DRAFT_CHECKED). Used by the
+    first send (`Adapter._send_port`) and by a resend after a check (followup_execution._resend_after_check)."""
+    import inactivity_closure
+    from orchestrator import name_key
+    gates = list(inactivity_closure.send_gates(database, config, action["profile"], now))
+    if (action["purpose"] not in outreach_history.PRE_DRAFT_CHECKED
+            and outreach_history.blocking_positive(database, action["profile"], action["purpose"])):
+        gates.append("KNOWN_PRIOR_OUTREACH_OR_STOP")
+    if not isinstance(proof, dict) or not outreach._fresh(proof.get("checked_at"), now, config.get("outreach_history_max_age_seconds", 3600)):
+        gates.append("DIRECT_HISTORY_MISSING_OR_STALE")
+    if not outreach._fresh(action.get("verification", {}).get("verified_at"), now, config.get("outreach_content_max_age_seconds", 604800)):
+        gates.append("CONTENT_OR_IDENTITY_VERIFICATION_STALE")
+    stopped = engagement.stop_state(database, action["profile"])
+    if stopped:
+        gates.append(stopped)
+    own_suppressions = {identity, "name:" + name_key(action["recipient"])}
+    identities = sorted(set(engagement.identity_keys(database, action["profile"])) | own_suppressions)
+    if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='suppressions'").fetchone():
+        placeholders = ",".join("?" for unused in identities)
+        for suppression in database.execute("SELECT identity,reason FROM suppressions WHERE identity IN (" + placeholders + ")", identities):
+            if (suppression[0] not in own_suppressions
+                    or suppression[1] != "Handoff historical outreach; never repeat initial contact"):
+                gates.append("SUPPRESSED_CONTACT")
+    return gates
 
 
 COMPOSE_VERSION = "outreach-compose-v1"

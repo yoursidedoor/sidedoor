@@ -40,6 +40,77 @@ def write_retry_at(failures, now):
     return (engagement.timestamp(now) + dt.timedelta(minutes=minutes)).isoformat()
 
 
+def checking_before_resend(action, state, result):
+    """True while Sidedoor checks whether an unclear send landed before it may send it again (check
+    before resend, owner 2026-11-06): an invitation waiting on its read after an attempt
+    (sequence.reconcile_invite), a reply whose send hit an error (reply_execution.retry_reply), or a
+    Unipile message sent and not yet shown (followup_execution.port_receipt). The dashboards show these
+    as approvals_page.CHECKING_SENT."""
+    action = action if isinstance(action, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    if result.get("check_final"):
+        return False
+    purpose = action.get("purpose")
+    if purpose == "INVITE":
+        return state == "INVITE_RETRY_WAIT" and bool(result.get("attempts"))
+    if purpose == "REPLY":
+        return state == "UNCERTAIN_NO_RETRY"
+    request = result.get("provider_request")
+    if request is None and state == "UNCERTAIN_NO_RETRY":
+        # Review D-4: nothing was written; the Unipile first send keeps trying (followup_execution._first_send).
+        return unipile_message_unwritten(action, result)
+    return (state in ("UNCERTAIN_NO_RETRY", "ACKNOWLEDGED_UNCONFIRMED") and isinstance(request, dict)
+            and request.get("route") == "unipile")
+
+
+def unipile_message_unwritten(action, result):
+    """A Unipile INITIAL/FIRST_MESSAGE/FOLLOWUP whose request was never written: the port send's final
+    read failed before it (outreach_agent.Adapter._send_port's provider_lookup_check,
+    followup_execution.FollowupAdapter._send_unipile's provider_followup_check), or a Unipile
+    INITIAL/FIRST_MESSAGE payload."""
+    if action.get("purpose") not in ("INITIAL", "FIRST_MESSAGE", "FOLLOWUP") or "provider_request" in result:
+        return False
+    followup_check = result.get("provider_followup_check")
+    return bool(action.get("provider") == "unipile" or isinstance(result.get("provider_lookup_check"), dict)
+                or isinstance(followup_check, dict) and followup_check.get("operation") == "chats+messages")
+
+
+# Review D-2 (owner, 2026-11-06): before check before resend, a failed reconciliation read of an unclear
+# Unipile message was held at INVALID_PROOF or ADAPTER_UNAVAILABLE for good. This reopens those reads once
+# (RETRY_WAIT, read now) so the check reads them; the reopen itself never sends. Idempotent: a reopened
+# read is RETRY_WAIT, which never matches again.
+_CHECK_REOPEN_STATES = ("UNCERTAIN_NO_RETRY", "ACKNOWLEDGED_UNCONFIRMED", "REQUEST_STARTED")
+
+
+def reopen_check_before_resend_reads(database, now=None):
+    """Reopen held RECONCILIATION reads of messages in the check-before-resend states. Returns the action ids."""
+    now = engagement.timestamp(now or dt.datetime.now(dt.timezone.utc)).isoformat()
+    reopened = []
+    rows = database.execute("""SELECT reads.action_id,actions.payload,actions.state,actions.result
+        FROM outreach_read_retries AS reads JOIN outreach_actions AS actions ON actions.action_id=reads.action_id
+        WHERE reads.phase='RECONCILIATION' AND reads.state IN ('INVALID_PROOF','ADAPTER_UNAVAILABLE')
+        AND actions.state IN (?,?,?)""", _CHECK_REOPEN_STATES).fetchall()
+    for action_id, payload, state, saved in rows:
+        try:
+            action, result = json.loads(payload), (json.loads(saved) if saved else {})
+        except ValueError:
+            continue
+        result = result if isinstance(result, dict) else {}
+        request = result.get("provider_request")
+        unipile_request = isinstance(request, dict) and request.get("route") == "unipile"
+        if not (checking_before_resend(action, state, result) or unipile_request or unipile_message_unwritten(action, result)):
+            continue
+        if action.get("purpose") not in ("INITIAL", "FIRST_MESSAGE", "FOLLOWUP"):
+            continue
+        with engagement.transaction(database):
+            changed = database.execute("""UPDATE outreach_read_retries SET state='RETRY_WAIT',next_at=NULL,updated_at=?
+                WHERE action_id=? AND phase='RECONCILIATION' AND state IN ('INVALID_PROOF','ADAPTER_UNAVAILABLE')""",
+                (now, action_id)).rowcount
+        if changed == 1:
+            reopened.append(action_id)
+    return reopened
+
+
 def _error_detail(error):
     # The provider client sanitizes its own messages, so no credential URL reaches this string.
     return type(error).__name__ + ": " + str(error)[:300]
@@ -912,9 +983,9 @@ def _read_error(error):
     if isinstance(error, ValueError) and str(error) in INPUT_BOUND_READ_ERRORS:
         # An oversized prompt is a TRANSIENT input bound, not a malformed proof (owner,
         # 2026-09-23). Both used to fall through to INVALID_PROOF, which is deliberately
-        # terminal - see test_malformed_inspection_and_receipt_are_not_transient_retries, whose
-        # contract is that a structurally invalid proof must not burn another live read. That
-        # contract is right and is untouched. But these errors mean the packet did not FIT, and
+        # terminal for an INSPECTION read - see test_malformed_inspection_is_terminal_and_receipt_is_read_again,
+        # whose contract is that a structurally invalid proof must not burn another live read (a
+        # RECONCILIATION read is read again instead: outreach.cycle, check before resend). But these errors mean the packet did not FIT, and
         # the packet varies between runs as the history evidence changes: Robin Vale measured
         # 100,903 bytes on one read and 86,205 on another. Grouping them with malformed proofs
         # buried him and Sasha Lind in a state only a manual resume_read could leave.
@@ -1899,6 +1970,9 @@ def _reconcile_action(database, row, action, config, client, now, read_token=Non
     if refresh_now:
         now = dt.datetime.now(dt.timezone.utc)
     operation = "create_campaign" if action["purpose"] == "PREPARE_CAMPAIGN" else "send_message"
+    if isinstance(receipt, dict) and receipt.get("state") == "UNCONFIRMED_FINAL":
+        # Check before resend ended it for good (followup_execution.port_receipt): no further read.
+        return receipt["final_state"]
     if receipt is None or isinstance(receipt, dict) and receipt.get("state") in {"PENDING", "UNKNOWN"}:
         return False
     if not isinstance(receipt, dict):
@@ -2027,7 +2101,9 @@ def _repair_in_run(database, row, action, proof, now, repair, repaired):
 
 
 def cycle(database, config, client, now=None, *, purpose=None, repair=None):
-    """Guarded opt-in executor; all uncertain/claimed actions reconcile, never retry.
+    """Guarded opt-in executor; all uncertain/claimed actions reconcile, and only a read showing an
+    unclear send absent may send it again (check before resend: a Unipile message in
+    followup_execution.port_receipt, a reply in retry_reply, an invite in sequence.reconcile_invite).
 
     Main must integrate only after review, with outreach_actions_enabled=True
     and outreach_mode='guarded'. inspect_action returns the normalized fields
@@ -2040,8 +2116,10 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
     leases. Transient reads retry at 15 and 60 minutes, never a fourth attempt.
     Successful gated inspections end that transient series. Unknown receipts
     share the reconciliation budget; exhausted reads never release send claims.
-    Unsupported adapters hold without spending budget until resume_read after
-    repair. Malformed proofs hold INVALID_PROOF without automatic retry.
+    An unsupported inspection adapter holds without spending budget until resume_read after
+    repair, and a malformed inspection proof holds INVALID_PROOF without automatic retry. A failed
+    RECONCILIATION read (malformed receipt, unsupported adapter, refused read) is read again on the
+    read backoff instead (check before resend, owner 2026-11-06); it never sends.
     An INVITE action is inspected and claimed here like any new contact; once claimed it is
     settled only by sequence.reconcile_invite (orchestrator.new_contact_execution_cycle).
     """
@@ -2065,6 +2143,9 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
     reopened = reopen_transient_http_reads(database, now)
     if reopened:
         result["reopened_reads"] = reopened
+    rechecked = reopen_check_before_resend_reads(database, now)
+    if rechecked:
+        result["reopened_check_reads"] = rechecked
     limit = config.get("outreach_max_items_per_cycle", 60)
     if type(limit) is not int or not 1 <= limit <= 60:
         limit = 60
@@ -2139,9 +2220,13 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
                     if refresh_now:
                         now = dt.datetime.now(dt.timezone.utc)
                     outcome, safe_error = _read_error(error)
+                    if outcome in {"INVALID_PROOF", "ADAPTER_UNAVAILABLE"}:
+                        # A failed check is read again on the read backoff, never held for good (check
+                        # before resend, owner 2026-11-06); a failed check never sends.
+                        outcome = "RETRY_WAIT"
                     _finish_read(database, row["action_id"], phase, read_token, now, outcome, safe_error,
                                  retry_at=getattr(error, "reset_at", None) if safe_error == "OUTREACH_AI_SHARED_BUDGET_EXHAUSTED" else None)
-                    item["blocker"] = "RECONCILIATION_UNAVAILABLE_NO_RETRY" if outcome == "ADAPTER_UNAVAILABLE" else safe_error
+                    item["blocker"] = safe_error
                 item["read_retry"] = _read_status(database, row["action_id"], phase)
                 continue
             try:

@@ -34,6 +34,10 @@ BACKLOG_BLOCKER = "REPLY_BACKLOG_BEFORE_2026_09_30_NOT_SENT"
 MAX_SEND_ATTEMPTS = 3
 RETRY_DELAYS = (dt.timedelta(minutes=10), dt.timedelta(hours=1), dt.timedelta(hours=1))
 TERMINAL_FAILURE = "REPLY_SEND_FAILED_AFTER_3_ATTEMPTS"
+# Review F3 (check before resend, owner 2026-11-06): a reply that may no longer be sent
+# (reply_no_more_sends) and whose thread still cannot be read this long after its first attempt ends for
+# good (check_final; "Couldn't confirm it went out"), never resent; as followup_execution.UNDECIDED_LIMIT.
+REPLY_UNDECIDED_LIMIT = dt.timedelta(days=7)
 # A thread that cannot be read completely is never taken as "not sent"; re-read with backoff. After
 # this many unreadable checks in a row the reply is never sent again (reply_no_more_sends), but it
 # stays in read-only reconciliation until a complete read settles it.
@@ -729,6 +733,21 @@ class Adapter(outreach_agent.Adapter):
         streak = result.get("reply_unreadable_streak", len(failed_checks))
         # A row that reached the limit before the flag existed is treated the same (never resent).
         no_more_sends = result.get("reply_no_more_sends") is True or streak >= MAX_UNREADABLE_CHECKS
+        if result.get("check_final"):
+            return {"state": row["state"], "blocker": "CHECK_FINAL"}
+        first = min(started) if started else engagement.timestamp(claim["claimed_at"])
+        if no_more_sends and streak and now - first > REPLY_UNDECIDED_LIMIT:
+            result["check_final"] = {"at": now.isoformat(), "reason": "REPLY_UNREADABLE_AFTER_7_DAYS"}
+            with database:
+                moved = database.execute("UPDATE outreach_actions SET result=? WHERE action_id=? AND state=? AND payload_hash=?",
+                                         (json.dumps(result, sort_keys=True), row["action_id"], row["state"],
+                                          row["payload_hash"])).rowcount
+                if moved == 1:
+                    database.execute("""INSERT INTO outreach_read_retries(action_id,phase,state,updated_at)
+                        VALUES (?,'RECONCILIATION','COMPLETE',?) ON CONFLICT(action_id,phase)
+                        DO UPDATE SET state='COMPLETE',next_at=NULL,token=NULL,lease_until=NULL,updated_at=excluded.updated_at""",
+                                     (row["action_id"], now.isoformat()))
+            return {"state": row["state"], "blocker": "CHECK_FINAL" if moved == 1 else "REPLY_RETRY_STATE_CHANGED"}
         if streak:
             wait = min(UNREADABLE_CHECK_DELAY * (2 ** (streak - 1)), MAX_UNREADABLE_CHECK_DELAY)
             recheck = engagement.timestamp(failed_checks[-1]["checked_at"]) + wait if failed_checks else now

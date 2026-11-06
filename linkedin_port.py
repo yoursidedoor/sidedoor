@@ -39,8 +39,9 @@ Caller duties (outreach code above the port, E3.T3/E3.T4; the port does not enfo
   whose invitee cannot be identified, error) is never absence.
 - A person already connected (`network_distance == 1`) is never invited: `invitation_absent`
   returns False for them, so a caller that retries only on True never invites them.
-- Messages keep "reconcile, never resend", except replies, which keep their 2026-09-30 rule
-  (at most 3 attempts, each after a thread read shows ours absent; `reply_execution`).
+- Messages: check before resend (owner, 2026-11-06). An unclear Unipile message is sent again only
+  after a complete read of the person's chats shows nothing since its request, at most 3 attempts
+  (`followup_execution.port_receipt`); replies keep their 2026-09-30 rule (`reply_execution`).
 - Inactivity closure rules are unchanged by this port (`inactivity_closure`).
 
 - Every returned value keeps the provider's raw answer in `raw`, so callers that still reason

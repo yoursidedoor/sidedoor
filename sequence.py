@@ -28,7 +28,9 @@ Rules carried over unchanged:
   On a first send an unclear pending/distance value decides nothing (as live); before a retry it
   still refuses (PROFILE_INVITATION_STATE_UNKNOWN).
 - An uncertain invitation is retried at most 3 times in all (`linkedin_port.INVITATION_MAX_ATTEMPTS`),
-  each only after `linkedin_port.invitation_absent` shows it absent; a read that cannot decide waits.
+  each only after `linkedin_port.invitation_absent` shows it absent once LinkedIn had time to catch up
+  (`retry_due_at`, check before resend, owner 2026-11-06); a read that cannot decide waits. A retry
+  LinkedIn answers "already invited" counts as sent.
 """
 
 import datetime as dt
@@ -133,14 +135,16 @@ def _save(database, action_id, state, result, expected):
     database.commit()
 
 
-def _record_sent(database, action, attempt, person, observed_at, attempts=()):
-    """initial_sent, verified by the read that showed the invitation (pending or already accepted)."""
+def _record_sent(database, action, attempt, person, observed_at, attempts=(), evidence="unipile-read:"):
+    """initial_sent, verified by the read that showed the invitation (pending or already accepted),
+    or by LinkedIn's "already invited" answer to a retry (`person` None, no lookup)."""
     engagement.record_event(database, {
         "source": SOURCE, "source_id": "invite:" + action["action_id"], "profile": action["profile"],
         "kind": "initial_sent", "purpose": INVITE, "invitation": True, "verified": True,
         "occurred_at": attempt["started_at"], "observed_at": observed_at,
-        "evidence": "unipile-read:" + observed_at,
-        "raw": {"ack": attempt.get("ack"), "lookup": _jsonable(person.raw), "note": action.get("note"),
+        "evidence": evidence + observed_at,
+        "raw": {"ack": attempt.get("ack"), "lookup": _jsonable(person.raw) if person is not None else None,
+                "note": action.get("note"),
                 "note_deferred": note_deferred(action, attempts),
                 "occurred_at_basis": "REQUEST_STARTED_UPPER_BOUND"}})
 
@@ -190,6 +194,16 @@ def _attempt(database, port, action_id, action, result, expected_state):
         # The provider said explicitly that an invitation exists or the people are connected:
         # nothing was sent. The reads that follow settle it (`_contacted_elsewhere`).
         attempt.update(outcome="REFUSED_INVITATION_EXISTS", reason=error.reason, finished_at=_now())
+        landed = _may_have_landed(result["attempts"][:-1])
+        if error.reason == "ALREADY_INVITED" and landed:
+            # Check before resend, point 5 (owner-approved): a retry answered "already invited" means an
+            # earlier attempt of ours landed, so the invitation counts as sent, not as a failure.
+            observed = _now()
+            _record_sent(database, action, landed[-1], None, observed, result["attempts"],
+                         evidence="unipile-already-invited:")
+            result["confirmed"] = {"at": observed, "by": "ALREADY_INVITED_ON_RETRY"}
+            _save(database, action_id, CONFIRMED, result, STARTED)
+            return CONFIRMED
         _save(database, action_id, RETRY_WAIT, result, STARTED)
         return RETRY_WAIT
     except Exception as error:  # an exception from a write is UNKNOWN (the port contract)
@@ -235,6 +249,28 @@ def send_invite(database, port, action_id):
     return _attempt(database, port, action_id, action, result, STARTED)
 
 
+def _may_have_landed(attempts):
+    """The attempts that may have reached LinkedIn: all but those it refused as already existing."""
+    return [item for item in attempts if item.get("outcome") != "REFUSED_INVITATION_EXISTS"]
+
+
+def retry_due_at(attempts):
+    """Check before resend (owner, 2026-11-06: "the right thing is to check the message was sent first
+    before deciding to retry"): after an unclear attempt, absence is read only once LinkedIn has had
+    time to catch up, on the draft campaigns' backoff (outreach.WRITE_RETRY_BACKOFF_MINUTES: 15
+    minutes after the first attempt, 60 after each later one). None when the last attempt cannot
+    have landed (none made, or refused as already existing)."""
+    import outreach
+    if not attempts or attempts[-1].get("outcome") == "REFUSED_INVITATION_EXISTS":
+        return None
+    minutes = outreach.WRITE_RETRY_BACKOFF_MINUTES
+    try:
+        started = engagement.timestamp(attempts[-1]["started_at"])
+    except (KeyError, TypeError, ValueError):
+        return dt.datetime.max.replace(tzinfo=dt.timezone.utc)   # unreadable: never concluded absent
+    return started + dt.timedelta(minutes=minutes[min(len(attempts), len(minutes)) - 1])
+
+
 def _contacted_elsewhere(result):
     """GL1, narrowed by GL-I1 and GM1 (owner, 2026-10-22): our only attempt was refused by the
     provider saying explicitly that an invitation already exists or the people are already
@@ -251,8 +287,8 @@ def reconcile_invite(database, port, action_id, config=None, now=None):
 
     ACKED: shown pending or connected -> CONFIRMED (initial_sent recorded); not shown -> RETRY_WAIT
     (the acknowledgement did not land). RETRY_WAIT: shown -> CONFIRMED; `invitation_absent` True ->
-    another attempt while fewer than 3 were made, else CONFIRMED_NOT_SENT; a read that cannot decide
-    leaves the state as it is. Returns the state after this pass."""
+    another attempt while fewer than 3 were made, else CONFIRMED_NOT_SENT, read only once `retry_due_at`
+    has passed; a read that cannot decide leaves the state as it is. Returns the state after this pass."""
     action, state, result = _row(database, action_id)
     if state not in {ACKED, RETRY_WAIT}:
         return state
@@ -284,6 +320,10 @@ def reconcile_invite(database, port, action_id, config=None, now=None):
         result.setdefault("reads", []).append({"at": observed, "status": status})
         _save(database, action_id, RETRY_WAIT, result, ACKED)
         return RETRY_WAIT
+    due = retry_due_at(result.get("attempts") or [])
+    if due is not None and engagement.timestamp(now or dt.datetime.now(dt.timezone.utc)) < due:
+        # Check before resend: too soon to read absence after an unclear attempt; read again later.
+        return state
     try:
         absent = linkedin_port.invitation_absent(port, action["provider_id"], action["profile"])
     except Exception as error:
@@ -414,7 +454,7 @@ def sequence_view(database, profile, now=None, recipient=""):
     if isinstance(profile, str) and "://" not in profile:
         profile = "https://" + profile   # a stored identity ("linkedin.com/in/x"), as engagement.identity_keys reads it
     identity = profile_key(profile)
-    invite = database.execute("""SELECT action_id,state FROM outreach_actions WHERE identity=?
+    invite = database.execute("""SELECT action_id,state,result FROM outreach_actions WHERE identity=?
         AND json_extract(payload,'$.purpose')=? ORDER BY rowid DESC LIMIT 1""", (identity, INVITE)).fetchone()
     events = engagement.events_for(database, identity)
     kinds = [event["kind"] for event in events]
@@ -428,6 +468,13 @@ def sequence_view(database, profile, now=None, recipient=""):
         stage = "INVITED"
     elif invite:
         stage = "INVITE_" + invite[1]
+        try:
+            result = json.loads(invite[2] or "{}")
+        except (TypeError, ValueError):
+            result = {}
+        import outreach
+        if outreach.checking_before_resend({"purpose": INVITE}, invite[1], result):
+            stage = "INVITE_CHECKING"   # check before resend: not "will be tried again" until absence is read
     else:
         stage = "NOT_STARTED"
     following = engagement.next_action(database, profile, now, recipient)
@@ -480,7 +527,8 @@ INVITE_STAGE_WORDS = {
     NOT_SENT: "Invitation did not go out", "WRITE_FAILED": "Invitation could not be sent",
     "UNCERTAIN_NO_RETRY": "Couldn't confirm the invitation went out",
     "CANCELLED_BEFORE_SEND": "Invitation cancelled before sending", "CANCELLED": "Invitation cancelled before sending",
-    "CLOSED": "Closed, no invitation sent"}
+    "CLOSED": "Closed, no invitation sent",
+    "CHECKING": "Checking the invitation"}
 
 
 def position(view, zone):

@@ -271,7 +271,8 @@ class ReviewFixes(Base):
         # The absence read lags: the retry is made, and the provider refuses it as already existing.
         with unittest.mock.patch("linkedin_port.invitation_absent", return_value=True), \
                 unittest.mock.patch.object(sequence, "acceptance", return_value=("NOT_PENDING", Person(ALICE, self.alice, 2, False, {}))):
-            sequence.reconcile_invite(self.db, self.port, "invite-1")
+            sequence.reconcile_invite(self.db, self.port, "invite-1", None,
+                                      dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2))   # after the wait
         attempts = json.loads(self.db.execute("SELECT result FROM outreach_actions").fetchone()[0])["attempts"]
         self.assertEqual([(item["note"], item["outcome"]) for item in attempts],
                          [(NOTE, "UNCERTAIN"), (None, "REFUSED_INVITATION_EXISTS")])

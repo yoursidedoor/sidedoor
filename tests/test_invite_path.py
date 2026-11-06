@@ -133,9 +133,13 @@ class InvitePathTests(unittest.TestCase):
         self.promote()
         self.port.fail("send_invitation", "timeout", times=5)
         states = []
-        for unused in range(5):
-            self.execute()
-            states.append(self.invite()[0]["state"])
+        # Each pass comes after the check-before-resend wait (sequence.retry_due_at): attempts are
+        # stamped two hours back.
+        earlier = lambda: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat()
+        with patch("sequence._now", side_effect=earlier):
+            for unused in range(5):
+                self.execute()
+                states.append(self.invite()[0]["state"])
         self.assertEqual(states, ["INVITE_RETRY_WAIT"] * 3 + ["CONFIRMED_NOT_SENT"] * 2)
         self.assertEqual(self.port.calls.count("send_invitation"), 3)
         self.assertEqual(self.kinds(), [])

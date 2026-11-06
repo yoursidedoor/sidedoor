@@ -17,6 +17,11 @@ from orchestrator import profile_key
 ALICE = "https://www.linkedin.com/in/alice"
 
 
+def later():
+    """A read after the check-before-resend wait (sequence.retry_due_at: at most 60 minutes)."""
+    return dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
@@ -67,9 +72,9 @@ class Invite(Base):
     def test_uncertain_write_retried_at_most_three_times_after_absence(self):
         self.port.fail("send_invitation", "timeout", times=5)
         self.assertEqual(sequence.send_invite(self.db, self.port, self.action()), sequence.RETRY_WAIT)
-        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1"), sequence.RETRY_WAIT)
-        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1"), sequence.RETRY_WAIT)
-        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1"), sequence.NOT_SENT)
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.RETRY_WAIT)
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.RETRY_WAIT)
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.NOT_SENT)
         self.assertEqual(self.port.calls.count("send_invitation"), 3)
         self.assertEqual(self.kinds(), [])
 
@@ -218,10 +223,80 @@ class MatchLive(Base):
             reads.append(profile)
             return sequence.linkedin_port.Person(profile, self.alice, "?", None, {}) if len(reads) == 1 else real(profile)
         with unittest.mock.patch.object(self.port, "lookup", side_effect=first_unclear):
-            self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1"), "CANCELLED_BEFORE_SEND")
+            self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), "CANCELLED_BEFORE_SEND")
         self.assertEqual(self.port.calls.count("send_invitation"), 1)
         guard = json.loads(self.db.execute("SELECT result FROM outreach_actions").fetchone()[0])["provider_guard"]
         self.assertEqual(guard["gates"], ["PROFILE_INVITATION_STATE_UNKNOWN"])
+
+
+class CheckBeforeResend(Base):
+    """Owner, 2026-11-06: "the right thing is to check the message was sent first before deciding to
+    retry". An unclear invitation is read once LinkedIn had time to catch up; shown -> sent, absent on
+    complete reads -> one more attempt (3 in all), a read that cannot decide -> read again later."""
+
+    def unclear(self):
+        self.port.fail("send_invitation", "timeout")
+        self.assertEqual(sequence.send_invite(self.db, self.port, self.action()), sequence.RETRY_WAIT)
+
+    def test_landed_but_timed_out_is_found_and_never_sent_twice(self):
+        self.port.fail("send_invitation", "timeout_after_write")
+        sequence.send_invite(self.db, self.port, self.action())
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.CONFIRMED)
+        self.assertEqual(self.port.calls.count("send_invitation"), 1)
+        self.assertEqual(self.kinds(), ["initial_sent"])
+
+    def test_an_invite_being_checked_says_checking_not_tried_again(self):
+        # Owner pick C1, 2026-11-06: next to "Sidedoor won't send it twice" the summary says it is checking.
+        self.unclear()
+        view = sequence.sequence_view(self.db, ALICE)
+        self.assertEqual(view["stage"], "INVITE_CHECKING")
+        self.assertEqual(sequence.position(view, dt.timezone.utc), "Checking the invitation")
+
+    def test_absence_is_not_read_before_the_wait(self):
+        self.unclear()
+        soon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, soon), sequence.RETRY_WAIT)
+        self.assertEqual(self.port.calls.count("send_invitation"), 1)
+        self.assertNotIn("sent_invitations", self.port.calls)
+
+    def test_not_landed_is_retried_once_then_confirmed(self):
+        self.unclear()
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.ACKED)
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.CONFIRMED)
+        self.assertEqual(self.port.calls.count("send_invitation"), 2)
+        self.assertEqual(len(self.port.invitations), 1)
+
+    def test_failed_check_sends_nothing_and_is_read_again(self):
+        self.unclear()
+        self.port.fail("sent_invitations", "timeout")
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.RETRY_WAIT)
+        self.assertEqual(self.port.calls.count("send_invitation"), 1)
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.ACKED)
+        self.assertEqual(self.port.calls.count("send_invitation"), 2)
+
+    def test_a_capped_listing_never_shows_absence(self):
+        self.unclear()
+        for number in range(101):   # more than invitation_absent reads (50 pages of 2): PAGE_LIMIT
+            self.port.add_invitation(self.port.add_person("https://www.linkedin.com/in/other-%d" % number))
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.RETRY_WAIT)
+        self.assertEqual(self.port.calls.count("send_invitation"), 1)
+
+    def test_already_invited_on_a_retry_counts_as_sent(self):
+        self.unclear()
+        with unittest.mock.patch.object(self.port, "send_invitation",
+                                        side_effect=sequence.linkedin_port.InvitationExists("ALREADY_INVITED")):
+            self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), sequence.CONFIRMED)
+        self.assertEqual(self.kinds(), ["initial_sent"])
+        result = json.loads(self.db.execute("SELECT result FROM outreach_actions").fetchone()[0])
+        self.assertEqual(result["confirmed"]["by"], "ALREADY_INVITED_ON_RETRY")
+
+    def test_three_attempts_then_it_stops(self):
+        self.port.fail("send_invitation", "timeout", times=5)
+        sequence.send_invite(self.db, self.port, self.action())
+        for unused in range(5):
+            sequence.reconcile_invite(self.db, self.port, "invite-1", None, later())
+        self.assertEqual(self.state(), sequence.NOT_SENT)
+        self.assertEqual(self.port.calls.count("send_invitation"), 3)
 
 
 class OwnerApprovedFixes(Base):
@@ -229,7 +304,7 @@ class OwnerApprovedFixes(Base):
         self.port.fail("send_invitation", "timeout")
         sequence.send_invite(self.db, self.port, self.action())
         self.port.people[profile_key(ALICE)]["invitation"] = {"type": "RECEIVED", "status": "PENDING"}
-        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1"), "CANCELLED_BEFORE_SEND")
+        self.assertEqual(sequence.reconcile_invite(self.db, self.port, "invite-1", None, later()), "CANCELLED_BEFORE_SEND")
         self.assertEqual(self.port.calls.count("send_invitation"), 1)
 
     def test_stuck_request_started_is_read_before_any_retry(self):
@@ -365,7 +440,8 @@ class InviteStageWordsTest(unittest.TestCase):
                     "WRITE_FAILED": "Invitation could not be sent",
                     "UNCERTAIN_NO_RETRY": "Couldn't confirm the invitation went out",
                     "CANCELLED_BEFORE_SEND": "Invitation cancelled before sending",
-                    "CANCELLED": "Invitation cancelled before sending", "CLOSED": "Closed, no invitation sent"}
+                    "CANCELLED": "Invitation cancelled before sending", "CLOSED": "Closed, no invitation sent",
+                    "CHECKING": "Checking the invitation"}   # sequence_view's check-before-resend stage (owner C1)
         zone = ZoneInfo("America/Los_Angeles")
         for state, words in expected.items():
             self.assertEqual(sequence.position({"stage": "INVITE_" + state, "steps": [], "due": None}, zone), words, state)
