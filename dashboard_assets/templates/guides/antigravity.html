@@ -1,10 +1,13 @@
 <h3>Antigravity with your Google account</h3>
-<p class="note note-warning">Google's terms don't allow apps like Sidedoor to run Antigravity. If you choose it, Google may suspend your Antigravity or Gemini CLI account.</p>
+<p>The Antigravity desktop app isn't enough. Install the Antigravity command-line app.</p>
 <ol>
-  <li>Install the Antigravity command-line app (<code>agy</code>). On a Mac with Homebrew, open Terminal and paste:
-    <pre class="copy">brew install --cask antigravity-cli</pre>
-    Press Return. Otherwise follow Google's install steps for the Antigravity CLI.</li>
-  <li>In Terminal type <code>agy</code> and press Return. A browser window opens: sign in with your Google account. When agy shows its prompt, close Terminal.</li>
-  <li>Back in Sidedoor, choose Antigravity and click Check. Sidedoor adds permission rules for its own tools to Antigravity's settings, so its runs can use them; every other tool stays refused.</li>
+  <li>Install the Antigravity command-line app from <a href="https://antigravity.google/download#antigravity-cli" target="_blank" rel="noopener noreferrer">Google's download page</a>.</li>
+  <li>In {{ "PowerShell" if guide_platform == "windows" else "Terminal" }}, type <code>agy</code> and press {{ "Enter" if guide_platform == "windows" else "Return" }}.</li>
+  <li>Sign in with your Google account in the browser window that opens.</li>
+  {% if guide_button %}<li>Back here, click <strong>{{ guide_button }}</strong>.</li>{% endif %}
 </ol>
-<p class="muted">What is Terminal? On a Mac: Applications &gt; Utilities &gt; Terminal.</p>
+<details class="guide-trouble"><summary>If something goes wrong</summary>
+  {% if guide_platform != "windows" %}<p>With Homebrew, you can install it from Terminal instead: paste this and press Return.</p>
+  <pre class="copy">brew install --cask antigravity-cli</pre>{% endif %}
+  <p>{% if guide_platform == "windows" %}What is PowerShell? Open the Start menu, type PowerShell and press Enter.{% else %}What is Terminal? Applications &gt; Utilities &gt; Terminal.{% endif %}</p>
+</details>

@@ -888,7 +888,8 @@ class DashboardTest(ClockCase):
             self.assertIn("Your trial ended. Add a card to keep going.", page, path)
             self.assertIn(link, page, path)
             self.assertNotIn("Renew", page, path)
-        self.assertIn('id="paywall-renew"', client.get("/").text)   # the Overview paywall
+        self.assertIn('class="card paywall"', client.get("/").text)   # the Overview paywall
+        self.assertNotIn('id="guide-renew"', client.get("/").text)   # round 2 (8): no guide while the trial is paused
         self.assertIn(">Check again<", client.get("/settings").text)
         # The relay resumes it once a card is added; the next check restores the license.
         self.relay.status = "active"
@@ -990,7 +991,7 @@ class DashboardTest(ClockCase):
     def test_r11_setup_while_paused_has_no_buy_or_paste_prompt_but_keeps_the_key_field(self):
         def step(page):
             return page.split('id="step-1"')[1].split("</li>")[0]
-        prompt, buy = "Paste the license key you got after buying.", "Buy a license"
+        prompt, buy = "Paste your license key.", "Start free trial"
         before = step(self.client().get("/setup").text)   # no key yet: unchanged
         self.assertIn(prompt, before)
         self.assertIn(buy, before)
@@ -1043,14 +1044,14 @@ class DashboardTest(ClockCase):
         self.assertEqual(license_clock.pause_reason(value), "expired")
         client = self.client()
         overview, settings_, setup = client.get("/").text, client.get("/settings").text, client.get("/setup").text
-        self.assertIn('id="paywall-renew"', overview)
+        self.assertIn('class="card paywall"', overview)
         for page in (overview, settings_):
             self.assertIn(self.CARD_HTML, page)
             self.assertIn(">Add a card</a>", page)
             self.assertIn(">Check again<", page)
             self.assertNotIn("Renew", page)
         step = setup.split('id="step-1"')[1].split("</li>")[0]
-        for gone in ("Add a card</a>", "Buy a license", "Paste the license key you got after buying."):
+        for gone in ("Add a card</a>", "Start free trial", "Paste your license key."):
             self.assertNotIn(gone, step)
         self.assertIn(">Check again<", step)
         headers = {"hx-request": "true", "origin": "http://127.0.0.1:47823"}
@@ -1117,7 +1118,7 @@ class DashboardTest(ClockCase):
             self.assertIn(">Check again<", page)
             for wrong in ("Your trial ended", "not valid", "Active: Active"):
                 self.assertNotIn(wrong, page)
-        for gone in ("Add a card</a>", "Buy a license", "Paste the license key you got after buying."):
+        for gone in ("Add a card</a>", "Start free trial", "Paste your license key."):
             self.assertNotIn(gone, step)
         self.assertIn(">Add a card</a>", settings_)
         section = settings_.split('id="license"')[1].split("</section>")[0]
@@ -1151,7 +1152,7 @@ class DashboardTest(ClockCase):
         page = self.client().get("/").text
         self.assertIn("Your trial ended. Add a card to keep going.", page)
         self.assertNotIn('action="/pause"', page)
-        self.relay.status = "canceled"   # a plain Expired keeps [Pause] (PW1)
+        self.relay.status = "canceled"   # a plain Expired keeps a quiet [Pause] (PW1, round 3)
         license_clock._last_check["mono"] = None
         self.heartbeat()
         self.assertIn('action="/pause"', self.client().get("/").text)
@@ -1253,9 +1254,9 @@ class DashboardTest(ClockCase):
         raw = "2025-03-04T01:06:27Z"   # a message an older build stored (a far date: no "Sun")
         setup_steps.record(self.home, "license", "done", "Active: Trial. Good until %s." % raw)
         client = self.client()
-        for path in ("/settings", "/setup"):
+        for path in ("/settings", "/setup?open=1"):
             page = client.get(path).text
-            if path == "/setup":   # Settings shows only a refusal's saved line (one status line; owner, 2026-10-24)
+            if path == "/setup?open=1":   # Settings shows only a refusal's saved line (one status line; owner, 2026-10-24)
                 self.assertIn("Active: Trial. Good until Mar 3, 17:06.", page, path)  # America/Los_Angeles
             self.assertNotIn(raw, page, path)
 

@@ -6,7 +6,7 @@ default; the choice is `share_progress` in setup-state.json. While it is on, the
 `milestones` = {"setup_finished", "first_drafted", "first_sent"}, each the first day it happened
 ("YYYY-MM-DD", UTC) or None. While it is off, only the opt-out marker is added. The relay keeps only these three
 dates (relay/milestones.py). Each is read from what Sidedoor already records; nothing new is tracked:
-- setup_finished: setup-state.json `setup_finished_at` (latched once steps 1 to 9 are done).
+- setup_finished: setup-state.json `setup_finished_at` (latched once the required steps are done).
 - first_drafted: the earliest outreach message the AI composed (outreach_agent_audit,
   phase COMPOSITION, kind DECISION).
 - first_sent: the earliest first outreach Sidedoor sent (engagement_events kind `initial_sent` from

@@ -3,5 +3,5 @@
 <div class="connection" id="connection-claude"{% if oob %} hx-swap-oob="true"{% endif %}>
   <h3>Claude</h3>
   {% if x.claude.message %}<p class="note note-{{ 'success' if x.claude_done else 'error' }}" role="status">{{ x.say(x.claude.message) }}</p>{% endif %}
-  {{ claude_signin("/settings/claude", "#connection-claude", x, "s-claude-key") }}
+  {{ claude_signin("/settings/claude", "#connection-claude", x, "s-claude-key", always_check=True) }}
 </div>

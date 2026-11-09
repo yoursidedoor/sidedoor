@@ -79,17 +79,19 @@ class EngineChoiceTest(unittest.TestCase):
         self.assertIn("Claude is signed out", self.client.get("/settings").text)
 
     def test_antigravity_listed_and_notice_when_chosen(self):
-        page = self.client.get("/setup").text
+        page = self.client.get("/setup?open=6").text
         self.assertIn('value="antigravity"', page)   # U1 4: registered in engines.ENGINES
-        self.assertNotIn("Claude Code", page)
+        self.assertIn("Claude Code CLI (powered by Claude)", page)   # owner, 2026-11-08: the CLI is named
+        self.assertIn("desktop apps aren't enough on their own", page)
         self.assertNotIn("antigravity-chosen", self.client.get("/settings").text)
         with mock.patch.object(setup_steps, "find_antigravity", return_value=None):
             self.client.post("/settings/engine", data={"engine": "antigravity"}, headers=HTMX)
-            for page in (self.client.get("/settings").text, self.client.get("/setup").text):
+            for page in (self.client.get("/settings").text, self.client.get("/setup?open=6").text):
                 self.assertIn("antigravity-chosen", page)
                 self.assertIn("may suspend your Antigravity or Gemini CLI account", page)
                 self.assertIn("Antigravity is not installed.", page)
-                self.assertIn("/setup/guide/antigravity", page)
+                self.assertIn('id="guide-antigravity"', page)   # S2: opens in place
+                self.assertIn(">Check again</button>", page)   # B2: not done
         self.assertEqual(self.client.get("/setup/guide/antigravity").status_code, 200)
 
     def test_antigravity_chosen_applies_allow_rules_and_finishes_step_6(self):
@@ -113,7 +115,7 @@ class EngineChoiceTest(unittest.TestCase):
             self.client.post("/settings/antigravity/models", data={"main": "gemini-3.8-flash-high",
                                                                     "read": "claude-sonnet-4-6"}, headers=HTMX)
             self.assertEqual(setup_steps.load_state(self.home)["antigravity_model"], "gemini-3.8-flash-high")
-            self.assertIn('<option value="gemini-3.8-flash-high" selected>', self.client.get("/setup").text)
+            self.assertIn('<option value="gemini-3.8-flash-high" selected>', self.client.get("/setup?open=6").text)
 
     def test_g1_finished_setup_names_claude_in_banner_and_health(self):
         setup_steps.update_state(lambda value: value.update(setup_finished_at="2026-10-28T00:00:00+00:00"), self.home)
@@ -158,8 +160,7 @@ class EngineChoiceTest(unittest.TestCase):
             self.client.post("/settings/engine", data={"engine": "antigravity"}, headers=HTMX)
         with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):   # not this computer's Chrome
             email = self.client.post("/settings/email", headers=HTMX).text   # G6: the email check names it
-        self.assertIn("#connection-antigravity", email)
-        self.assertIn("Antigravity", email)
+        self.assertIn('href="#connection-engine">Choose your AI</a>', email)   # round 3 (10): Setup's name
 
     def test_g3_claude_sign_in_changes_clear_claude_waits(self):
         for change in (lambda: setup_steps.choose_claude_auth("subscription", self.home),

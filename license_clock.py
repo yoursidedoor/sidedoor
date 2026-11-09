@@ -966,7 +966,7 @@ def _dress(result):
         label = "Keychain locked" if text.startswith("Keychain locked") else "Waiting for keychain"
         tone, href, action = "warning", SETTINGS_LICENSE, None
     elif state == "no_license":
-        label, tone, href = "No license yet", "warning", "/setup#step-1"
+        label, tone, href = "No license yet", "warning", "/setup?open=1#step-1"
         text, action = "No license yet.", {"label": "Enter license key", "href": SETTINGS_LICENSE}
     elif state == "checking":
         label, tone, href, action = "Checking your license…", "info", SETTINGS_LICENSE, None

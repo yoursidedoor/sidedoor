@@ -197,7 +197,7 @@ def check_profile(home):
     try:
         _profile(home)
     except user_profile.ProfileMissing:
-        return _line(FAIL, "Profile", "There is no profile yet.", "Fill in Your profile in Setup.")
+        return _line(FAIL, "Profile", "There is no profile yet.", "Fill in Profile and search in Setup.")
     except (OSError, ValueError) as error:
         return _line(FAIL, "Profile", "Your profile file can't be read (%s)." % type(error).__name__,
                      "Open Settings > Profile and save it again.")

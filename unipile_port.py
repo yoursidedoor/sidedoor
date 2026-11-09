@@ -155,7 +155,7 @@ class SetupHold(PortError):
 class SenderNotConfigured(SetupHold):
     """No saved sending identity (`setup_steps.saved_sender`): LinkedIn has not been confirmed yet."""
     code = "SENDER_NOT_CONFIGURED"
-    next_action = "Connect LinkedIn in Setup step 7 (Settings > LinkedIn)."
+    next_action = "Connect LinkedIn in Setup or Settings."
 
 
 class LicenseHold(SetupHold):
@@ -180,7 +180,7 @@ class LicenseRefused(LicenseHold):
 class LinkedInNotConnected(LicenseHold):
     """The relay answered 403 LICENSE_NOT_LINKED: the license is fine, no LinkedIn account is linked."""
     code = "LINKEDIN_NOT_CONNECTED"
-    next_action = "Connect LinkedIn in Setup step 7 / Settings > LinkedIn."
+    next_action = "Connect LinkedIn in Setup or Settings."
 
 
 class RelayRefusedWrite(UncertainWrite):

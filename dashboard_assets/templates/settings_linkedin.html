@@ -5,13 +5,13 @@
   {% set l = x.linkedin %}
   {% if not x.has_license %}
   <p class="muted">Needs your license first (<a href="#license">License</a>).</p>
-  <p class="note note-info">If your LinkedIn account isn't Premium, Sidedoor sends your first outreach without a note, and sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.</p>
+  <p class="note note-info">LinkedIn Premium lets you add a note to invitations.</p>
   {% else %}
   {% if l.message %}<p class="note note-{{ 'success' if l.status == 'done' else ('error' if l.status == 'failed' else 'info') }}" role="status">{{ x.say(l.message) }}</p>{% endif %}
   {% set p = x.linkedin_premium %}
   {% if p %}<p class="muted" id="linkedin-premium">Your LinkedIn account: {{ "Premium" if p.premium else "not Premium" }}{% if p.checked %} (checked {{ p.checked }}){% endif %}.</p>
   {% elif l.status == "done" %}<p class="muted" id="linkedin-premium">Your LinkedIn account: not checked yet.</p>{% endif %}
-  <p class="note note-info">If your LinkedIn account isn't Premium, Sidedoor sends your first outreach without a note, and sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.</p>
+  <p class="note note-info">LinkedIn Premium lets you add a note to invitations.</p>
   {% if l.offer == "waiting" %}
   {% if x.link_url %}<p><a class="button" href="{{ x.link_url }}" target="_blank" rel="noopener noreferrer">Open the LinkedIn sign-in page</a></p>{% endif %}
   {% set again = "reconnect" if l.kind == "reconnect" else "connect" %}
@@ -23,10 +23,15 @@
     <button class="button" type="submit">Connect LinkedIn</button></form>
   {% elif l.offer == "reconnect" %}
   <form method="post" action="/settings/linkedin/reconnect" hx-post="/settings/linkedin/reconnect" hx-target="#connection-linkedin" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button{% if l.status == 'done' %} button-quiet{% endif %}" type="submit">Reconnect</button></form>
+    <button class="button{% if l.status == 'done' %} button-quiet{% endif %}" type="submit">Reconnect LinkedIn</button></form>
   {% else %}
   <button class="button" type="button" hx-get="/settings/linkedin/status" hx-target="#connection-linkedin" hx-swap="outerHTML">Check again</button>
   {% endif %}
   {% endif %}
-  <a class="guide-link" href="/setup/guide/linkedin" hx-get="/setup/guide/linkedin" hx-target="#guide-panel">Show me how</a>
+  {# Round 2 (10): the guide names only the button showing now; with no license, the license first. #}
+  {% set l = x.linkedin %}
+  {% if not x.has_license %}{% set button = None %}{% elif l.offer == "connect" %}{% set button = "Connect LinkedIn" %}{% elif l.offer == "reconnect" %}{% set button = "Reconnect LinkedIn" %}
+  {% elif l.offer == "waiting" and not x.link_url %}{% set button = ("Reconnect" if l.kind == "reconnect" else "Connect") ~ " again" %}
+  {% elif l.offer == "waiting" %}{% set button = None %}{% else %}{% set button = "Check again" %}{% endif %}
+  {% with guide_name = "linkedin", guide_button = button, guide_needs_license = not x.has_license, guide_connected = x.has_license and l.status == "done" %}{% include "guide_inline.html" %}{% endwith %}
 </div>

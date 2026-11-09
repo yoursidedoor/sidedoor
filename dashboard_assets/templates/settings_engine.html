@@ -2,7 +2,7 @@
 {% from "engine_macros.html" import engine_choice %}
 <div id="connection-ai"{% if oob %} hx-swap-oob="true"{% endif %}>
 <div class="connection" id="connection-engine">
-  <h3>AI engine</h3>
+  <h3>Choose your AI</h3>
   {{ engine_choice("/settings/engine", "#connection-ai", x.engine, x.engine_options, x.antigravity_risk) }}
 </div>
 {% if x.engine == "claude" %}{% with oob = False %}{% include "settings_claude.html" %}{% endwith %}

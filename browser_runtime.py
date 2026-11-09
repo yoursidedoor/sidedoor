@@ -1,7 +1,7 @@
 """Where Sidedoor's browser driver lives and how Codex is pointed at it (E7.T1, option A).
 
 Owner, 2026-10-22: bundled Node plus @playwright/mcp behind `sidedoor browser-guard`. Every browser job
-(application inspect/investigate/submit/verify/reconcile, the LinkedIn contact finder, setup step 9's
+(application inspect/investigate/submit/verify/reconcile, the LinkedIn contact finder, the setup browser step's
 email check) runs `codex exec` with ONE stdio MCP server named `browser`:
 
     <sidedoor> browser-guard --operation <op> --audit <dir>/guard.jsonl [--claim ..] [--human-check ..]

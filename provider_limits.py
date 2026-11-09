@@ -537,7 +537,7 @@ def codex_fix(finished):
     (the Setup tab is hidden then, owner 2026-10-21)."""
     if finished:
         return CODEX_WORDS_FINISHED, "Open Settings", "/settings#connection-codex"
-    return CODEX_WORDS, "Open Setup", "/setup#step-6"
+    return CODEX_WORDS, "Open Setup", "/setup?open=6#step-6"
 
 
 def claude_fix(kind, finished):

@@ -501,14 +501,14 @@ class DashboardStep6(SetupStep6):
             return self.client.post(path, data=data, headers=self.headers)
 
     def test_setup_offers_both_and_never_shows_the_saved_key(self):
-        page = self.client.get("/setup").text
+        page = self.client.get("/setup?open=6").text   # S1: open the step (only the current one starts open)
         self.assertIn("Sign in with ChatGPT", page)
         self.assertIn("Use an OpenAI API key", page)
         self.assertNotIn('id="openai-key"', page)   # ChatGPT is the default: no key box
         self.assertIn('id="openai-key"', self.post("/setup/codex/auth", choice="api_key").text)
         response = self.post("/setup/codex/key", key=KEY)
-        self.assertIn("uses your OpenAI API key", response.text)
-        page = self.client.get("/setup").text
+        self.assertIn("uses your OpenAI API key", self.client.get("/setup?open=6").text)
+        page = self.client.get("/setup?open=6").text
         self.assertIn(KEY[-4:], page)
         self.assertNotIn(KEY, page + response.text)
         refused = self.post("/setup/codex/key", Transport(models=(401, b"{}")), key="sk-proj-typo-key-1111")

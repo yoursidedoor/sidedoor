@@ -91,9 +91,9 @@ class SetupStepsTest(unittest.TestCase):
         for pasted in ("SD-abc123", "  sd-abc123 ", '"SD-abc123"', "'Sd-abc123'"):   # U4: case, spaces, quotes
             state = setup_steps.save_and_test_openrouter(pasted, CONFIG, self.home,
                                                          transport=lambda *args: calls.append(args))
-            self.assertEqual(state["license_key_notice"], "That's your Sidedoor license key. It goes in step 1.")
+            self.assertEqual(state["license_key_notice"], "That's your Sidedoor license key. It goes in the License key step.")
             self.assertNotIn("openrouter", state["steps"])   # U1: nothing recorded
-        self.assertEqual(setup_steps.NUMBER["license"], 1)   # "step 1" is true
+        self.assertEqual(setup_steps.NUMBER["license"], 1)
         self.assertEqual(calls, [])
         self.assertIsNone(setup_steps.saved_openrouter_key(self.home))
         self.assertFalse(setup_steps.is_license_key("sk-or-v1-SD-"))
@@ -101,7 +101,7 @@ class SetupStepsTest(unittest.TestCase):
         with mock.patch.object(setup_steps, "keychain_refusal", return_value="Sidedoor can't save to your keychain."):
             state = setup_steps.save_and_test_openrouter("SD-abc123", CONFIG, self.home,
                                                          transport=lambda *args: calls.append(args))
-        self.assertEqual(state["license_key_notice"], "That's your Sidedoor license key. It goes in step 1.")
+        self.assertEqual(state["license_key_notice"], "That's your Sidedoor license key. It goes in the License key step.")
         self.assertNotIn("keychain_refused", state)
 
     def test_openrouter_failures_in_plain_words(self):
@@ -545,7 +545,7 @@ class SetupStepsTest(unittest.TestCase):
         setup_steps.update_state(lambda value: value.update(linkedin_link_started_at="2000-01-01T00:00:00Z"), self.home)
         self.assertIn("not linked to your license yet", self.accounts(403, {"error": "LICENSE_NOT_LINKED"})["message"])
 
-    # --- step 9 ---
+    # --- step 8: the email check (B4) ---
     def test_email_check_compares_after_lowercasing_only(self):
         self.assertTrue(setup_steps.compare_mailboxes("Alex.Example@Example.com", "alex.example@example.com"))
         self.assertFalse(setup_steps.compare_mailboxes("alex.example@example.com", "alexexample@example.com"))
@@ -564,7 +564,7 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual(passed["locked_email"], "Alex.Example@example.com")
         later = setup_steps.run_email_check(self.home, read=lambda *args: "someone@example.com")
         self.assertTrue(later["steps"]["email"]["mismatch"])
-        self.assertTrue(setup_steps.progress(self.home)["done"][9])
+        self.assertTrue(setup_steps.email_locked(setup_steps.load_state(self.home)))
 
     def test_webmail_choice_and_lock(self):
         self.assertEqual(setup_steps.webmail_choice("Gmail", "", self.home)["webmail"]["url"], "https://mail.google.com/")
@@ -762,9 +762,11 @@ class SetupStepsTest(unittest.TestCase):
     # --- order and stubs ---
     def test_order_the_code_forces(self):
         locked = setup_steps.progress(self.home)["locked"]
-        self.assertEqual((locked[3], locked[7], locked[9], locked[11]), (2, 1, 4, 1))   # S1a: the license is step 1
-        self.assertNotIn(10, locked)
-        self.assertEqual(setup_steps.progress(self.home)["left"], 8)
+        self.assertEqual((locked[3], locked[7], locked[10]), (2, 1, 1))   # S1a: the license is step 1
+        self.assertNotIn(8, locked)   # round 1 (12): the browser step is never locked; its email check waits
+        self.assertEqual(setup_steps.email_check_waits_for(setup_steps.progress(self.home)), [4, 6])
+        self.assertNotIn(9, locked)   # start at login: optional, never locked
+        self.assertEqual(setup_steps.progress(self.home)["left"], 7)   # 8 required, the mode always done
 
     def test_a_030_setup_file_shows_the_same_steps_done_after_the_license_moved_first(self):
         # S1a: saved progress is keyed by step name, so a 0.3.0 file loads with the new numbers.
@@ -938,7 +940,8 @@ class ResetSetupFileTest(unittest.TestCase):
         state = setup_steps.load_state(self.home)
         self.assertFalse(setup_steps.state_unreadable(self.home))
         progress = setup_steps.progress(self.home)
-        self.assertEqual([progress["done"][number] for number in (2, 3, 4, 6, 7, 9)], [True, True, True, True, False, True])
+        # B4: the browser step (8) holds the email check; the browser sign-in itself is rechecked.
+        self.assertEqual([progress["done"][number] for number in (2, 3, 4, 6, 7, 8)], [True, True, True, True, False, False])
         self.assertEqual(state["locked_email"], setup_steps.saved_email(self.home))   # GL1: the email stays locked
         self.assertTrue(progress["finished"])
         self.assertNotIn("linkedin", state["steps"])

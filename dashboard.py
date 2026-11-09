@@ -208,13 +208,15 @@ def load_config(root=None):
 
 # Steps whose lock or result changes when another step changes; re-sent out of band with each step.
 STEP = setup_steps.NUMBER   # step name -> number (S1a: the license is 1, OpenRouter 2, ...)
-DEPENDENT_STEPS = (STEP["resume"], 7, 9, 11)
+DEPENDENT_STEPS = (STEP["resume"], STEP["linkedin"], STEP["browser"], STEP["start"])
 STATUS = {"reading": ("Checking", "info"), "done": ("Done", "success"), "failed": ("Failed", "error"), "needs_you": ("Needs you", "warning"),
           "checking": ("Checking", "info"), setup_steps.NOT_BUILT: ("Not built yet", "info"),
           "not_started": ("Not started", "muted")}
 STEP_KEYS = {number: key for number, key, _ in setup_steps.STEPS}
 STEP_TITLES = {number: title for number, _, title in setup_steps.STEPS}
-GUIDES = ("openrouter", "codex", "claude", "antigravity", "linkedin", "browser", "chrome", "license")
+GUIDES = ("openrouter", "codex", "claude", "antigravity", "linkedin", "browser", "chrome", "license", "renew")
+# G2 (owner, 2026-11-08): a guide shows only this computer's commands (Linux shares the Mac's).
+GUIDE_PLATFORM = "windows" if sys.platform.startswith("win") else "mac"
 
 
 def create_app(secret, port, home=None, root=None, config=None, browser=None, relay_url=setup_steps.RELAY_URL):
@@ -225,6 +227,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=ASSETS / "templates")
     templates.env.globals["asset_url"] = asset_url
+    templates.env.globals["guide_platform"] = GUIDE_PLATFORM
     app.mount("/static", StaticFiles(directory=ASSETS / "static"), name="static")
     app.mount("/brand", StaticFiles(directory=BRAND), name="brand")
     if browser is None:
@@ -294,7 +297,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     # --- [Reset setup file] (GL-M2) ------------------------------------------------------------------
 
     STEP_NAMES = {key: name for _number, key, name in setup_steps.STEPS}
-    RECHECK = ("linkedin", "browser", "email", "login", "start")
+    RECHECK = ("linkedin", "browser", "login", "start")   # B4: the email check is part of the browser step
 
     def setup_file_page(request, message=None, result=None, status_code=200):
         context = layout("settings", "Setup file")
@@ -344,7 +347,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                             "in Sidedoor's browser." % state.get("locked_email", ""),
                             "action_label": "Open Sidedoor's browser",
                             # After setup is finished the fix lives in Settings, never back in Setup.
-                            "action_href": "/settings#connections" if progress["finished"] else "/setup#step-8"})
+                            "action_href": "/settings#connections" if progress["finished"] else "/setup?open=8#step-8"})
         if progress["finished"]:
             # Once setup is finished the Setup tab stays hidden for good (owner, 2026-10-21); a step
             # that breaks later shows banner 6 pointing to Settings (Settings > Connections is E6.T8).
@@ -360,7 +363,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             for name in broken:
                 banners.append({"tone": "error", "text": "%s stopped working." % name,
                                 "action_label": "Fix", "action_href": "/settings#connections"})
-        else:
+        elif active != "setup":   # round 1 (6): not on Setup itself
             left = progress["left"]
             banners.append({"tone": "warning", "text": "Setup is not finished: %d step%s left." % (left, "" if left == 1 else "s"),
                             "action_label": "Continue setup", "action_href": "/setup"})
@@ -376,7 +379,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         api_banner = openai_auth.banner(home) if setup_steps.chosen_engine(state) == "codex" else None
         if api_banner:
             if not progress["finished"]:
-                api_banner = dict(api_banner, action_href="/setup#step-6")
+                api_banner = dict(api_banner, action_href="/setup?open=6#step-6")
             banners.append(api_banner)
         import provider_limits  # out of OpenRouter credits; the ChatGPT usage limit (both clear by themselves)
         banners.extend(provider_limits.banners(home, finished=progress["finished"]))
@@ -464,7 +467,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         # other pages stay readable. Grace spent and a 403 show their banner only, no paywall.
         context["paywall"] = license if license["state"] == "expired" else None
         if context["paywall"]:
-            # PW1: [Pause] stays available while Expired, and the user's own pause still shows.
+            # PW1 (round 3, 4): a quiet [Pause] / [Resume] stays on the paywall, away from the message.
             context["paywall_pause"] = overview_data.snapshot(
                 paths.database(root), lambda database: overview_data.paywall_pause(database, config),
                 lambda: read_connection(root))
@@ -615,32 +618,49 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             if license_view["paused"]:   # R1: the trial ended (Stripe paused it): [Add a card], [Check again]
                 status, message = "needs_you", license_view["text"]
                 extra = dict(extra or {}, license_paused=license_view)
-        elif number == 6 and status == "done" and not progress["done"][6]:
-            status, message = "failed", "%s is not installed." % setup_steps.ENGINE_LABELS[engine]
-        elif number == 8:
-            status = "done" if progress["done"][8] else ("failed" if status == "failed" else status)
-            if status == "done" and not state.get("webmail"):
+        elif number == 6:
+            # Round 1 (4): the chip follows the chosen engine, as the progress count does.
+            if progress["done"][6]:
+                status = "done"
+            elif status == "done":
+                status, message = "failed", "%s is not installed." % setup_steps.ENGINE_LABELS[engine]
+        elif key == "browser":
+            # B4 (owner, 2026-11-08): the email check is part of this step. Once the browser is closed
+            # (and the webmail chosen) the check's outcome is what the step says.
+            email = state["steps"].get("email", {})
+            if status == "done" and state.get("webmail") and email.get("message"):
+                status, message = email.get("status", "failed"), setup_steps.current_words(email["message"])
+            if progress["done"][number]:
+                status = "done"
+            elif status == "done":
                 status = "needs_you"
-        elif number == 9 and progress["done"][9]:
-            status = "done"
-        elif number == 10:  # the real registration, not the saved record (E5.T2)
+            waits = [step_title(need, engine) for need in setup_steps.email_check_waits_for(progress)]
+            if waits and message == setup_steps.BROWSER_CLOSED:   # round 3 (17): the "Finish ... first." note says what to do
+                message = None
+            extra = dict(extra or {}, email_record=email, email_checked=bool(email.get("message")), email_waits=waits)
+        elif key == "login":  # the real registration, not the saved record (E5.T2)
             login = setup_steps.login_view(saved, home)
             status, message = login["status"], login["message"]
             extra = dict(extra or {}, login_on=login["on"] or login.get("default", False),
                          login_supported=login["supported"], login_retry=login.get("retry"),
                          login_retry_label=login.get("retry_label"))
         label, tone = STATUS.get(status, STATUS["not_started"])
+        if key == "login" and status not in ("done", "failed"):   # round 1 (7): optional, never "Needs you"
+            label, tone = "Optional", "muted"
         if (extra or {}).get("license_paused"):
             label, tone = extra["license_paused"]["label"], extra["license_paused"]["tone"]
         locked = progress["locked"].get(number)
-        if locked:
-            label, tone = "Needs step %d first" % locked, "muted"
-        title = setup_steps.ENGINE_TITLES[engine] if number == 6 else STEP_TITLES[number]
+        if locked:   # S1: a locked step says only which step comes first, by name
+            label, tone = "Waiting for: %s" % step_title(locked, engine), "muted"
+        title = step_title(number, engine)
         view = {"number": number, "key": key, "title": title, "status": status, "label": label,
                 "tone": tone, "message": message, "locked": locked, "saved": saved, "state": state,
                 "progress": progress, "oob": False, "email_locked": setup_steps.email_locked(state),
                 "locked_line": setup_steps.LOCKED_LINE, "support": setup_steps.SUPPORT_EMAIL,
-                "website": setup_steps.WEBSITE_URL, "busy_line": setup_steps.BUSY_LINE}
+                "website": setup_steps.WEBSITE_URL, "busy_line": setup_steps.BUSY_LINE,
+                # S1 (owner, 2026-11-08): only the current step is open; the others are one line.
+                # Round 1 (3): the mode step is small and always open.
+                "open": key == "mode" or number == setup_steps.current_step(progress)}
         if key == "openrouter" and locked is None and progress["locked"].get(STEP["resume"]) == number:
             view["unlocks"] = STEP["resume"]
         if key in ("openrouter", "license") or number == 6:   # 6: the OpenAI API key (E0.T8) is kept the same way
@@ -674,13 +694,18 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             form = setup_steps.profile_form(home)
             view.update(form=form, errors=saved.get("errors") or {}, pick=pick_view,
                         self_id=setup_steps.picklists()["self_identification"])
-        if number == 8:
+        if key == "browser":
             view.update(chrome=setup_steps.chrome_path(), browser_open=browser.is_open(),
                         webmail=state.get("webmail"), webmail_record=state["steps"].get("webmail", {}),
                         application_email=(state.get("locked_email") or setup_steps.saved_email(home)),
                         pick=pick_view)
         view.update(extra or {})
+        if key == "mode":
+            view["open"] = True
         return view
+
+    def step_title(number, engine):
+        return "Choose your AI" if number == STEP["codex"] else STEP_TITLES[number]   # round 1 (9)
 
     def pick_view(field, chosen):
         listed, several = (setup_steps.PICK_FIELDS.get(field) or ("webmail", False))
@@ -688,17 +713,52 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         return {"field": field, "list": listed, "several": several, "chosen": values,
                 "custom": field in setup_steps.CUSTOM_FIELDS}
 
-    def setup_response(request, focus, extra=None, also=()):
-        """The changed step, plus (htmx) the dependent steps, progress and banners out of band."""
+    def open_steps(request, name="open_step"):
+        """Round 1 (2): the steps open on the page when this request was sent (each open step's
+        `open_step` marker, hx-include'd by every request from the steps list); `done_step` (round 3, 1):
+        the steps that were done then."""
+        form = getattr(request, "_form", None)
+        if form is None and request.method == "POST" and request.headers.get("hx-request") == "true":
+            try:   # a sync route runs in a worker thread: read the (small) form from the event loop
+                import anyio.from_thread
+                form = anyio.from_thread.run(request.form)
+            except RuntimeError:
+                form = None
+        values = list(form.getlist(name) if form is not None else []) + request.query_params.getlist(name)
+        return {int(value) for value in values if isinstance(value, str) and value.isdigit()}
+
+    def setup_response(request, focus, extra=None, also=(), force=()):
+        """The changed step, plus (htmx) the dependent steps, progress and banners out of band.
+        Round 1 (1, 2): the changed step collapses once done (open while it fails or needs you); then
+        the step that is now current opens. A step open on the page is not sent again (its typed
+        input stays), unless it is in `force` or became locked."""
         progress = setup_steps.progress(home)
         if request.headers.get("hx-request") != "true":
-            return RedirectResponse("/setup#step-%d" % focus, status_code=303)
-        parts = [templates.get_template("setup_step.html").render(step=step_view(focus, progress, extra))]
-        for number in DEPENDENT_STEPS + tuple(also):
-            if number != focus:
-                view = step_view(number, progress)
-                view["oob"] = True
-                parts.append(templates.get_template("setup_step.html").render(step=view))
+            return RedirectResponse("/setup?open=%d#step-%d" % (focus, focus), status_code=303)
+        opened = open_steps(request)
+        first = step_view(focus, progress, extra)
+        if "open" not in (extra or {}):
+            notice = any(key.endswith(("_notice", "_error")) and value for key, value in (extra or {}).items())
+            first["open"] = first["key"] == "mode" or first["locked"] is None and (first["status"] != "done" or notice)
+            if not first["open"] and first["locked"] is None:
+                # Round 2 (5): a step done by this action shows its message a few seconds, then collapses;
+                # round 3 (1, 2): only when this action made it done, and never over a warning or an error.
+                warned = first["tone"] in ("warning", "error") or bool((first["saved"] or {}).get("notice"))
+                first["open"] = True
+                first["collapse_after"] = focus not in open_steps(request, "done_step") and not warned
+        parts = [templates.get_template("setup_step.html").render(step=first)]
+        current = setup_steps.current_step(progress)
+        moved = (current,) if progress["done"].get(focus) and current != focus else ()
+        for number in dict.fromkeys(DEPENDENT_STEPS + tuple(also) + tuple(force) + moved):
+            if number == focus:
+                continue
+            kept_open = number in opened
+            if kept_open and number not in force and not progress["locked"].get(number):
+                continue
+            view = step_view(number, progress)
+            view["open"] = view["open"] and number in moved or kept_open or view["key"] == "mode"
+            view["oob"] = True
+            parts.append(templates.get_template("setup_step.html").render(step=view))
         context = layout("setup", "Setup", progress)
         parts.append(templates.get_template("setup_progress.html").render(progress=progress, oob=True))
         parts.append(templates.get_template("banners.html").render(banners=context["banners"], oob=True))
@@ -709,18 +769,48 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     def setup_page(request: Request):
         progress = setup_steps.progress(home)
         context = layout("setup", "Setup", progress)
-        context.update(progress=progress, steps=[step_view(number, progress, {"page_load": True})
-                                                 for number, _, _ in setup_steps.STEPS])
+        # ?open=N: [Change] / [Open] without htmx opens that step (S1).
+        try:
+            opened = int(request.query_params.get("open", ""))
+        except ValueError:
+            opened = None
+        context.update(progress=progress, steps=[
+            step_view(number, progress, dict({"page_load": True}, **({"open": True} if number == opened else {})))
+            for number, _, _ in setup_steps.STEPS])
         return templates.TemplateResponse(request, "setup.html", context)
+
+    @app.get("/setup/step/{number}")
+    def setup_step_open(request: Request, number: int):
+        """[Change] / [Open] on a collapsed step (S1): that step alone, open; ?collapse=1 (round 2, 5):
+        that step as the page shows it on load. Read-only."""
+        if number not in STEP_KEYS:
+            return _refuse(404, "No such step.")
+        collapse = request.query_params.get("collapse") == "1"
+        if request.headers.get("hx-request") != "true":
+            return RedirectResponse("/setup#step-%d" % number if collapse else "/setup?open=%d#step-%d" % (number, number),
+                                    status_code=303)
+        progress = setup_steps.progress(home)
+        shown = {"open": STEP_KEYS[number] == "mode"} if collapse else {"open": True, "page_load": True}
+        return HTMLResponse(templates.get_template("setup_step.html").render(step=step_view(number, progress, shown)))
+
+    def guide_auth(name):
+        """G3: the Codex and Claude guides show only the sign-in way the step shows."""
+        state = setup_steps.load_state(home)
+        if name == "codex":
+            return setup_steps.codex_auth_view(state)
+        if name == "claude":
+            return setup_steps.claude_auth_view(state)
+        return None
 
     @app.get("/setup/guide/{name}")
     def guide(request: Request, name: str):
         if name not in GUIDES:
             return _refuse(404, "No such guide.")
-        if request.headers.get("hx-request") == "true":
-            return templates.TemplateResponse(request, "guides/%s.html" % name, {})
+        values = {"guide_name": name, "guide_auth": guide_auth(name), "guide_open": True}
+        if request.headers.get("hx-request") == "true":   # S2: opened in place, under its own button
+            return templates.TemplateResponse(request, "guide_inline.html", values)
         context = layout("setup", "Setup")
-        context.update(guide="guides/%s.html" % name)
+        context.update(values, guide="guides/%s.html" % name)
         return templates.TemplateResponse(request, "guide_page.html", context)
 
     async def form_of(request):
@@ -734,6 +824,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
 
     @app.post("/setup/openrouter/test")
     async def openrouter_test_saved(request: Request):
+        await form_of(request)   # read here: the open steps it carries (round 1, 2)
         await run_in_threadpool(setup_steps.test_saved_openrouter, config, home)
         return setup_response(request, STEP["openrouter"])
 
@@ -781,10 +872,14 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         """The résumé step's poll while reading: only that step while it reads (so the other steps are not
         re-rendered every few seconds), then the usual response with progress and banners."""
         progress = setup_steps.progress(home)
+        # S1: the poll of an open step keeps it open (?open=1); a collapsed step's poll leaves it as it is.
+        shown = None if request.query_params.get("open") == "1" else {
+            "open": setup_steps.current_step(progress) == STEP["resume"]}
         if progress["state"]["steps"].get("resume", {}).get("status") == "reading" and \
                 request.headers.get("hx-request") == "true":
-            return HTMLResponse(templates.get_template("setup_step.html").render(step=step_view(STEP["resume"], progress)))
-        return setup_response(request, STEP["resume"])
+            return HTMLResponse(templates.get_template("setup_step.html").render(
+                step=step_view(STEP["resume"], progress, dict({"open": True}, **(shown or {})))))
+        return setup_response(request, STEP["resume"], shown)
 
     @app.post("/setup/profile")
     async def profile(request: Request):
@@ -796,7 +891,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             elif isinstance(form.get(field), str):
                 values[field] = form.get(field)
         setup_steps.save_profile(values, home)
-        return setup_response(request, STEP["profile"])
+        # Round 1 (32): the browser step shows the profile's email, even while it is open.
+        return setup_response(request, STEP["profile"], force=(STEP["browser"],))
 
     @app.get("/setup/pick/{field}")
     def pick_options(request: Request, field: str):
@@ -828,7 +924,10 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                 view["chosen"] = list(dict.fromkeys(view["chosen"] + [value]))
             else:
                 view["chosen"] = [value]
-        return templates.TemplateResponse(request, "pick_chosen.html", {"pick": view})
+        response = templates.TemplateResponse(request, "pick_chosen.html", {"pick": view})
+        if field == "webmail" and action == "add":   # B4: Setup's webmail form saves when one is picked
+            response.headers["HX-Trigger-After-Swap"] = "webmail-picked"
+        return response
 
     @app.post("/setup/mode")
     async def mode(request: Request):
@@ -893,10 +992,11 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         state = await run_in_threadpool(setup_steps.save_claude_key, typed, home, form.get("to_file") == "1")
         if state.get("keychain_refused"):
             return setup_response(request, 6, {"keychain_notice": state["keychain_refused"]})
-        return setup_response(request, 6)
+        return setup_response(request, 6)   # B3: save_claude_key runs the Claude check too
 
     @app.post("/setup/claude/key/remove")
     async def claude_key_remove(request: Request):
+        await form_of(request)   # read here: the open steps it carries (round 1, 2)
         state = await run_in_threadpool(setup_steps.remove_claude_key, home)
         if state.get("keychain_refused"):
             return setup_response(request, 6, {"keychain_notice": state["keychain_refused"]})
@@ -929,11 +1029,13 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
 
     @app.post("/setup/codex/key/test")
     async def codex_key_test(request: Request):
+        await form_of(request)   # read here: the open steps it carries (round 1, 2)
         await run_in_threadpool(setup_steps.test_saved_openai, config, home)
         return setup_response(request, 6)
 
     @app.post("/setup/codex/key/remove")
     async def codex_key_remove(request: Request):
+        await form_of(request)   # read here: the open steps it carries (round 1, 2)
         state = await run_in_threadpool(setup_steps.remove_openai_key, home)
         if state.get("keychain_refused"):   # A5: nothing removed
             return setup_response(request, 6, {"keychain_notice": state["keychain_refused"]})
@@ -977,10 +1079,18 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             status, message = setup_steps.BROWSER_OPEN_MESSAGES[outcome]
             setup_steps.record(home, "browser", status, message)
         elif action == "done":
-            if browser.is_open():
-                browser.close()
-            else:
+            # B4 (owner, 2026-11-08): [I'm done] closes the browser and runs the email check under the
+            # same hold (the webmail chosen and the profile and AI done first).
+            def finish():
                 setup_steps.browser_closed(home)
+                # Round 1 (12): only the email check waits for the profile and the AI.
+                if setup_steps.email_check_due(setup_steps.progress(home)):
+                    setup_steps.run_email_check(home)
+                return "checked"   # None means the hold was busy
+            if browser.close(then=finish) is None:
+                setup_steps.browser_closed(home)
+                if setup_steps.email_check_due(setup_steps.progress(home)):   # round 2 (3): only a due check is "busy"
+                    setup_steps.record(home, "email", "failed", setup_steps.BUSY_LINE)
         elif action == "check":
             if not setup_steps.chrome_path():
                 setup_steps.record(home, "browser", "failed", "Sidedoor needs Google Chrome. Install it, then click Check again.")
@@ -993,33 +1103,51 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     @app.post("/setup/webmail")
     async def webmail(request: Request):
         form = await form_of(request)
-        setup_steps.webmail_choice(form.get("webmail"), form.get("webmail_url"), home)
-        return setup_response(request, 8)
+        return await run_in_threadpool(webmail_save, request, form)   # round 2 (1): never on the event loop
+
+    def webmail_save(request, form):
+        state = setup_steps.webmail_choice(form.get("webmail"), form.get("webmail_url"), home)
+        # Round 1 (11): once the browser is signed in and closed, a picked webmail is checked at once;
+        # round 2 (2): re-read under the hold, skipped while another check runs or once the email is locked.
+        if state["steps"].get("webmail", {}).get("status") == "done" and not setup_steps.email_locked(state) \
+                and state["steps"].get("browser", {}).get("status") == "done" and not browser.is_open() \
+                and setup_steps.email_check_due(setup_steps.progress(home)):
+            if browser.close(then=lambda: setup_steps.run_email_check_if_still_due(home) or "skipped") is None:
+                setup_steps.record(home, "email", "failed", setup_steps.BUSY_LINE)
+        return setup_response(request, STEP["browser"])
 
     @app.post("/setup/email")
-    def email_check(request: Request):
-        refused = locked_refusal(request, 9)
-        if refused:
-            return refused
+    def email_check(request: Request):   # [Check] / [Check again] in the browser step (B4)
+        if not setup_steps.email_check_due(setup_steps.progress(home)):   # the step says what it waits for
+            return setup_response(request, STEP["browser"])
         outcome = browser.close(then=lambda: setup_steps.run_email_check(home))
         if outcome is None:
             setup_steps.record(home, "email", "failed", setup_steps.BUSY_LINE)
-        return setup_response(request, 9)
+        return setup_response(request, STEP["browser"])
 
     @app.post("/setup/login")
     async def login(request: Request):
         form = await form_of(request)
         await run_in_threadpool(setup_steps.start_at_login, form.get("enabled") == "on", home)
-        return await run_in_threadpool(setup_response, request, 10)  # status may ask the OS (L8)
+        return await run_in_threadpool(setup_response, request, STEP["login"])  # status may ask the OS (L8)
 
     @app.post("/setup/start")
     def setup_start(request: Request):
-        refused = locked_refusal(request, 11)
+        refused = locked_refusal(request, STEP["start"])
         if refused:
             return refused
-        setup_steps.login_on_continue(home)  # step 10 ticked by default: registered when continuing past it
+        setup_steps.login_on_continue(home)  # step 9 ticked by default: registered when continuing past it
         setup_steps.start_scheduler(home)
-        return setup_response(request, 11, also=(10,))
+        # L1 (owner, 2026-11-08): one license check now, as [Check again] does, so the trial end the
+        # relay set at first activation shows at once (not after the daily check). A refresh, never a
+        # gate: offline or a failure leaves Start as it is.
+        try:
+            import license_clock
+            license_clock.check_now(home, relay_url)
+            sync_license_pause(root, home)
+        except Exception as error:
+            LOG.warning("license check after Start skipped: %s", type(error).__name__)
+        return setup_response(request, STEP["start"], also=(STEP["login"],))
 
     settings_page.register(app, templates, layout, pick_view, home=home, root=root, config=config, browser=browser,
                            relay_url=relay_url)  # Settings (E6.T8)
@@ -1404,7 +1532,7 @@ def _serve(open_browser, home, path, start, scheduler, tray=False, resume=False)
         scheduler_loop.start_license_heartbeat(root, home=home)  # E8.T2: checks once now, then daily
         import update_check
         update_check.start(home=home)  # E9.T3: checks once now, then every 30 minutes; never blocks a page
-        # Wait for Start (owner, 2026-10-22): nothing runs until Setup's own Start (step 11) has
+        # Wait for Start (owner, 2026-10-22): nothing runs until Setup's own Start (step 10) has
         # succeeded. After that, every app open (`resume`, `sidedoor serve`) starts the loop (owner,
         # 2026-10-25: after an update, a crash or a reopen it keeps running); Pause, which is saved,
         # still holds new work. `sidedoor dashboard` and `setup` only serve the pages.

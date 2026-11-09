@@ -1,9 +1,25 @@
-<h3>Connect (or reconnect) LinkedIn</h3>
+{# Round 2 (10): names only the button showing now (guide_button); with no license, the license first. #}
+<h3>Connect LinkedIn</h3>
+{% if guide_needs_license %}
 <ol>
-  <li>Click Connect LinkedIn, then Open the LinkedIn sign-in page. A Unipile page opens in a new tab; Unipile is the service Sidedoor uses to send LinkedIn messages for you.</li>
-  <li>Sign in with your LinkedIn email and password on that page.</li>
-  <li>If LinkedIn asks for a code (email, text or authenticator app) or to confirm on your phone, do it there. This is normal the first time.</li>
-  <li>When the page says you are connected, close the tab and come back. Sidedoor notices within a few seconds.</li>
-  <li>The link works for one hour. If it expires, click Get a new link.</li>
+  <li>Under License, paste your license key.</li>
+  <li>Click <strong>Activate</strong>.</li>
 </ol>
-<p>Reconnect: the same steps, starting with Reconnect LinkedIn. LinkedIn signs connected tools out from time to time.</p>
+{% elif guide_connected %}
+<p>LinkedIn is connected.</p>
+{% elif guide_button == "Check again" %}
+<ol>
+  <li>Click <strong>Check again</strong>.</li>
+</ol>
+{% else %}
+<ol>
+  {% if guide_button %}<li>Click <strong>{{ guide_button }}</strong>.</li>{% endif %}
+  <li>Click <strong>Open the LinkedIn sign-in page</strong>.</li>
+  <li>Sign in with your LinkedIn email and password.</li>
+  <li>When the page says you are connected, close that tab.</li>
+</ol>
+<details class="guide-trouble"><summary>If something goes wrong</summary>
+  <p>If LinkedIn asks for a code or to confirm on your phone, do it, then go on.</p>
+  <p>The sign-in link works for one hour. If it expired, click <strong>Get a new link</strong>.</p>
+</details>
+{% endif %}

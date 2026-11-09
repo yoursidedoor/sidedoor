@@ -26,7 +26,7 @@
         <p class="muted">{{ x.locked_line }}</p>
         {% else %}
         <input id="s-email" type="email" name="email" value="{{ f.email or '' }}" autocomplete="email">
-        <p class="muted">Use the email you will sign in to in Sidedoor's browser. Sidedoor reads application receipts there.</p>
+        <p class="muted">Use the email you will sign in to in Sidedoor's browser.</p>
         {% endif %}
         {% if e.email %}<p class="field-error">{{ e.email }}</p>{% endif %}{{ override(x.overrides or {}, "email") }}</div>
       <div class="field{% if e.phone %} has-error{% endif %}"><label for="s-phone">Phone</label>
@@ -215,7 +215,7 @@
   {% with check_next="/settings", check_label=action.label, check_action="/settings/license/check", check_target="#license", check_swap="outerHTML" %}{% include "license_check.html" %}{% endwith %}
   {% elif action.external %}
   <p><a class="button button-highlight" id="renew-license" href="{{ action.href }}" target="_blank" rel="noopener noreferrer">{{ action.label }}</a></p>
-  {% if action.label != "Add a card" %}<span hx-get="/setup/guide/license" hx-trigger="click from:#renew-license" hx-target="#guide-panel"></span>{% endif %}
+  {% if action.label != "Add a card" %}<div id="guide-renew"></div><span hx-get="/setup/guide/renew" hx-trigger="click from:#renew-license" hx-target="#guide-renew" hx-swap="outerHTML"></span>{% endif %}
   {% endif %}
   {% endfor %}
   {% if x.view.support %}<p class="muted">{{ x.view.support }}</p>{% endif %}
@@ -236,32 +236,34 @@
   </form>
   {% endif %}
   <form method="post" action="/settings/license/change" hx-post="/settings/license/change" hx-target="#license" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <label for="s-license-key">{% if x.chip.label == "Expired" %}Bought a new key? Paste it here{% elif x.has_key %}Your key (change it to use a new one){% else %}License key{% endif %}</label>
+    <label for="s-license-key">{% if x.chip.label == "Expired" %}Bought a new key? Paste it here{% else %}License key{% endif %}</label>
     <span class="secret"><input id="s-license-key" type="password" name="key" value="{{ x.key_box }}" placeholder="SD-..." autocomplete="off" spellcheck="false" required><button class="reveal" type="button" data-reveal="s-license-key" aria-controls="s-license-key" aria-label="Show key" aria-pressed="false"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></span>
     <button class="button" type="submit">{% if x.has_key %}Change key{% else %}Activate{% endif %}</button>
     {% if x.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
     <span class="htmx-indicator muted">Checking...</span>
   </form>
   {% if not x.has_key %}
-  <p>No key yet? <a class="button button-highlight" id="s-buy-license" href="{{ x.website }}" target="_blank" rel="noopener noreferrer">Buy a license</a></p>
-  <span hx-get="/setup/guide/license" hx-trigger="click from:#s-buy-license" hx-target="#guide-panel"></span>
+  <p>No key yet? <a class="button button-highlight" id="s-buy-license" href="{{ x.website }}" target="_blank" rel="noopener noreferrer">Start free trial</a></p>
+  <span hx-get="/setup/guide/license" hx-trigger="click from:#s-buy-license" hx-target="#guide-license" hx-swap="outerHTML"></span>
+  {% with guide_name = "license" %}{% include "guide_inline.html" %}{% endwith %}{# round 3 (5): right under it, only with no key #}
   {% endif %}
+  {% if x.has_any_key %}{# round 3 (6): only when a key is saved #}
   <form method="post" action="/settings/keys/remove" hx-post="/settings/keys/remove" hx-target="#license" hx-swap="outerHTML"
         hx-confirm="Remove your OpenRouter key and license key from this computer? Sidedoor stops until you paste them again." hx-disabled-elt="find button">
     <button class="button button-quiet" type="submit">Remove Sidedoor's saved keys from this computer</button>
   </form>
   {% endif %}
-  {% if x.portal %}
+  {% endif %}
+  {% if x.has_key and x.portal %}
   <p><a class="button" id="s-manage-subscription" href="{{ x.portal }}" target="_blank" rel="noopener noreferrer">Manage subscription</a></p>
   <p class="muted">{{ x.portal_line }}</p>
-  {% else %}
+  {% elif x.has_key %}
   <p class="muted">{{ x.no_portal }} {{ x.support }}.</p>
   {% endif %}
   <form method="post" action="/settings/progress" hx-post="/settings/progress" hx-trigger="change" hx-target="#license" hx-swap="outerHTML">
     <label class="choice"><input type="checkbox" name="enabled" id="s-share-progress"{% if x.share_progress %} checked{% endif %}> <span>{{ x.share_progress_label }}</span></label>
     <noscript><button class="button" type="submit">Save</button></noscript>
   </form>
-  <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
 
 {% elif x.name == "login" %}
   <h2>Start at login</h2>

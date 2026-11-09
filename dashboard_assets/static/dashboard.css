@@ -147,14 +147,18 @@ legend + * { clear: both; }
 .choice { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .guide-link { font-weight: 600; }
-.guide-panel { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
-.guide-panel h3 { margin-top: 0; }
-/* Settings (owner, 2026-10-24): the guide column is hidden until a "Show me how" guide is opened
-   into it (htmx fills #guide-panel); until then the settings take the full width. */
-.guide-on-demand { grid-template-columns: minmax(0, 1fr); }
-.guide-on-demand > .guide-panel:empty { display: none; }
-.guide-on-demand:has(> .guide-panel:not(:empty)) { grid-template-columns: minmax(0, 1fr) 340px; }
-@media (max-width: 900px) { .guide-on-demand:has(> .guide-panel:not(:empty)) { grid-template-columns: 1fr; } }
+/* S2 (owner, 2026-11-08): "Show me how" opens in place, under its own step or section. */
+.guide-inline { margin: 12px 0 0; }
+.guide-inline > summary { cursor: pointer; color: var(--primary); width: fit-content; }
+.guide-inline > .guide { margin-top: 8px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: #F9FAFB; max-width: 48rem; }
+.guide-inline h3 { margin-top: 0; font-size: 1rem; }
+.guide-inline .guide-trouble > summary { cursor: pointer; font-weight: 600; }
+/* S1: a finished, locked or waiting step is one line; [Change] / [Open] open it. */
+.step-collapsed .step-head { margin-bottom: 0; }
+.step-change { font-weight: 600; }
+/* B3: a small, quiet action that reads as a link (e.g. Remove key). */
+.button-link { background: none; border: 0; padding: 0; color: var(--muted); font: inherit; font-size: 0.875rem; text-decoration: underline; cursor: pointer; }
+.button-link:hover { color: var(--text, inherit); }
 .verify { color: var(--warning); font-size: 0.875rem; }
 pre.copy { background: #F9FAFB; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; overflow-x: auto; user-select: all; }
 .picklist { margin: 8px 0 12px; }

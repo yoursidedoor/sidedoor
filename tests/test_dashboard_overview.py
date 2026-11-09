@@ -674,16 +674,18 @@ class OverviewPageTest(unittest.TestCase):
             scheduler_control.set_user_pause(database, True, now="2026-10-22T15:00:00+00:00")
             database.close()
             paused = self.page().text
-        self.assertIn('id="paywall-renew" href="https://yoursidedoor.com"', page)
-        self.assertIn('hx-get="/setup/guide/license" hx-trigger="click from:#paywall-renew"', page)   # guide 4.5
-        self.assertIn("Sidedoor is paused. Renew to continue.", page)                              # banner 1 too
-        self.assertEqual(page.count("Bought a new key? Paste it here"), 1)   # PW3: always, once (banner 1)
+        # Round 2 (31): one message and one [Renew] (banner 1), the renewal guide in the card; round 3 (4):
+        # a quiet [Pause], and [Resume] once the user paused.
+        self.assertEqual(page.count("Sidedoor is paused. Renew to continue."), 1)
+        self.assertEqual(page.count(">Renew</a>"), 1)   # the button; the guide names it in <strong>
+        self.assertIn('<details class="guide-inline" id="guide-renew">', page)
+        banners = page.split('id="banners"')[1].split("<main")[0]
+        self.assertEqual(banners.count("Bought a new key? Paste it here"), 1)   # PW3: always, once (banner 1)
         self.assertNotIn("Compute budget", page)                                                    # full page
-        self.assertIn('action="/pause"', page)
-        self.assertNotIn('action="/resume"', page)
+        self.assertIn('class="button-link" type="submit">Pause</button>', page)
         self.assertIn("Paused by you since", paused)
         self.assertNotIn('action="/pause"', paused)
-        self.assertNotIn('action="/resume"', paused)
+        self.assertIn('action="/resume"', paused)
 
     def test_e8t3_grace_spent_shows_banner_1b_and_no_paywall(self):
         import license_fixtures

@@ -192,7 +192,7 @@ class InvitationThroughTheRelay(RelayHarness):
                          lambda: orchestrator.followup_execution_cycle(ROOT, self.database, config)):
                 with self.assertRaises(unipile_port.SenderNotConfigured) as raised:
                     step()
-                self.assertIn("Connect LinkedIn in Setup step 7", raised.exception.next_action)
+                self.assertIn("Connect LinkedIn in Setup or Settings.", raised.exception.next_action)
 
 
 class RelayRefusedInvitation(InvitationThroughTheRelay):

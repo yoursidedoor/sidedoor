@@ -102,7 +102,7 @@ class StepHold(unittest.TestCase):
             raise LinkedInNotConnected("HTTP_403")
         result = orchestrator.worker_step(database, "parent", "reply-monitor", step)
         self.assertEqual((result["state"], result["blocker"]), ("BLOCKED", "LINKEDIN_NOT_CONNECTED"))
-        self.assertIn("Connect LinkedIn in Setup step 7 / Settings", result["next_action"])
+        self.assertIn("Connect LinkedIn in Setup or Settings.", result["next_action"])
         self.assertEqual(database.execute("SELECT blocker FROM workflow_tasks").fetchone()[0], "LINKEDIN_NOT_CONNECTED")
 
     def test_a_missing_license_is_a_hold_not_a_worker_exception(self):
@@ -195,7 +195,7 @@ class ThroughTheRelay(RelayHarness):
         with self.assertRaises(LinkedInNotConnected) as raised:
             port.account()
         self.assertNotIsInstance(raised.exception, SessionInvalid)
-        self.assertIn("Setup step 7", raised.exception.next_action)
+        self.assertIn("Connect LinkedIn in Setup or Settings.", raised.exception.next_action)
         with self.assertRaises(UncertainWrite):   # writes stay conservative
             port.send_message("c1", "hi")
 

@@ -10,15 +10,15 @@ Sections (anchors `#profile`, `#resume`, `#mode`, `#connections`, `#license`, `#
   `resume_intake.PROFILE_LOCK` as step 3), [Try again], the résumé in use (raw upload and
   application résumé). Its claims are not shown (owner, 2026-10-22: clutter).
 - Mode: step 5's toggle (`setup_steps.set_mode`).
-- Connections: LinkedIn (step 7), OpenRouter (step 2), Codex (step 6), Sidedoor's browser and the
-  email check (steps 8 and 9, the same browser-lock rule through the dashboard's BrowserSession).
+- Connections: LinkedIn (step 7), OpenRouter (step 2), the AI (step 6), Sidedoor's browser and the
+  email check (step 8, the same browser-lock rule through the dashboard's BrowserSession).
 - License: what step 1 stores, [Activate] with the stored key and [Change key]
   (`setup_steps.activate_license`), and the license state with its way forward (`license_clock.view`,
   E8.T2: trial days left, payment retrying, the offline countdown, the clock check, [Check again]).
   [Manage subscription] opens Stripe's customer portal login (`config.json` `billing_portal_url`) in a
   new tab; with no URL configured the section says to email support instead.
 - License also has the opt-in "Share anonymous progress counts" checkbox (E12.T2, `progress_share`).
-- Start at login: Setup step 10's checkbox (`setup_steps.start_at_login`, `login_view`; E5.T2).
+- Start at login: Setup step 9's checkbox (`setup_steps.start_at_login`, `login_view`; E5.T2).
 
 Nothing here judges content: Python only fits values to controls (owner, 2026-10-07/10-21).
 Secrets (OpenRouter key, license key) appear only as the value of their own password box, hidden
@@ -51,20 +51,20 @@ NO_PORTAL = "To update your card, see invoices or cancel, email"
 BLOCKS = ("linkedin", "openrouter", "codex", "engine", "claude", "antigravity", "browser", "webmail")  # Connections parts, swapped on their own
 # Setup messages that name Setup's buttons, said with the buttons Settings has (T7). Setup keeps its wording.
 SETTINGS_WORDING = (
-    ("Sign in there, then click I'm done.", "Sign in there, then click Run email check (or I'm done to just close it)."),
-    ("then click Try again. If this message stays", "then click Open again. If this message stays"),
-    ("Sidedoor needs Google Chrome. Install it, then click Check again.",
-     "Sidedoor needs Google Chrome. Install it, then reload this page."),
-    ("Sidedoor could not start Google Chrome. Try again.", "Sidedoor could not start Google Chrome. Click Open to try again."),
-    ("signed in to your inbox, then click I'm done.", "signed in to your inbox, then click Run email check."),
+    # Round 2 (Settings parity): Settings has Setup's browser buttons, so only older saved words change.
+    ("then click Try again. If this message stays", "then click Open Sidedoor's browser again. If this message stays"),
+    ("Sidedoor could not start Google Chrome. Try again.", "Sidedoor could not start Google Chrome. Click Open Sidedoor's browser to try again."),
+    ("or change your application email in Your profile.", "or change your application email in Profile and search."),
     ("or change your application email in step 4.", "or change your application email in Profile and search."),
     ("or change your application email in step 3.", "or change your application email in Profile and search."),   # saved by 0.3.0
+    ("It goes in the License key step.", "It goes in License, below."),
     ("It goes in step 1.", "It goes in License, below."),   # S2: setup_steps.LICENSE_KEY_IN_OPENROUTER
 )
-# Setup's prerequisites of the email check (setup_steps.NEEDS[9]): step -> (what to finish, where).
-EMAIL_NEEDS = {setup_steps.NUMBER["profile"]: ("your profile", "#profile"),   # 6: the chosen engine (email_needs)
+# Setup's prerequisites of the email check (setup_steps.NEEDS for the browser step, which runs it): step -> (what to finish, where).
+EMAIL_NEEDS = {setup_steps.NUMBER["profile"]: ("Profile and search", "#profile"),   # 6: the chosen engine (email_needs)
                "webmail": ("Your webmail", "#connection-webmail"),
-               8: ("signing in to Sidedoor's browser (Open, then I'm done)", "#connection-browser")}
+               8: ("Sidedoor's browser", "#connection-browser")}
+ENGINE_NEED = ("Choose your AI", "#connection-engine")   # round 3 (10): Setup's name for the AI step
 KEY_KEPT = "Your previous key is still in use."
 MODE_DONE = ("released", "kept", "stayed", "busy")
 
@@ -306,6 +306,8 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           # U1 3g: the engine choice and Claude's sign-in (its key only ever masked)
                           engine=setup_steps.chosen_engine(state), engine_options=setup_steps.engine_options(),
                           antigravity_risk=setup_steps.ANTIGRAVITY_RISK, claude=steps.get("claude", {}),
+                          claude_status=steps.get("claude", {}).get("status"),   # B2: [Check again] after a check
+                          antigravity_status=steps.get("antigravity", {}).get("status"),
                           claude_done=setup_steps.claude_done(state), claude_path=state.get("claude_path"),
                           claude_auth_view=setup_steps.claude_auth_view(state),
                           claude_key=masked(setup_steps.shown_claude_key(home)),
@@ -322,7 +324,8 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           has_license=bool(setup_steps.license_key(home)),
                           keychain_wait=setup_steps.keys_waiting(home),
                           offer_file=credentials.offer_file(setup_steps._home(home)),
-                          application_email=state.get("locked_email") or setup_steps.saved_email(home))
+                          application_email=state.get("locked_email") or setup_steps.saved_email(home),
+                          email_waiting=email_needs(), email_locked=setup_steps.email_locked(state))
         elif name == "license":
             import license_clock  # E8.T2: the stored state (no relay call on render)
             view = license_clock.view(home)
@@ -330,7 +333,9 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
             key = setup_steps.license_key(home)
             chip = {"label": view["label"], "tone": view["tone"], "href": view["href"]}
             result.update(license=license_clock.local_message(steps.get("license", {}), config), chip=chip, key=masked(key, "SD-" if key and key.startswith("SD-") else ""),
-                          has_key=bool(key), key_box=key or "", view=view, times=license_times(view, config),
+                          has_key=bool(key), key_box=key or "", view=view,
+                          times=license_times(view, config),
+                          has_any_key=bool(key) or bool(_openrouter_key(home)),   # round 3 (6)
                           entitlement=value, active=bool(value) and view["problem"] != "machine",
                           status_detail=status_detail(view),
                           # [Activate] only while the license is not active and usable on this computer
@@ -619,7 +624,7 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         await run_in_threadpool(progress_share.set_enabled, form.get("enabled") == "on", home)
         return await run_in_threadpool(respond, request, "license")
 
-    # --- Start at login (Setup step 10, E5.T2) -------------------------------------------------------
+    # --- Start at login (Setup step 9, E5.T2) --------------------------------------------------------
 
     @app.post("/settings/login")
     async def login(request: Request):
@@ -627,7 +632,7 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         await run_in_threadpool(setup_steps.start_at_login, form.get("enabled") == "on", home)
         return await run_in_threadpool(respond, request, "login")  # status may ask the OS (L8)
 
-    # --- Connections (Setup steps 2, 6, 7, 8, 9): each action swaps only its own part (T6) -----------
+    # --- Connections (Setup steps 2, 6, 7, 8): each action swaps only its own part (T6) -----------
 
     def resume_unlocked_changed(before):
         return ("resume",) if setup_steps.progress(home)["locked"].get(setup_steps.NUMBER["resume"]) != before else ()
@@ -784,11 +789,28 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         if action == "open":
             status, message = setup_steps.BROWSER_OPEN_MESSAGES[browser.open()]
             setup_steps.record(home, "browser", status, message)
-        elif action == "done":
-            if browser.is_open():
-                browser.close()
+        elif action == "check":   # round 2 (parity with Setup): [Check again] after installing Chrome
+            if not setup_steps.chrome_path():
+                setup_steps.record(home, "browser", "failed", "Sidedoor needs Google Chrome. Install it, then click Check again.")
             else:
+                setup_steps.record(home, "browser", "not_started", "Google Chrome is installed.")
+        elif action == "done":
+            # Round 1 (17, owner 2026-11-08): [I'm done] closes the browser and runs the email check under
+            # the same hold, as Setup's does, once nothing else is missing (email_needs).
+            locked = setup_steps.email_locked(setup_steps.load_state(home))
+            def finish():
                 setup_steps.browser_closed(home)
+                if not email_needs():
+                    setup_steps.run_email_check(home)
+                return "checked"   # None means the hold was busy
+            if browser.close(then=finish) is None:
+                setup_steps.browser_closed(home)
+                if not email_needs():   # round 2 (3): only a due check is "busy"
+                    setup_steps.record(home, "email", "failed", setup_steps.BUSY_LINE)
+            changed = setup_steps.email_locked(setup_steps.load_state(home)) != locked
+            needs = email_needs()
+            return respond(request, "browser", {"email_needs": needs} if needs else None,
+                           also=("webmail", "profile") if changed else ())
         else:
             return HTMLResponse("No such action.", status_code=404)
         return respond(request, "browser")
@@ -798,23 +820,28 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         form = await request.form()
         label = form.get("webmail") if isinstance(form.get("webmail"), str) else ""
         url = form.get("webmail_url") if isinstance(form.get("webmail_url"), str) else ""
-        setup_steps.webmail_choice(label, url, home)
+        return await run_in_threadpool(webmail_save, request, label, url)   # round 2 (1): never on the event loop
+
+    def webmail_save(request, label, url):
+        state = setup_steps.webmail_choice(label, url, home)
+        # Round 2 (parity with Setup): once the browser is signed in and closed, a picked webmail is checked.
+        checked = state["steps"].get("webmail", {}).get("status") == "done" and not setup_steps.email_locked(state) \
+            and state["steps"].get("browser", {}).get("status") == "done" and not browser.is_open() and not email_needs()
+        if checked and browser.close(then=lambda: setup_steps.run_email_check_if_still_due(home) or "skipped") is None:
+            setup_steps.record(home, "email", "failed", setup_steps.BUSY_LINE)
         # A refused save keeps the posted pick and address in their boxes (T5).
         return respond(request, "webmail", {"webmail_posted": True, "webmail_pick": label, "webmail_url": url,
-                                            "webmail_saved_now": True})
+                                            "webmail_saved_now": True}, also=("browser",))   # round 3 (3)
 
     def email_needs():
-        """What Setup's step-9 gate (steps 4, 6 and 8) still needs, as (label, link). The browser
+        """What the email check (Setup step 8, B4: after steps 4 and 6) still needs, as (label, link). The browser
         being open is not missing: the check closes it first and runs under its hold."""
         progress = setup_steps.progress(home)
         state, done = progress["state"], progress["done"]
         profile = setup_steps.NUMBER["profile"]
         needs = [EMAIL_NEEDS[profile]] if not done[profile] else []
-        if not done[6]:   # U1 3g G6: the chosen engine
-            engine = setup_steps.chosen_engine(state)
-            needs.append((setup_steps.ENGINE_LABELS[engine],
-                          {"codex": "#connection-codex", "claude": "#connection-claude",
-                           "antigravity": "#connection-antigravity"}.get(engine, "#connection-engine")))
+        if not done[6]:   # U1 3g G6: the chosen engine, named as Setup names its step (round 3, 10)
+            needs.append(ENGINE_NEED)
         if not state.get("webmail"):
             needs.append(EMAIL_NEEDS["webmail"])
         if state["steps"].get("browser", {}).get("status") != "done" and not browser.is_open():
@@ -827,7 +854,7 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         if needs:
             return respond(request, "browser", {"email_needs": needs})
         locked = setup_steps.email_locked(setup_steps.load_state(home))
-        # [Run email check]: closes the dashboard's own browser first and checks under its hold, or
+        # [Check again]: closes the dashboard's own browser first and checks under its hold, or
         # takes the browser lock fresh (busy: nothing happens) - Setup step 8's lock rule.
         if browser.close(then=lambda: setup_steps.run_email_check(home)) is None:
             setup_steps.record(home, "email", "failed", setup_steps.BUSY_LINE)

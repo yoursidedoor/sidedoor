@@ -110,11 +110,11 @@ class CodexNotFound(unittest.TestCase):
         self.assertIsNotNone(setup_steps.codex_wait(reply))
         [banner] = [entry for entry in provider_limits.banners(self.home) if "Codex" in entry["text"]]
         self.assertEqual((banner["text"], banner["action_href"]),
-                         ("Sidedoor can't find Codex. Open Setup to find it again.", "/setup#step-6"))
+                         ("Sidedoor can't find Codex. Open Setup to find it again.", "/setup?open=6#step-6"))
         view = failures_page.gather(None, {"timezone": "UTC"}, {}, home=self.home)
         [item] = view["needs_you"]
         self.assertEqual((item["text"], item["fix"]["href"], item["code"]),
-                         ("Sidedoor can't find Codex. Open Setup to find it again.", "/setup#step-6", "CODEX_NOT_FOUND"))
+                         ("Sidedoor can't find Codex. Open Setup to find it again.", "/setup?open=6#step-6", "CODEX_NOT_FOUND"))
         found = fake_executables.python(Path(tempfile.mkdtemp()) / "codex", "import sys\nsys.exit(0)\n")
         with patch.object(setup_steps, "load_state", return_value={}):
             config = setup_steps.with_codex({"codex": str(found)}, self.home)

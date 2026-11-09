@@ -2,14 +2,12 @@
 {% block content %}
 <h1 class="title">Set up Your Sidedoor</h1>
 {% include "setup_progress.html" %}
-<div class="setup-layout">
-  <ol class="steps" id="steps">
-    {% for step in steps %}{% include "setup_step.html" %}{% endfor %}
-  </ol>
-  <aside class="guide-panel card" id="guide-panel" aria-live="polite">
-    <p class="muted">Steps that send you to another website have a "Show me how" guide. It opens here.</p>
-  </aside>
-</div>
+{# Round 1 (2): every request from a step says which steps are open, so they are not collapsed. #}
+<ol class="steps" id="steps" hx-include=".step-open-marker">
+  {% for step in steps %}{% include "setup_step.html" %}{% endfor %}
+</ol>
 {# T1 (0.4.0): a step's "Run Report a problem" (a certificate failure) works from here too. #}
 {% include "report_problem.html" %}
+<script src="{{ asset_url('/static/settings.js') }}" defer></script>
+<script src="{{ asset_url('/static/setup.js') }}" defer></script>
 {% endblock %}

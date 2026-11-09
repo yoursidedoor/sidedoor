@@ -49,27 +49,27 @@
   {%- elif sidedoor_version %}<span class="overview-version" title="Sidedoor {{ sidedoor_version }}">v{{ sidedoor_version }}</span>{% endif %}
 </div>
 {% if paywall %}
-{# E8.T3: the paywall (E6.T0 section 11, Expired). [Renew] opens the checkout like [Buy a license],
-   with guide 4.5 beside it; banner 1 above shows "Bought a new key? Paste it here" (always while
-   Expired, PW3), leading to [Change key]. [Pause] stays available (section 5, PW1). #}
-<div class="setup-layout">
-  <section class="card paywall" aria-labelledby="paywall-title">
-    <h2 id="paywall-title">Sidedoor is paused</h2>
-    <p>{{ paywall.text }}</p>
-    <p class="muted">Networking &amp; Referrals, Applications, and Failures and logs stay readable.{% if not paywall.paused %} Renewing is a new checkout that issues a new key.{% endif %}</p>
-    <p><a class="button button-highlight" id="paywall-renew" href="{{ paywall.action.href }}" target="_blank" rel="noopener noreferrer">{{ paywall.action.label }}</a></p>
-    {% if not paywall.paused %}<span hx-get="/setup/guide/license" hx-trigger="click from:#paywall-renew" hx-target="#guide-panel"></span>{% endif %}
+{# E8.T3: the paywall (E6.T0 section 11, Expired). Round 2 (owner, 2026-11-08, 31): banner 1 above carries
+   the one "Sidedoor is paused" message, the one [Renew] and "Bought a new key? Paste it here". The card says
+   what stays readable and holds the renewal guide (none while the trial is paused, 8); round 3 (4): a quiet
+   [Pause] or [Resume] (PW1) at its foot, so a pause set before expiry can be lifted. #}
+<div>
+  <section class="card paywall" aria-label="Sidedoor is paused">
+    <p class="muted">Networking &amp; Referrals, Applications, and Failures and logs stay readable.</p>
     {% if paywall.paused %}
-    {# E13.T3: trial ended (Stripe paused it): no [Pause]; [Check again] after adding the card reloads Overview. #}
+    {# E13.T3: trial ended (Stripe paused it): [Check again] after adding the card reloads Overview. #}
     {% with check_next="/", check_label="Check again", check_action="/license/check?paywall=1" %}{% include "license_check.html" %}{% endwith %}
-    {% elif paywall_pause and paywall_pause.user_paused_since %}
-    <p class="muted paywall-paused">Paused by you since {{ paywall_pause.user_paused_since }}.</p>
     {% else %}
-    {{ start_button("card", "/pause", "Pause") }}
+    {% with guide_name = "renew" %}{% include "guide_inline.html" %}{% endwith %}
+    {# E13 P2: none while the trial is paused (Stripe's pause, not the user's). #}
+    {% set user_paused = paywall_pause and paywall_pause.user_paused_since %}
+    {% if user_paused %}<p class="muted paywall-paused">Paused by you since {{ paywall_pause.user_paused_since }}.</p>{% endif %}
+    <form method="post" action="{{ '/resume' if user_paused else '/pause' }}" hx-post="{{ '/resume' if user_paused else '/pause' }}" hx-target="body" class="start-form paywall-pause">
+      <input type="hidden" name="at" value="card">
+      <button class="button-link" type="submit">{{ "Resume" if user_paused else "Pause" }}</button>
+    </form>
     {% endif %}
-    <a class="guide-link" href="/setup/guide/license" hx-get="/setup/guide/license" hx-target="#guide-panel">Show me how</a>
   </section>
-  <aside class="guide-panel card" id="guide-panel" aria-live="polite"><p class="muted">The "Show me how" guide opens here.</p></aside>
 </div>
 {% elif not finished %}
 <div class="card empty">

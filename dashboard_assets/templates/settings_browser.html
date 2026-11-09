@@ -1,20 +1,28 @@
-{# Settings > Connections > Sidedoor's browser and the email check; swapped on its own (E6.T8 T6). #}
+{# Settings > Connections > Sidedoor's browser and the email check; swapped on its own (E6.T8 T6).
+   Round 2 (owner, 2026-11-08): the same buttons and words as Setup's browser step. #}
 <div class="connection" id="connection-browser"{% if oob %} hx-swap-oob="true"{% endif %}>
   <h3>Sidedoor's browser</h3>
   {% if not x.chrome %}
-  <p class="note note-error">Sidedoor needs Google Chrome. Install it, then reload this page.</p>
-  <a class="guide-link" href="/setup/guide/chrome" hx-get="/setup/guide/chrome" hx-target="#guide-panel">Show me how</a>
+  <p class="note note-error">Sidedoor needs Google Chrome. Install it, then click Check again.</p>
+  <form method="post" action="/settings/browser/check" hx-post="/settings/browser/check" hx-target="#connection-browser" hx-swap="outerHTML"><button class="button" type="submit">Check again</button></form>
+  {% with guide_name = "chrome" %}{% include "guide_inline.html" %}{% endwith %}
   {% else %}
   <p class="muted">Sign in there to LinkedIn and to the mailbox of your application email{% if x.application_email %} (<strong>{{ x.application_email }}</strong>){% endif %}.</p>
-  {% if x.browser.message %}<p class="note note-{{ 'error' if x.browser.status == 'failed' else 'info' }}" role="status">{{ x.say(x.browser.message) }}</p>{% endif %}
-  {% if x.email_needs %}
-  <p class="note note-warning" role="status">Before the email check, finish {% for label, href in x.email_needs %}<a href="{{ href }}">{{ label }}</a>{{ ", " if not loop.last }}{% endfor %} first.</p>
-  {% elif x.email.message %}<p class="note note-{{ 'error' if x.email.status == 'failed' or x.email.mismatch else ('success' if x.email.status == 'done' else 'info') }}" role="status">{{ x.say(x.email.message) }}</p>{% endif %}
+  {% set closed = x.browser.status == "done" and not x.browser_open %}
+  {% set waiting = x.email_needs or (closed and x.webmail and not x.email_locked and x.email_waiting) %}
+  {% if x.browser.message and not (closed and (x.email.message or waiting)) %}<p class="note note-{{ 'error' if x.browser.status == 'failed' else 'info' }}" role="status">{{ x.say(x.browser.message) }}</p>{% endif %}
+  {% if waiting %}
+  <p class="note note-warning" role="status">Finish {% for label, href in (x.email_needs or x.email_waiting) %}<a href="{{ href }}">{{ label }}</a>{{ " and " if not loop.last }}{% endfor %} first.</p>
+  {% elif x.email.message %}<p class="note note-{{ 'error' if x.email.status == 'failed' or x.email.mismatch else ('success' if x.email.status == 'done' else 'info') }}" role="status">{{ x.say(x.email.message) }}</p>
+  {% endif %}
   <div class="actions">
-    <form method="post" action="/settings/browser/open" hx-post="/settings/browser/open" hx-target="#connection-browser" hx-swap="outerHTML"><button class="button" type="submit">Open</button></form>
-    {% if x.browser_open %}<form method="post" action="/settings/browser/done" hx-post="/settings/browser/done" hx-target="#connection-browser" hx-swap="outerHTML"><button class="button" type="submit">I'm done</button></form>{% endif %}
-    <form method="post" action="/settings/email" hx-post="/settings/email" hx-target="#connection-browser" hx-swap="outerHTML" hx-disabled-elt="find button"><button class="button button-quiet" type="submit">Run email check</button> <span class="htmx-indicator muted">Checking...</span></form>
+    <form method="post" action="/settings/browser/open" hx-post="/settings/browser/open" hx-target="#connection-browser" hx-swap="outerHTML"><button class="button" type="submit">Open Sidedoor's browser</button></form>
+    {% if x.browser_open %}<form method="post" action="/settings/browser/done" hx-post="/settings/browser/done" hx-target="#connection-browser" hx-swap="outerHTML" hx-disabled-elt="find button"><button class="button button-highlight" type="submit">I'm done</button> <span class="htmx-indicator muted">Checking...</span></form>
+    {% elif closed and x.webmail and not waiting and (not x.email.message or x.email.status != "done" or x.email.mismatch) and not (x.email_locked and not x.email.mismatch) %}
+    {# [Check] before any check, [Check again] after one did not pass (as Setup). #}
+    <form method="post" action="/settings/email" hx-post="/settings/email" hx-target="#connection-browser" hx-swap="outerHTML" hx-disabled-elt="find button"><button class="button" type="submit">{{ "Check again" if x.email.message else "Check" }}</button> <span class="htmx-indicator muted">Checking...</span></form>
+    {% endif %}
   </div>
-  <a class="guide-link" href="/setup/guide/browser" hx-get="/setup/guide/browser" hx-target="#guide-panel">Show me how</a>
+  {% with guide_name = "browser" %}{% include "guide_inline.html" %}{% endwith %}
   {% endif %}
 </div>

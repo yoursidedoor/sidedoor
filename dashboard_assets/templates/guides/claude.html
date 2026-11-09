@@ -1,23 +1,37 @@
-<h3>Claude: your Claude subscription or an Anthropic API key</h3>
-<p>Claude works with either: your <strong>Claude subscription</strong> (Pro or Max) or an <strong>Anthropic API key</strong>.</p>
-<h3>With your Claude subscription</h3>
+{# G2: only this computer's commands; G3: only the sign-in way the step shows (guide_auth). #}
+{% set terminal = "PowerShell" if guide_platform == "windows" else "Terminal" %}
+{% set enter = "Enter" if guide_platform == "windows" else "Return" %}
+{% if guide_auth == "api_key" %}
+<h3>Claude Code CLI with an Anthropic API key</h3>
+<p>The Claude desktop app isn't enough. Install Claude Code CLI.</p>
 <ol>
-  <li>You need a Claude account on a paid plan: Pro or Max. Buy or upgrade at <a href="https://claude.ai/upgrade" target="_blank" rel="noopener noreferrer">claude.ai/upgrade</a>.</li>
-  <li>Install Claude in Terminal. On a Mac or Linux, open Terminal and paste:
-    <pre class="copy">curl -fsSL https://claude.ai/install.sh | bash</pre>
-    On Windows, open PowerShell and paste:
-    <pre class="copy">irm https://claude.ai/install.ps1 | iex</pre>
-    Press Return (Enter on Windows).</li>
-  <li>Open a <strong>new</strong> Terminal (or PowerShell) window. The installer puts Claude in <code>~/.local/bin</code> and only adds it for new windows, so in the same window <code>claude</code> gives "command not found". In the new window type <code>claude</code> and press Return.</li>
-  <li>Claude asks how to sign in. Choose your Claude account with a subscription; a browser window opens; sign in. When Claude shows its prompt, type <code>/exit</code> and press Return.</li>
-  <li>Back in Sidedoor, click <strong>Use my Claude subscription</strong>. Sidedoor checks the sign-in.</li>
+  <li>Open {{ terminal }}, paste this and press {{ enter }}:
+    {% if guide_platform == "windows" %}<pre class="copy">irm https://claude.ai/install.ps1 | iex</pre>
+    {% else %}<pre class="copy">curl -fsSL https://claude.ai/install.sh | bash</pre>{% endif %}</li>
+  <li>On <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>, add credit under Billing.</li>
+  <li>Under API keys, click <strong>Create Key</strong> and copy the key.</li>
+  <li>Paste it in the Anthropic API key box.</li>
+  <li>Click <strong>Save and test</strong>.</li>
 </ol>
-<h3>With an Anthropic API key</h3>
-<p>Anthropic then bills that key for everything Sidedoor does, so watch your usage.</p>
+<details class="guide-trouble"><summary>If something goes wrong</summary>
+  <p>If Anthropic refuses the key, add credit or create a new key, then click <strong>Save and test</strong> again.</p>
+  <p>{% if guide_platform == "windows" %}What is PowerShell? Open the Start menu, type PowerShell and press Enter.{% else %}What is Terminal? Applications &gt; Utilities &gt; Terminal.{% endif %}</p>
+</details>
+{% else %}
+<h3>Claude Code CLI with your Claude subscription</h3>
+<p>You need a Claude Pro or Max plan. The Claude desktop app isn't enough. Install Claude Code CLI.</p>
 <ol>
-  <li>Install Claude as in step 2 above. Signing in is not needed for this way.</li>
-  <li>Sign in at <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>, add credit under Billing, then open API keys and click Create Key. Copy the key (it starts with <code>sk-ant-</code>); Anthropic shows it only once.</li>
-  <li>In Sidedoor, click <strong>Use an Anthropic API key</strong>, paste the key and click Save. Sidedoor keeps the key on this computer and never shows it in full again.</li>
-  <li>If Anthropic refuses the key, Sidedoor pauses its AI work and shows a banner until you save a key that works.</li>
+  <li>Open {{ terminal }}, paste this and press {{ enter }}:
+    {% if guide_platform == "windows" %}<pre class="copy">irm https://claude.ai/install.ps1 | iex</pre>
+    {% else %}<pre class="copy">curl -fsSL https://claude.ai/install.sh | bash</pre>{% endif %}</li>
+  <li>Open a new {{ terminal }} window, type <code>claude</code> and press {{ enter }}.</li>
+  <li>Sign in with your Claude account in the browser window that opens.</li>
+  <li>Type <code>/exit</code> and press {{ enter }}.</li>
+  <li>Back here, click <strong>Use my Claude subscription</strong>.</li>
 </ol>
-<p class="muted">What is Terminal? On a Mac: Applications &gt; Utilities &gt; Terminal. What is PowerShell? On Windows: open the Start menu, type PowerShell and press Enter.</p>
+<details class="guide-trouble"><summary>If something goes wrong</summary>
+  <p>Not on Pro or Max? Upgrade at <a href="https://claude.ai/upgrade" target="_blank" rel="noopener noreferrer">claude.ai/upgrade</a>.</p>
+  <p>If <code>claude</code> says "command not found", open a new {{ terminal }} window and try again there.</p>
+  <p>{% if guide_platform == "windows" %}What is PowerShell? Open the Start menu, type PowerShell and press Enter.{% else %}What is Terminal? Applications &gt; Utilities &gt; Terminal.{% endif %}</p>
+</details>
+{% endif %}

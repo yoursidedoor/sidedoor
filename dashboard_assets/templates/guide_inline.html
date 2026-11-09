@@ -1,0 +1,6 @@
+{# S2 (owner, 2026-11-08): a "Show me how" guide opens in place, under its own step or section.
+   Needs `guide_name`; `guide_auth` (G3) for the Codex and Claude guides; `guide_open` to start open. #}
+<details class="guide-inline" id="guide-{{ guide_name }}"{% if guide_open %} open{% endif %}>
+  <summary class="guide-link">Show me how</summary>
+  <div class="guide">{% include "guides/" ~ guide_name ~ ".html" %}</div>
+</details>

@@ -338,6 +338,20 @@ class SettingsPageTest(unittest.TestCase):
         usable.start()
         self.addCleanup(usable.stop)
 
+    def test_round1_im_done_in_settings_runs_the_email_check(self):
+        self.ready_for_email_check()
+        self.browser.open_now = True
+        with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"), \
+                mock.patch.object(setup_steps, "run_email_check",
+                                  side_effect=lambda home: setup_steps.record(home, "email", "failed", "Other mailbox.")) as check:
+            page = self.client.get("/settings").text
+            response = self.client.post("/settings/browser/done", headers=HTMX).text
+        check.assert_called_once()
+        self.assertNotIn("Run email check", page)
+        self.assertIn(">Check again</button>", response)
+        self.assertIn('hx-trigger="submit, webmail-picked"', page.split('id="connection-webmail"')[1])
+        self.assertNotIn(">Replace", page)
+
     def test_a_030_email_mismatch_message_names_the_profile_step_by_its_new_number(self):
         # U2: a 0.3.0 setup-state.json saved this text when the profile was step 3 (S1a made it step 4).
         self.ready_for_email_check()
@@ -347,8 +361,8 @@ class SettingsPageTest(unittest.TestCase):
         old = ("Your browser is signed in to a@example.com, but your application email is alex@example.com. Sign in to "
                "alex@example.com in Sidedoor's browser, or change your application email in step 3.")
         setup_steps.record(self.home, "email", "failed", old, reason="mismatch")
-        step = self.client.get("/setup").text.split('id="step-9"')[1].split("</li>")[0]
-        self.assertIn("or change your application email in step 4.", step)
+        step = self.client.get("/setup?open=8").text.split('id="step-8"')[1].split('id="step-9"')[0]   # B4: the browser step
+        self.assertIn("or change your application email in Profile and search.", step)   # by name, one term (round 3, 10)
         self.assertNotIn("in step 3.", step)
         self.assertIn("or change your application email in Profile and search.", self.client.get("/settings").text)
 
@@ -357,7 +371,7 @@ class SettingsPageTest(unittest.TestCase):
             response = self.client.post("/settings/browser/open", headers=HTMX).text
             self.assertIn(setup_steps.BUSY_LINE, response)
             self.assertEqual(["open"], self.browser.calls)
-            self.assertNotIn("I'm done", response)
+            self.assertNotIn(">I'm done</button>", response)
             self.ready_for_email_check()
             self.browser.close_result = None
             self.client.post("/settings/email", headers=HTMX)
@@ -371,7 +385,7 @@ class SettingsPageTest(unittest.TestCase):
             self.client.post("/settings/profile", data=dict(FORM, email="b@x.com", phone="abc"), headers=HTMX)
             setup_steps.record(self.home, "codex", "failed", "Codex is not installed.")
             refused = self.client.post("/settings/email", headers=HTMX).text
-            self.assertIn('finish <a href="#profile">your profile</a>, <a href="#connection-codex">Codex</a> first', refused)
+            self.assertIn('Finish <a href="#profile">Profile and search</a> and <a href="#connection-engine">Choose your AI</a> first', refused)
             self.assertEqual([], self.browser.calls)
             self.client.post("/settings/profile", data=FORM, headers=HTMX)
             setup_steps.record(self.home, "codex", "done", "Codex is installed and signed in.")
@@ -457,17 +471,17 @@ class SettingsPageTest(unittest.TestCase):
             with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):
                 response = self.client.post("/settings/browser/open", headers=HTMX).text
             self.assertNotIn("click Try again", response)
-            self.assertNotIn("then click I&#39;m done.", response)
             self.browser.open_now = False
-        self.assertIn("Click Open to try again.", response)
+        self.assertIn("Click Open Sidedoor&#39;s browser to try again.", response)
         setup_steps.record(self.home, "email", "failed", "We could not see which mailbox is signed in. Open Sidedoor's "
                            "browser and check you are signed in to your inbox, then click I'm done.", reason="unreadable")
         with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):
             page = self.client.get("/settings").text
-            self.assertIn("signed in to your inbox, then click Run email check.", page)
+            self.assertIn("signed in to your inbox, then click I&#39;m done.", page)   # round 2: Settings has I'm done too
         # Setup's own wording is unchanged (the stored message and Setup's step 8).
         self.assertIn("then click I'm done.", setup_steps.load_state(self.home)["steps"]["email"]["message"])
-        self.assertIn("Sidedoor could not start Google Chrome. Try again.", self.client.get("/setup").text)
+        self.assertIn("Sidedoor could not start Google Chrome. Click Open Sidedoor&#39;s browser to try again.",
+                      self.client.get("/setup?open=8").text)   # round 2: the same words as Settings
 
     def test_linkedin_reconnect_shown_while_connected(self):
         (self.home / "license.key").write_text(LICENSE_KEY + "\n")
@@ -527,15 +541,20 @@ class SettingsPageTest(unittest.TestCase):
         self.assertIn('action="/settings/license/activate"', page)
         self.assertEqual(None, settings_page.status_detail({"label": "Trial: 3 days left", "text": "Trial: 3 days left."}))
 
-    def test_the_guide_column_is_empty_until_a_guide_opens(self):
+    def test_guides_open_in_place_with_no_guide_column(self):
         page = self.client.get("/settings").text
-        self.assertIn('<div class="setup-layout guide-on-demand">', page)
-        self.assertIn('<aside class="guide-panel card" id="guide-panel" aria-live="polite"></aside>', page)
+        self.assertNotIn("guide-panel", page)   # S2 (owner, 2026-11-08): one behaviour on every page
+        self.assertIn('<details class="guide-inline" id="guide-license">', page)
         self.assertIn("Messages are shown on Networking &amp; Referrals, applications on Applications.", page)
         self.assertIn("<h3>", self.client.get("/setup/guide/license", headers=HTMX).text)
 
     def test_manage_subscription_opens_the_billing_portal_or_falls_back_to_support(self):
         portal = "https://billing.stripe.com/p/login/test"
+        no_key = self.client.get("/settings").text   # round 3 (6): with no key, neither line nor removal
+        self.assertNotIn("s-manage-subscription", no_key)
+        self.assertNotIn("Remove Sidedoor&#39;s saved keys", no_key)
+        self.assertIn('id="guide-license"', no_key.split('id="s-buy-license"')[1][:600])   # round 3 (5): right under it
+        (self.home / "license.key").write_text(LICENSE_KEY + "\n")
         for url in (portal, ""):
             with self.subTest(url=url):
                 app = dashboard.create_app(SECRET, PORT, home=self.home, root=self.root,
@@ -613,7 +632,7 @@ class SettingsPageTest(unittest.TestCase):
     def test_gr1_settings_offers_test_saved_key_for_an_untested_key(self):
         (self.home / setup_steps.OPENROUTER_KEY_FILE).write_text(OPENROUTER_KEY + "\n")
         page = self.client.get("/settings").text
-        self.assertIn("It hasn't been tested yet.", page)
+        self.assertIn("but it hasn't been tested yet", page)
         self.assertIn("Test saved key", page)
         with mock.patch.object(setup_steps.text_model, "_post", return_value=(200, OK_ANSWER)):
             tested = self.client.post("/settings/openrouter/test", headers=HTMX).text
@@ -657,7 +676,7 @@ class SettingsPageTest(unittest.TestCase):
         linkedin = response.split('id="connection-linkedin" hx-swap-oob="true"')[1]
         self.assertIn("Connect LinkedIn</button>", linkedin)
         self.assertNotIn("Needs your license first", linkedin)
-        self.assertIn("sends the note after they accept. To send notes with invitations, upgrade your LinkedIn account to Premium.", linkedin)  # owner, 2026-10-27
+        self.assertIn("LinkedIn Premium lets you add a note to invitations.", linkedin)  # owner, 2026-10-27
 
     def test_e8t3_a_new_key_clears_the_license_pause_at_once_and_keeps_the_users(self):
         import scheduler_control
@@ -721,21 +740,23 @@ class SettingsPageTest(unittest.TestCase):
         raw = {"path": "/x", "file_name": "cv.pdf", "kind": "PDF"}
         setup_steps.record(self.home, "resume", "failed", resume_intake.ALL_REMOVED, code="ALL_CLAIMS_REMOVED", raw=raw)
         settings = self.client.get("/settings").text.split('id="resume"')[1].split("</section>")[0]
-        setup = self.client.get("/setup").text.split('id="step-3"')[1].split("</li>")[0]
+        setup = self.client.get("/setup?open=3").text.split('id="step-3"')[1].split("</li>")[0]
         for page in (settings, setup):
             self.assertNotIn("/resume/retry", page)
             self.assertIn("Upload a different résumé", page)
             self.assertIn('name="resume"', page)
         setup_steps.record(self.home, "resume", "failed", "The AI call took too long. Try again.", code="AI_TIMEOUT", raw=raw)
         self.assertIn('hx-post="/settings/resume/retry"', self.client.get("/settings").text)
-        self.assertIn('hx-post="/setup/resume/retry"', self.client.get("/setup").text)
+        self.assertIn('hx-post="/setup/resume/retry"', self.client.get("/setup?open=3").text)
 
     def test_setup_step_8_shows_the_saved_email_not_a_failed_form(self):
         # T17
         self.client.post("/setup/profile", data=FORM, headers=HTMX)
         self.client.post("/setup/profile", data=dict(FORM, email="b@x.com", phone="abc"), headers=HTMX)
-        with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"):
-            step = self.client.get("/setup").text.split('id="step-8"')[1].split('id="step-9"')[0]
+        real = setup_steps.progress   # B4: the browser step waits for the profile and the AI; unlocked here
+        with mock.patch.object(setup_steps, "chrome_path", return_value="/chrome"), \
+                mock.patch.object(setup_steps, "progress", lambda home=None: dict(real(home), locked={})):
+            step = self.client.get("/setup?open=8").text.split('id="step-8"')[1].split('id="step-9"')[0]
         self.assertIn("<strong>alex@example.com</strong>", step)
         self.assertNotIn("b@x.com", step)
 

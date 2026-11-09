@@ -1,21 +1,29 @@
-{# U1 3g: the engine choice and Claude's sign-in, shared by Setup step 6 and Settings > Connections. Never "Claude Code". #}
+{# U1 3g: the engine choice and Claude's sign-in, shared by Setup step 6 and Settings > Connections. The choice
+   names the command-line tools (owner, 2026-11-08: "Claude Code CLI" is named on purpose). #}
+{# Round 3 (9): a key box with the eye button (static/settings.js), the same on Setup and Settings. #}
+{% macro key_box(input_id, value="", placeholder="") -%}
+<span class="secret"><input id="{{ input_id }}" type="password" name="key" value="{{ value }}"{% if placeholder %} placeholder="{{ placeholder }}"{% endif %} autocomplete="off" spellcheck="false" required><button class="reveal" type="button" data-reveal="{{ input_id }}" aria-controls="{{ input_id }}" aria-label="Show key" aria-pressed="false"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></span>
+{%- endmacro %}
+
 {% macro engine_choice(action, target, engine, options, risk) %}
-  <form method="post" action="{{ action }}" hx-post="{{ action }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="engine-choice">
+  {# B1 (owner, 2026-11-08): the choice saves when it changes, like the mode step. #}
+  <form method="post" action="{{ action }}" hx-post="{{ action }}" hx-trigger="change" hx-target="{{ target }}" hx-swap="outerHTML" class="engine-choice">
     <fieldset>
       <legend>Which AI Sidedoor uses</legend>
       {% for name, label in options %}
-      <label><input type="radio" name="engine" value="{{ name }}"{% if name == engine %} checked{% endif %}> {{ label }}{% if name == "codex" %} (default){% endif %}</label>
-      {% if name == "antigravity" %}<p class="note note-warning antigravity-risk">{{ risk }}</p>{% endif %}
+      <label><input type="radio" name="engine" value="{{ name }}"{% if name == engine %} checked{% endif %}> {{ label }}</label>
       {% endfor %}
+      <p class="muted engine-cli-note">Sidedoor needs the command-line version. The Claude, ChatGPT and Antigravity desktop apps aren't enough on their own.</p>
     </fieldset>
-    <button class="button" type="submit">Save choice</button> <span class="htmx-indicator muted">Saving...</span>
+    <noscript><button class="button" type="submit">Save choice</button></noscript> <span class="htmx-indicator muted">Saving...</span>
   </form>
   {% if engine == "antigravity" %}<p class="note note-warning antigravity-chosen" role="status">{{ risk }}</p>{% endif %}
 {% endmacro %}
 
-{% macro antigravity_signin(base, target, v) %}
+{# `always_check` (Settings, round 1 16): the check button always shows for Antigravity and an Anthropic key.
+   Round 2 (11): it says [Check] until a check did not pass, then [Check again]. #}
+{% macro antigravity_signin(base, target, v, always_check=False) %}
   <p class="why">Sign in with your Google account.</p>
-  {% if v.antigravity_path and v.antigravity_done %}<p class="muted">Found at {{ v.antigravity_path }}</p>{% endif %}
   {% if v.antigravity_models %}
   <form method="post" action="{{ base }}/models" hx-post="{{ base }}/models" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="antigravity-models">
     <label for="{{ base|replace('/', '-') }}-main">Model for applications and checks</label>
@@ -31,20 +39,21 @@
     <button class="button" type="submit">Save models</button> <span class="htmx-indicator muted">Saving...</span>
   </form>
   {% endif %}
+  {% set check_label = ("Check again" if (v.antigravity_status or "not_started") not in ("done", "not_started") else "Check")
+     if always_check or not v.antigravity_done else None %}
+  {% if check_label %}{# B2: choosing Antigravity checks; this only while it is not done #}
   <form method="post" action="{{ base }}" hx-post="{{ base }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button" type="submit">Check</button>
+    <button class="button" type="submit">{{ check_label }}</button>
     <span class="htmx-indicator muted">Checking...</span>
   </form>
-  <a class="guide-link" href="/setup/guide/antigravity" hx-get="/setup/guide/antigravity" hx-target="#guide-panel">Show me how</a>
+  {% endif %}
+  {% set guide_name = "antigravity" %}{% set guide_button = check_label %}{% include "guide_inline.html" %}{# round 3 (13) #}
 {% endmacro %}
 
-{% macro claude_signin(base, target, v, input_id) %}
+{% macro claude_signin(base, target, v, input_id, always_check=False) %}
   {% if v.claude_auth_view == "api_key" %}
   <p class="why">Anthropic bills your API key for what Sidedoor uses. The key stays on this computer.</p>
-  {% else %}
-  <p class="why">Sign in with your Claude subscription.</p>
   {% endif %}
-  {% if v.claude_path and v.claude_done %}<p class="muted">Found at {{ v.claude_path }}</p>{% endif %}
   <form method="post" action="{{ base }}/auth" hx-post="{{ base }}/auth" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button" class="choice">
     <button class="button {{ 'button-highlight' if v.claude_auth_view != 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="subscription" aria-pressed="{{ 'true' if v.claude_auth_view != 'api_key' else 'false' }}">Use my Claude subscription</button>
     <button class="button {{ 'button-highlight' if v.claude_auth_view == 'api_key' else 'button-quiet' }}" type="submit" name="choice" value="api_key" aria-pressed="{{ 'true' if v.claude_auth_view == 'api_key' else 'false' }}">Use an Anthropic API key</button>
@@ -56,21 +65,23 @@
   {% if v.claude_key and not v.keychain_wait %}
   <p>A key is saved, ending in <code>{{ v.claude_key }}</code>.</p>
   <form method="post" action="{{ base }}/key/remove" hx-post="{{ base }}/key/remove" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button button-quiet" type="submit">Remove key</button>
+    <button class="button-link" type="submit">Remove key</button>
   </form>
   {% endif %}
   <form method="post" action="{{ base }}/key" hx-post="{{ base }}/key" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <label for="{{ input_id }}">{% if v.claude_key %}A different Anthropic API key{% else %}Anthropic API key{% endif %}</label>
-    <input id="{{ input_id }}" type="password" name="key" value="" autocomplete="off" spellcheck="false" required>
-    {% if not v.keychain_wait %}<button class="button" type="submit">Save</button>{% endif %}
+    <label for="{{ input_id }}">Anthropic API key</label>
+    {{ key_box(input_id) }}
+    {% if not v.keychain_wait %}<button class="button" type="submit">Save and test</button>{% endif %}
     {% if v.offer_file %}<button class="button button-quiet" type="submit" name="to_file" value="1">Save in Sidedoor's folder instead</button>{% endif %}
-    <span class="htmx-indicator muted">Saving...</span>
-  </form>
-  {% endif %}
-  {% endif %}
-  <form method="post" action="{{ base }}" hx-post="{{ base }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button" type="submit">Check</button>
     <span class="htmx-indicator muted">Checking...</span>
   </form>
-  <a class="guide-link" href="/setup/guide/claude" hx-get="/setup/guide/claude" hx-target="#guide-panel">Show me how</a>
+  {% endif %}
+  {% endif %}
+  {% if (always_check and v.claude_auth_view == "api_key") or (not v.claude_done and (v.claude_status or "not_started") != "not_started") %}{# B2: [Use my Claude subscription] and [Save and test] check; this only after a check did not pass #}
+  <form method="post" action="{{ base }}" hx-post="{{ base }}" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+    <button class="button" type="submit">{{ "Check again" if (v.claude_status or "not_started") not in ("done", "not_started") else "Check" }}</button>
+    <span class="htmx-indicator muted">Checking...</span>
+  </form>
+  {% endif %}
+  {% set guide_name = "claude" %}{% set guide_auth = v.claude_auth_view %}{% include "guide_inline.html" %}
 {% endmacro %}

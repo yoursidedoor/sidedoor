@@ -224,7 +224,7 @@ def retain(root, *, rotate_bytes=ROTATE_BYTES, retain_bytes=RETAIN_BYTES,
 TRACE_TTL_SECONDS = 30 * 86400
 TRACE_DIRECTORIES = (("application-browser", "request-*"), ("application-connection-manual", "*"),
                      ("outreach-history", "*"), ("linkedin-contacts", "run-*"), ("application-recovery", "*"),
-                     ("email-check", "check-*"))   # setup step 9's mailbox reads (E7.T1)
+                     ("email-check", "check-*"))   # the setup browser step's mailbox reads (E7.T1)
 
 
 def _newest(path):

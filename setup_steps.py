@@ -73,18 +73,22 @@ NOT_BUILT = "not_built"
 LOCKED_LINE = "Locked after your email check passed. To use a different email, contact " + SUPPORT_EMAIL + "."
 BUSY_LINE = "Busy with a scheduled task. Try again in a few minutes."
 
-# The eleven steps, in the spec's order (E6.T0 3.2). Step 10 is optional and never counted.
+# The ten steps, in the spec's order (E6.T0 3.2). Step 9 is optional and never counted.
 # 0.4.0 (S1a, owner 2026-10-28): the license moved first, people buy before they set up. Saved
 # progress is keyed by the step's name (state["steps"]["license"]), never its number, so a 0.3.0
-# setup-state.json still shows the same steps done.
+# setup-state.json still shows the same steps done. Setup simplification (owner, 2026-11-08, B4):
+# the email check is part of the browser step ([I'm done] runs it); its record stays "email".
 STEPS = ((1, "license", "License key"), (2, "openrouter", "Create your OpenRouter key"), (3, "resume", "Résumé"),
-         (4, "profile", "Your profile"), (5, "mode", "Review or automatic"), (6, "codex", "Codex"),
+         (4, "profile", "Profile and search"), (5, "mode", "Review or automatic"), (6, "codex", "Codex"),
          (7, "linkedin", "Connect LinkedIn"), (8, "browser", "Sign in to the browser Sidedoor uses"),
-         (9, "email", "Email check"), (10, "login", "Start at login (optional)"), (11, "start", "Start"))
-REQUIRED = tuple(number for number, _, _ in STEPS if number <= 9)
-# The order the code forces (E6.T0 3.2): step -> the steps it needs first.
-NEEDS = {3: (2,), 7: (1,), 9: (4, 6, 8), 11: REQUIRED}
+         (9, "login", "Start at login (optional)"), (10, "start", "Start"))
+REQUIRED = tuple(number for number, _, _ in STEPS if number <= 8)
+# The order the code forces (E6.T0 3.2): step -> the steps it needs first. The browser step itself is
+# never locked (round 1, owner 2026-11-08); only its email check waits for EMAIL_CHECK_NEEDS.
+NEEDS = {3: (2,), 7: (1,), 10: REQUIRED}
+EMAIL_CHECK_NEEDS = (4, 6)   # the profile's email and the chosen AI
 NUMBER = {key: number for number, key, _ in STEPS}   # step name -> its number on the page
+KEY = {number: key for number, key, _ in STEPS}      # its number on the page -> step name
 
 
 def now_iso():
@@ -406,7 +410,7 @@ def save_and_test_openrouter(api_key, config, home=None, transport=None, to_file
 
 
 LICENSE_KEY_PREFIX = "SD-"   # every Sidedoor license key starts with it (activate_license)
-LICENSE_KEY_IN_OPENROUTER = "That's your Sidedoor license key. It goes in step 1."
+LICENSE_KEY_IN_OPENROUTER = "That's your Sidedoor license key. It goes in the License key step."
 
 
 def is_license_key(text):
@@ -417,7 +421,12 @@ def is_license_key(text):
 
 # Setup messages a 0.3.0 setup-state.json may hold that name a step by its old number (S1a moved
 # the profile from step 3 to step 4): the old words -> today's. Applied where a saved message is shown.
-RENUMBERED_WORDS = (("or change your application email in step 3.", "or change your application email in step 4."),)
+# Round 1 (owner, 2026-11-08, 29): saved messages name steps by name, so older numbered words are said by name.
+# Round 3 (10): the profile is "Profile and search" on Setup and Settings alike.
+RENUMBERED_WORDS = (("or change your application email in step 3.", "or change your application email in Profile and search."),
+                    ("or change your application email in step 4.", "or change your application email in Profile and search."),
+                    ("or change your application email in Your profile.", "or change your application email in Profile and search."),
+                    ("It goes in step 1.", "It goes in the License key step."))
 
 
 def current_words(message):
@@ -965,6 +974,9 @@ def save_profile(form, home=None):
         profile = profile_document(clean, read_profile(home))
         _write_private(_home(home) / "profile.json", json.dumps(profile, indent=2) + "\n")
     result = record(home, "profile", "done", "Saved.", form=clean)
+    if not email_locked(result) and result["steps"].get("email", {}).get("status") not in (None, "done"):
+        # Round 2 (4): a new profile email makes the last email-check failure stale.
+        result = update_state(lambda value: value["steps"].pop("email", None), home)
     guess_webmail(home)  # step 8's webmail from the email's domain, when it is a well-known one
     return load_state(home) if load_state(home).get("webmail") else result, {}
 
@@ -1625,7 +1637,10 @@ def check_antigravity(home=None, run=subprocess.run):
     return record(home, "antigravity", "done", " ".join(["Antigravity is installed and signed in."] + gone))
 # --- U1 3g: the engine choice (Setup step 6 and Settings > Connections) ------------------------------
 
-ENGINE_LABELS = {"codex": "Codex", "claude": "Claude", "antigravity": "Antigravity"}   # never "Claude Code"
+ENGINE_LABELS = {"codex": "Codex", "claude": "Claude", "antigravity": "Antigravity"}
+# What the AI choice offers (owner, 2026-11-08: the command-line tools, named as such).
+ENGINE_CHOICE_LABELS = {"codex": "Codex CLI (powered by ChatGPT)", "claude": "Claude Code CLI (powered by Claude)",
+                        "antigravity": "Antigravity (powered by Gemini)"}
 ENGINE_TITLES = {"codex": "Codex", "claude": "Claude", "antigravity": "Antigravity"}
 ANTIGRAVITY_RISK = ("Google's terms don't allow apps like Sidedoor to run Antigravity. If you choose it, Google "
                     "may suspend your Antigravity or Gemini CLI account.")
@@ -1636,7 +1651,7 @@ def engine_options():
     """[(name, label)] the choice offers: Codex, Claude, Antigravity, each only once engines.py has it."""
     import engines
     known = engines.supported()
-    return [(name, label) for name, label in ENGINE_LABELS.items() if name in known]
+    return [(name, ENGINE_CHOICE_LABELS[name]) for name in ENGINE_LABELS if name in known]
 
 
 def chosen_engine(state):
@@ -2319,11 +2334,14 @@ def guess_webmail(home=None):
     return bool(load_state(home).get("webmail"))
 
 
+BROWSER_CLOSED = "Sidedoor's browser is closed."
+
+
 def browser_closed(home=None):
     """[I'm done] in step 8 or Settings: the browser part is done; say plainly when the webmail is
     still missing, so the step never looks finished-but-blocked with no reason."""
     if guess_webmail(home):
-        return record(home, "browser", "done", "Sidedoor's browser is closed.")
+        return record(home, "browser", "done", BROWSER_CLOSED)
     return record(home, "browser", "done", "Sidedoor's browser is closed. Now choose your webmail below to "
                   "finish this step.")
 
@@ -2354,10 +2372,10 @@ BROWSER_OPEN_MESSAGES = {
     "already_open": ("needs_you", "Sidedoor's browser is already open. Sign in there, then click I'm done."),
     "busy": ("failed", BUSY_LINE),
     "unclean": ("failed", "Sidedoor's browser did not shut down cleanly last time. Quit Google Chrome completely "
-                "(Chrome menu > Quit Google Chrome), then click Try again. If this message stays, restart your "
-                "computer and try again."),
+                "(Chrome menu > Quit Google Chrome), then click Open Sidedoor's browser again. If this message stays, "
+                "restart your computer and try again."),
     "no_chrome": ("failed", "Sidedoor needs Google Chrome. Install it, then click Check again."),
-    "failed": ("failed", "Sidedoor could not start Google Chrome. Try again.")}
+    "failed": ("failed", "Sidedoor could not start Google Chrome. Click Open Sidedoor's browser to try again.")}
 
 
 def lock_holder_alive(profile):
@@ -2434,8 +2452,9 @@ class BrowserSession:
             return False
 
     def is_open(self):
-        with self._mutex:
-            return self.process is not None and self.process.poll() is None
+        # Round 2 (1): lock-free, so a page render never waits while close(then=...) runs an email check.
+        process = self.process
+        return process is not None and process.poll() is None
 
     def open(self):
         """"opened", "brought_forward", "already_open" (could not bring it forward), "busy", "unclean",
@@ -2509,7 +2528,7 @@ class BrowserSession:
                 hold.release()
 
 
-# --- Step 9: Email check ---------------------------------------------------------------------------
+# --- Step 8 (B4): the email check ---------------------------------------------------------------------
 
 class MailboxReadNotBuilt(Exception):
     """The email check cannot run here: Sidedoor's browser runtime (bundled Node and @playwright/mcp,
@@ -2650,6 +2669,28 @@ def compare_mailboxes(application_email, signed_in):
     return isinstance(signed_in, str) and application_email.lower() == signed_in.lower()
 
 
+_email_check_running = threading.Lock()
+
+
+def email_check_due(progress):
+    """Round 2 (3): an email check is due once the webmail is chosen and nothing it waits for is missing."""
+    return bool(progress["state"].get("webmail")) and not email_check_waits_for(progress)
+
+
+def run_email_check_if_still_due(home=None):
+    """Round 2 (2): a picked webmail's check, re-read under the browser hold: skipped (None) while
+    another check runs or once the email is locked."""
+    if not _email_check_running.acquire(blocking=False):
+        return None
+    try:
+        state = load_state(home)
+        if email_locked(state) or not email_check_due(progress(home)):
+            return None
+        return run_email_check(home)
+    finally:
+        _email_check_running.release()
+
+
 def run_email_check(home=None, read=None):
     """Read the signed-in mailbox and compare (call under the browser hold, see BrowserSession.close)."""
     state = load_state(home)
@@ -2675,14 +2716,14 @@ def run_email_check(home=None, read=None):
         return record(home, "email", "done", "Sign in to %s in Sidedoor's browser." % state["locked_email"],
                       mismatch=True)
     return record(home, "email", "failed", "Your browser is signed in to %s, but your application email is %s. "
-                  "Sign in to %s in Sidedoor's browser, or change your application email in step 4."
+                  "Sign in to %s in Sidedoor's browser, or change your application email in Profile and search."
                   % (signed_in, application_email, application_email), reason="mismatch")
 
 
-# --- Steps 10 and 11: start at login, Start --------------------------------------------------------
+# --- Steps 9 and 10: start at login, Start ----------------------------------------------------------
 
 def start_at_login(enabled, home=None):
-    """Step 10 and Settings > Start at login (E5.T2): register or remove Sidedoor's login entry
+    """Step 9 and Settings > Start at login (E5.T2): register or remove Sidedoor's login entry
     (`login_item`) and record the outcome. Leaving it off, or a refusal, never blocks Start. The entry
     gets the saved Codex's folder on its PATH (L1)."""
     import login_item
@@ -2692,8 +2733,8 @@ def start_at_login(enabled, home=None):
 
 
 def started(home=None):
-    """Setup's own Start (step 11) has succeeded at least once (owner, 2026-10-22: a login launch waits
-    for it, not just for steps 1 to 9)."""
+    """Setup's own Start (step 10) has succeeded at least once (owner, 2026-10-22: a login launch waits
+    for it, not just for the required steps)."""
     return load_state(home)["steps"].get("start", {}).get("status") == "done"
 
 
@@ -2712,8 +2753,8 @@ def refresh_login_entry(home=None):
 
 
 def login_on_continue(home=None):
-    """Setup's Start (continuing past step 10): step 10 is ticked by default (owner, 2026-10-22), so
-    when the user never saved step 10 it is registered now, as the ticked box showed. Never when the
+    """Setup's Start (continuing past step 9): step 9 is ticked by default (owner, 2026-10-22), so
+    when the user never saved step 9 it is registered now, as the ticked box showed. Never when the
     user saved a choice, nor where start at login is not available."""
     import login_item
     if "login" in load_state(home)["steps"] or not login_item.status()["supported"]:
@@ -2722,9 +2763,9 @@ def login_on_continue(home=None):
 
 
 def login_view(saved, home=None):
-    """What step 10 and Settings show: the real registration (`login_item.status`, which may ask the
+    """What step 9 and Settings show: the real registration (`login_item.status`, which may ask the
     OS: call it off the event loop), with the saved record's message when it agrees. `default`: no
-    choice saved yet, so step 10's box starts ticked (owner, 2026-10-22; registered only on Save or
+    choice saved yet, so step 9's box starts ticked (owner, 2026-10-22; registered only on Save or
     Start). `retry`: the value to send again from [Try again] after a refusal."""
     import login_item
     current = login_item.status(home=_home(home), codex_path=load_state(home).get("codex_path"))
@@ -2745,7 +2786,7 @@ def login_view(saved, home=None):
         return {"on": True, "supported": True, "status": "done", "message": login_item.ON}
     if not saved:
         return {"on": False, "default": True, "supported": True, "status": "not_started",
-                "message": "Ticked for you. It turns on when you click Start in step 11. Untick it to leave it off."}
+                "message": "Ticked for you. It turns on when you click Start Sidedoor. Untick it to leave it off."}
     return {"on": False, "supported": True, "status": "not_started",
             "message": saved.get("message") if saved.get("status") == "not_started" else None}
 
@@ -2763,39 +2804,37 @@ def start_scheduler(home=None):
     if scheduler_loop.start():
         return record(home, "start", "done", "Sidedoor is running.")
     return record(home, "start", "failed", "Sidedoor couldn't start from this window. Close it, open Sidedoor "
-                  "from its app icon, then click Start.")
+                  "from its app icon, then click Start Sidedoor.")
 
 
 # --- Progress ---------------------------------------------------------------------------------------
 
 def step_done(number, state, home=None):
-    steps = state["steps"]
-    if number == 1:
+    key, steps = KEY[number], state["steps"]
+    if key == "license":
         return license_done(home)
-    if number == 2:
-        return steps.get("openrouter", {}).get("status") == "done"
-    if number == 3:
-        return steps.get("resume", {}).get("status") == "done"
-    if number == 4:
-        return steps.get("profile", {}).get("status") == "done"
-    if number == 5:
+    if key == "mode":
         return True
-    if number == 6:
+    if key == "codex":
         return engine_done(state)
-    if number == 7:
-        return steps.get("linkedin", {}).get("status") == "done"
-    if number == 8:
-        return steps.get("browser", {}).get("status") == "done" and bool(state.get("webmail"))
-    if number == 9:
-        return email_locked(state)
-    if number == 10:
-        return steps.get("login", {}).get("status") == "done"
-    return steps.get("start", {}).get("status") == "done"
+    if key == "browser":   # B4: signed in, the webmail chosen and the email check passed
+        return steps.get("browser", {}).get("status") == "done" and bool(state.get("webmail")) \
+            and email_locked(state)
+    return steps.get(key, {}).get("status") == "done"
+
+
+def current_step(progress):
+    """S1 (owner, 2026-11-08): the step Setup shows open: the first required step not done and not
+    locked; once every required step is done, Start."""
+    for number in REQUIRED:
+        if not progress["done"][number] and number not in progress["locked"]:
+            return number
+    return NUMBER["start"]
 
 
 def progress(home=None):
-    """{"done": {n: bool}, "locked": {n: first missing step}, "left": count of steps 1-9 not done,
-    "finished": True once steps 1 to 9 were all done (latched in the state)}."""
+    """{"done": {n: bool}, "locked": {n: first missing step}, "left": count of required steps not done,
+    "finished": True once the required steps were all done (latched in the state)}."""
     state = resume_state(home)
     done = {number: step_done(number, state, home) for number, _, _ in STEPS}
     locked = {}
@@ -2808,4 +2847,10 @@ def progress(home=None):
     if not finished and left == 0:
         update_state(lambda value: value.setdefault("setup_finished_at", now_iso()), home)
         finished = True
-    return {"state": state, "done": done, "locked": locked, "left": left, "finished": finished}
+    return {"state": state, "done": done, "locked": locked, "left": left, "finished": finished,
+            "total": len(STEPS), "required": len(REQUIRED)}
+
+
+def email_check_waits_for(progress):
+    """The steps the email check still waits for (EMAIL_CHECK_NEEDS not done), by number."""
+    return [number for number in EMAIL_CHECK_NEEDS if not progress["done"][number]]

@@ -314,7 +314,7 @@ class QuitTest(Base):
     @unittest.skipUnless(DASHBOARD, "dashboard packages (fastapi, httpx) are not installed")
     def test_owner2_item6_serve_start_waits_for_setups_start(self):
         setup_steps.update_state(lambda state: state.update(setup_finished_at="2026-10-22T00:00:00Z"), self.home)
-        for done in (False, True):  # steps 1-9 done throughout; only Setup's Start (step 11) differs
+        for done in (False, True):  # steps 1-9 done throughout; only Setup's Start (step 10) differs
             if done:
                 setup_steps.record(self.home, "start", "done", "Sidedoor is running.")
             loop = mock.Mock()
@@ -762,21 +762,22 @@ class PagesTest(Base):
         self.client.get("/", params={"t": SECRET})
 
     def step10(self, text):
-        start = text.index('id="step-10"')
+        start = text.index('id="step-9"')   # start at login is step 9 since B4
         return text[start:text.index("</li>", start)]
 
     def test_setup_step_10_saves_when_the_box_changes(self):
         # Owner, 2026-10-22: "simply checking or unchecking the box should do" (no Save click).
-        step = self.step10(self.client.get("/setup").text)
+        step = self.step10(self.client.get("/setup?open=9").text)
         self.assertIn('hx-trigger="change"', step)
         self.assertIn("<noscript><button", step)
 
     def test_setup_step_10_shows_and_toggles_the_real_registration(self):
-        on = self.step10(self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX).text)
+        self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX)   # done: the step collapses (round 1)
+        on = self.step10(self.client.get("/setup?open=9").text)
         self.assertIn(login_item.ON, on)
         self.assertIn('name="enabled" checked', on)
         self.assertTrue(self.plist.exists())
-        self.assertIn('name="enabled" checked', self.step10(self.client.get("/setup").text))
+        self.assertIn('name="enabled" checked', self.step10(self.client.get("/setup?open=9").text))
         off = self.step10(self.client.post("/setup/login", data={}, headers=HTMX).text)
         self.assertNotIn("checked", off)
         self.assertIn("Open Sidedoor yourself after you log in", off)
@@ -787,12 +788,12 @@ class PagesTest(Base):
     def test_the_file_decides_not_the_saved_record(self):
         self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX)
         self.plist.unlink()  # removed outside Sidedoor
-        self.assertNotIn("checked", self.step10(self.client.get("/setup").text))
+        self.assertNotIn("checked", self.step10(self.client.get("/setup?open=9").text))
 
     # --- owner settings and review fixes (2026-10-22) --------------------------------------------
 
     def test_owner1_step_10_starts_ticked_and_registers_only_on_save_or_start(self):
-        step = self.step10(self.client.get("/setup").text)
+        step = self.step10(self.client.get("/setup?open=9").text)
         self.assertIn('name="enabled" checked', step)
         self.assertIn(">Save</button>", step)
         self.assertEqual([call for call in self.runner.calls if call[1] != "print-disabled"], [])
@@ -810,17 +811,18 @@ class PagesTest(Base):
                 mock.patch.object(setup_steps, "start_scheduler", lambda home=None: None):
             response = self.client.post("/setup/start", headers=HTMX)
         self.assertTrue(self.plist.exists(), "Start continues past the ticked step 10")
-        self.assertIn(login_item.ON, response.text, "step 10 is re-sent with the new state")
+        self.assertIn('<span class="chip chip-success">Done</span>', self.step10(response.text),
+                      "step 9 is re-sent with the new state")
 
     def test_item5_a_stale_entry_says_needs_updating_with_an_update_button(self):
         self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX)
         setup_steps.update_state(lambda state: state.update(codex_path=str(self.user_home / "moved" / "codex")), self.home)
-        step = self.step10(self.client.get("/setup").text)
+        step = self.step10(self.client.get("/setup?open=9").text)
         self.assertIn("needs updating", step)
         self.assertIn(">Update</button>", step)
         self.assertIn(">Update</button>", self.client.get("/settings").text)
-        step = self.step10(self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX).text)
-        self.assertIn(login_item.ON, step)
+        self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX)
+        self.assertIn(login_item.ON, self.step10(self.client.get("/setup?open=9").text))
 
     def test_L2_disabled_by_the_mac_shows_off_with_the_login_items_pointer(self):
         self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX)
@@ -829,7 +831,7 @@ class PagesTest(Base):
         current = login_item.status()
         self.assertEqual((current["enabled"], current["disabled_by_system"], current["disabled_message"]),
                          (False, True, login_item.MAC_DISABLED))
-        step = self.step10(self.client.get("/setup").text)
+        step = self.step10(self.client.get("/setup?open=9").text)
         self.assertNotIn('name="enabled" checked', step)
         self.assertIn("System Settings &gt; General &gt; Login Items", step)
         self.assertIn("Login Items", self.client.get("/settings").text)
@@ -843,8 +845,8 @@ class PagesTest(Base):
         self.assertIn("Input/output error", log.getvalue(), "the OS's words go to the log")
         self.assertIn('<input type="hidden" name="enabled" value="on">', step)
         self.runner.answers = []
-        step = self.step10(self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX).text)
-        self.assertIn(login_item.ON, step)
+        self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX)
+        self.assertIn(login_item.ON, self.step10(self.client.get("/setup?open=9").text))
 
     def test_L8_status_is_read_off_the_event_loop(self):
         import asyncio
@@ -876,7 +878,7 @@ class PagesTest(Base):
 
     def test_3_linux_says_not_available_yet_without_a_dead_box(self):
         with mock.patch.object(login_item, "PLATFORM", "linux"):
-            step = self.step10(self.client.get("/setup").text)
+            step = self.step10(self.client.get("/setup?open=9").text)
             settings = self.client.get("/settings").text
         line = "Start at login isn&#39;t available on this system yet; Sidedoor still works when you open it."
         self.assertIn(line, step)
