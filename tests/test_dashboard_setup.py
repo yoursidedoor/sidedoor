@@ -5,6 +5,7 @@ Every network call is faked (text_model transport, relay, Unipile, Codex, Chrome
 """
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
+import contextlib
 import importlib.util
 import json
 import os
@@ -251,44 +252,42 @@ class SetupPageTest(unittest.TestCase):
         self.assertIn(">Trial</a>", response.text)
         self.assertNotIn("SD-SECRETKEY", response.text + self.client.get("/setup").text)
 
-    def test_linkedin_connect_reads_accounts_first_and_shows_the_link_once(self):
+    def test_linkedin_connects_with_the_browsers_sign_in(self):
+        # E18: one sign-in, in Sidedoor's browser; [I'm signed in] sends that session through the relay.
+        import linkedin_session
         license_fixtures.install(self.home, valid_until="2999-01-01T00:00:00Z")
-        transport = mock.Mock(return_value=(403, {"error": "LICENSE_NOT_LINKED"}))
-        with mock.patch.object(setup_steps.unipile_port, "RelayTransport", return_value=transport), \
-                mock.patch.object(setup_steps.unipile_port, "hosted_link", return_value="https://unipile.test/link") as link:
-            status = self.client.get("/setup/linkedin/status", headers={"hx-request": "true"})
-            self.assertIn("Connect LinkedIn</button>", status.text)
-            self.assertIn("LinkedIn Premium lets you add a note to invitations.", status.text)   # round 2 (14)
-            response = self.client.post("/setup/linkedin/connect", headers=HTMX)
-            self.assertEqual(link.call_args[0][2], "create")
-            self.assertIn('href="https://unipile.test/link" target="_blank"', response.text)
-            self.assertIn('hx-trigger="every 5s"', response.text)
-            poll = self.client.get("/setup/linkedin/status", params={"poll": "1"}, headers={"hx-request": "true"})
-            self.assertIn("Waiting for LinkedIn", poll.text)
-            self.assertNotIn("unipile.test", self.client.get("/setup").text)
-            transport.return_value = (200, {"items": [{"type": "LINKEDIN", "name": "Alex", "status": "OK"}]})
-            done = self.client.get("/setup/linkedin/status", params={"poll": "1"}, headers={"hx-request": "true"})
-            self.assertEqual(done.headers["hx-retarget"], "#step-7")
-            self.assertIn(DONE, done.text.split('id="step-7"')[1].split("</li>")[0])
-            # Listed: a second create would add a paid Unipile account, so Connect does nothing.
-            link.reset_mock()
-            self.client.post("/setup/linkedin/connect", headers=HTMX)
-            link.assert_not_called()
+        answers = {"accounts": (403, {"error": "LICENSE_NOT_LINKED"})}
+        calls = []
 
-    def test_waiting_view_always_offers_a_fresh_link(self):
-        license_fixtures.install(self.home, valid_until="2999-01-01T00:00:00Z")
-        transport = mock.Mock(return_value=(403, {"error": "LICENSE_NOT_LINKED"}))
-        with mock.patch.object(setup_steps.unipile_port, "RelayTransport", return_value=transport), \
-                mock.patch.object(setup_steps.unipile_port, "hosted_link", side_effect=["https://u.test/1", "https://u.test/2"]) as link:
-            self.client.post("/setup/linkedin/connect", headers=HTMX)
-            self.client.post("/setup/mode", data={"mode": "automatic"}, headers=HTMX)
-            step7 = self.client.get("/setup/step/7", headers={"hx-request": "true"}).text   # S1: [Open] re-renders it
-            self.assertIn('hx-post="/setup/linkedin/connect"', step7)
-            self.assertIn("Connect again", step7)
-            again = self.client.post("/setup/linkedin/connect", headers=HTMX).text
-            self.assertEqual(link.call_count, 2)
-            self.assertIn('href="https://u.test/2"', again)
-            self.assertIn("Get a new link", again)
+        def transport(method, path, **named):
+            calls.append((method, path))
+            if path == "/link/session":
+                answers["accounts"] = (200, {"items": [{"type": "LINKEDIN", "name": "Alex", "status": "OK"}]})
+                return 200, {"connected": True, "kind": "create"}
+            return answers["accounts"]
+        self.addCleanup(linkedin_session.set_reader, linkedin_session.set_reader(lambda home: None))
+        with mock.patch.object(setup_steps.unipile_port, "RelayTransport", return_value=transport):
+            status = self.client.get("/setup/linkedin/status", headers={"hx-request": "true"})
+            self.assertIn("I'm signed in</button>", status.text)
+            self.assertIn("Open Sidedoor's browser</button>", status.text)
+            self.assertNotIn("Unipile", status.text)   # owner, 2026-11-12: no sentence about where the session goes
+            self.assertIn("LinkedIn Premium lets you add a note to invitations.", status.text)   # round 2 (14)
+            self.assertNotIn("sign-in page", status.text)   # no second sign-in anywhere
+            # Not signed in yet: the step says so, keeps its buttons, and nothing is sent.
+            missing = self.client.post("/setup/linkedin/connect", headers=HTMX).text
+            self.assertIn("is not signed in to LinkedIn", missing)
+            self.assertIn("I'm signed in</button>", missing)
+            self.assertNotIn(("POST", "/link/session"), calls)
+            with mock.patch.object(self.browser, "open", return_value="opened"):
+                opened = self.client.post("/setup/linkedin/open", headers=HTMX).text
+            self.assertIn("Sign in to LinkedIn there, then click I&#39;m signed in.", opened)
+            linkedin_session.set_reader(lambda home: linkedin_session.Session("COOKIE-MARKER-123", "Agent/1"))
+            done = self.client.post("/setup/linkedin/connect", headers=HTMX).text
+            self.assertIn(DONE, done.split('id="step-7"')[1].split("</li>")[0])
+            self.assertIn(("POST", "/link/session"), calls)
+            self.assertNotIn("COOKIE-MARKER-123", done + (self.home / "setup-state.json").read_text())
+        step8 = self.client.get("/setup?open=8").text.split('id="step-8"')[1].split('id="step-9"')[0]
+        self.assertNotIn("LinkedIn", step8)   # A6: one LinkedIn step
 
     def test_typed_pick_values(self):
         offer = self.client.get("/setup/pick/roles", params={"q_roles": "Quantum Whisperer"}, headers={"hx-request": "true"}).text
@@ -331,7 +330,7 @@ class SetupPageTest(unittest.TestCase):
             self.assertIn('hx-trigger="click, load"', self.client.get("/setup?open=7").text)  # the page load does
             transport.return_value = (403, {"error": "LICENSE_NOT_LINKED"})
             again = self.client.get("/setup/linkedin/status", headers={"hx-request": "true"}).text
-            self.assertIn("Connect LinkedIn</button>", again)
+            self.assertIn("I'm signed in</button>", again)
             # Step 5 activating a key re-reads /accounts too.
             transport.return_value = (401, {"error": "LICENSE_INVALID"})
             self.client.get("/setup/linkedin/status", headers={"hx-request": "true"})
@@ -610,8 +609,10 @@ class SetupPageTest(unittest.TestCase):
         setup_steps.record(self.home, "linkedin", "not_started", None, offer="connect")
         step = self.client.get("/setup/step/7", headers={"hx-request": "true"}).text
         guide = step.split('id="guide-linkedin"')[1]
-        self.assertIn("Click <strong>Connect LinkedIn</strong>.", guide)
-        self.assertNotIn("Reconnect", guide)
+        # E18 join: the live view's Done where it can be shown (macOS), else [I'm signed in] after the window.
+        self.assertIn("click <strong>I'm signed in</strong>." if dashboard.GUIDE_PLATFORM == "windows"
+                      else "Press <strong>Done</strong>.", guide)
+        self.assertNotIn("Check again", guide)
 
     def test_round2_antigravity_says_check_until_a_check_failed(self):
         setup_steps.update_state(lambda state: state.update(engine="antigravity"), self.home)
@@ -650,6 +651,169 @@ class SetupPageTest(unittest.TestCase):
                 response = self.client.post("/setup/start", headers=HTMX)
         self.assertEqual(response.status_code, 200)
         self.assertIn('<span class="chip chip-success">Done</span>', response.text.split('id="step-10"')[1].split("</li>")[0])
+
+    def unlock_start_step(self):
+        license_fixtures.install(self.home, valid_until="2999-01-01T00:00:00Z")
+        self.unlock_browser_step()
+        for key in ("openrouter", "resume", "linkedin", "browser"):
+            setup_steps.record(self.home, key, "done", "ok")
+        setup_steps.update_state(lambda state: state.update(email_check_passed_at="2026-10-01T00:00:00Z"), self.home)
+
+    def start_step(self, text):
+        return text.split('id="step-10"')[1].split("</li>")[0]
+
+    def start_patches(self):
+        return (mock.patch.object(setup_steps, "login_on_continue", return_value=None),
+                mock.patch.object(setup_steps, "start_scheduler", return_value=None),
+                mock.patch.object(dashboard, "sync_license_pause", return_value=None),
+                mock.patch("license_clock.check_now", return_value="ok"))
+
+    def test_start_step_share_progress_box_ticked_by_default_and_saved_like_settings(self):
+        import progress_share
+        self.unlock_start_step()
+        step = self.start_step(self.client.get("/setup?open=10").text)
+        self.assertIn(progress_share.LABEL, step)
+        self.assertIn('id="setup-share-progress" checked', step)          # no choice saved yet: ticked
+        self.assertEqual(self.client.get("/setup").text.count('class="step-number"'), 10)   # step count unchanged
+        with contextlib.ExitStack() as stack:
+            for patch in self.start_patches():
+                stack.enter_context(patch)
+            self.client.post("/setup/start", headers=HTMX)               # the box untouched: what it showed is saved
+            self.assertIs(setup_steps.load_state(self.home)[progress_share.SETTING], True)
+            self.assertIn('id="s-share-progress" checked', self.client.get("/settings").text)
+            self.client.post("/setup/progress", data={}, headers=HTMX)   # unticked, then Start again
+            self.client.post("/setup/start", data={"share_progress": "on"}, headers=HTMX)   # a stray field changes nothing
+        self.assertIs(setup_steps.load_state(self.home)[progress_share.SETTING], False)
+        self.assertIn('id="s-share-progress">', self.client.get("/settings").text)
+        self.assertIn('id="setup-share-progress">', self.start_step(self.client.get("/setup?open=10").text))
+
+    def test_share_progress_box_has_its_own_form_so_enter_never_presses_start(self):
+        from html.parser import HTMLParser
+
+        class Forms(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.forms, self.current = [], None
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "form":
+                    self.current = dict(attrs, inputs=[])
+                    self.forms.append(self.current)
+                elif tag == "input" and self.current is not None:
+                    self.current["inputs"].append(attrs)
+                elif tag == "button" and self.current is not None:
+                    self.current.setdefault("buttons", []).append(attrs)
+
+            def handle_endtag(self, tag):
+                if tag == "form":
+                    self.current = None
+
+        self.unlock_start_step()
+        parser = Forms()
+        parser.feed(self.start_step(self.client.get("/setup?open=10").text))
+        by_action = {form["action"]: form for form in parser.forms}
+        box = by_action["/setup/progress"]
+        self.assertEqual([field["id"] for field in box["inputs"]], ["setup-share-progress"])
+        # M4: Enter on the box does nothing (settings.js, loaded by Setup, skips boxes marked data-enter-inert);
+        # M3: the one line under it comes from progress_share.HELP and describes the box.
+        import progress_share
+        page = self.client.get("/setup?open=10").text
+        self.assertIn("data-enter-inert", box["inputs"][0])
+        self.assertEqual(box["inputs"][0]["aria-describedby"], "setup-share-progress-help")
+        self.assertIn('<p class="muted choice-help" id="setup-share-progress-help">%s</p>' % progress_share.HELP,
+                      self.start_step(page))
+        self.assertIn("/static/settings.js", page)
+        script = self.client.get("/static/settings.js").text
+        self.assertIn('event.target.matches("input[type=checkbox][data-enter-inert]")) event.preventDefault()', script)
+        self.assertIn("<noscript><button", self.start_step(page).split('action="/setup/progress"')[1].split("</form>")[0])
+        self.assertEqual((box["hx-post"], box["hx-trigger"]), ("/setup/progress", "change"))
+        self.assertEqual(by_action["/setup/start"]["inputs"], [])     # Start carries no field of its own
+        self.assertEqual(by_action["/setup/start"]["buttons"][0]["type"], "submit")
+
+    def test_start_step_share_progress_box_shows_a_saved_choice_and_saves_on_change(self):
+        import progress_share
+        self.unlock_start_step()
+        progress_share.set_enabled(False, self.home)
+        self.assertIn('id="setup-share-progress">', self.start_step(self.client.get("/setup?open=10").text))
+        response = self.client.post("/setup/progress", data={"share_progress": "on"}, headers=HTMX)
+        self.assertIn('id="setup-share-progress" checked', self.start_step(response.text))
+        self.assertTrue(progress_share.enabled(self.home))
+        self.client.post("/setup/progress", data={}, headers=HTMX)
+        self.assertFalse(progress_share.enabled(self.home))
+
+    def test_finished_install_without_a_saved_choice_shows_the_box_off_everywhere(self):
+        import progress_share
+        self.unlock_start_step()
+        setup_steps.record(self.home, "start", "done", "Sidedoor is running.")
+        setup_steps.update_state(lambda state: state.update(setup_finished_at="2026-10-21T00:00:00Z"), self.home)
+        self.assertNotIn(progress_share.SETTING, setup_steps.load_state(self.home))
+        self.assertFalse(progress_share.shown(self.home))
+        self.assertIn('id="setup-share-progress">', self.start_step(self.client.get("/setup?open=10").text))
+        self.assertIn('id="s-share-progress">', self.client.get("/settings").text)
+        self.assertEqual(progress_share.heartbeat_fields(self.home), {"milestones_opt_out": True})
+        # Review 2026-11-10 (4): Start pressed again on a finished install writes no choice.
+        with contextlib.ExitStack() as stack:
+            for patch in self.start_patches():
+                stack.enter_context(patch)
+            self.client.post("/setup/start", headers=HTMX)
+        self.assertNotIn(progress_share.SETTING, setup_steps.load_state(self.home))
+        self.assertEqual(progress_share.heartbeat_fields(self.home), {"milestones_opt_out": True})
+
+    def test_setup_file_that_cannot_be_read_shows_the_box_off_and_start_leaves_the_file(self):
+        # Review round 4 (Low): unreadable is not "no choice yet"; the box shows off, nothing is repaired.
+        import progress_share
+        self.unlock_start_step()
+        path = self.home / setup_steps.STATE_FILE
+        path.write_bytes(b"{not json")
+        self.assertFalse(progress_share.shown(self.home))
+        self.assertEqual(progress_share.heartbeat_fields(self.home), {"milestones_opt_out": True})
+        page = self.client.get("/setup?open=10").text   # no steps can be read, so Start waits: no box, never a ticked one
+        self.assertNotIn('id="setup-share-progress" checked', page)
+        self.assertNotIn("checked", self.start_step(page))
+        self.assertIn('id="s-share-progress">', self.client.get("/settings").text)
+        with contextlib.ExitStack() as stack:
+            for patch in self.start_patches():
+                stack.enter_context(patch)
+            self.client.post("/setup/start", headers=HTMX)
+            self.client.post("/setup/progress", data={"share_progress": "on"}, headers=HTMX)
+        self.assertEqual(path.read_bytes(), b"{not json")
+
+    def test_start_saves_the_shown_choice_in_one_write_so_an_untick_in_between_is_kept(self):
+        # Review 2026-11-10 (1): the box's change POST lands between Start's read (no choice yet)
+        # and its write; the save happens inside the state lock, so the untick is what stays.
+        import progress_share
+        self.unlock_start_step()
+        self.assertTrue(setup_steps.progress(self.home)["finished"])   # latched now, so Start's save is the first write
+        real = setup_steps.update_state
+        calls = []
+
+        def untick_first(change, home=None):
+            if not calls:
+                calls.append(change)
+                self.client.post("/setup/progress", data={}, headers=HTMX)   # the untick, with the real writer
+            return real(change, home)
+
+        with contextlib.ExitStack() as stack:
+            for patch in self.start_patches():
+                stack.enter_context(patch)
+            with mock.patch.object(setup_steps, "update_state", side_effect=untick_first):
+                self.client.post("/setup/start", headers=HTMX)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(setup_steps.load_state(self.home)[progress_share.SETTING], False)
+        self.assertIn('id="setup-share-progress">', self.start_step(self.client.get("/setup?open=10").text))
+
+    def test_locked_start_never_saves_the_share_progress_choice(self):
+        self.client.post("/setup/start", data={"share_progress": "on"}, headers=HTMX)
+        self.assertNotIn("share_progress", setup_steps.load_state(self.home))
+
+    def test_locked_start_refuses_the_share_progress_box_too(self):
+        # Review 2026-11-10 (5): POST /setup/progress while Start is locked saves nothing, like Start.
+        response = self.client.post("/setup/progress", data={"share_progress": "on"}, headers=HTMX)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("share_progress", setup_steps.load_state(self.home))
+        response = self.client.post("/setup/progress", data={}, headers=HTMX)
+        self.assertNotIn("share_progress", setup_steps.load_state(self.home))
 
 
 @unittest.skipUnless(DEPENDENCIES, "dashboard packages (fastapi, httpx) are not installed")

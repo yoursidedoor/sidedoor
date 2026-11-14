@@ -298,11 +298,19 @@ class Loop:
     defaults are the wall clock, `spawn`, the database flags and config.json read each tick."""
 
     def __init__(self, root=None, clock=None, spawner=None, is_paused=None, config=None, tick_seconds=TICK_SECONDS,
-                 license_sync=None, license_reason=None, before_start=None, credentials_hold=None):
+                 license_sync=None, license_reason=None, before_start=None, credentials_hold=None,
+                 linkedin_keep=None):
         self.root = paths.data(root)
         # HM3: the dashboard's own data-move check (paths.migrate as the port holder), run before due
         # jobs start, so a conflict settled by hand clears without a restart. None: no check.
         self.before_start = before_start
+        # E18: checks the LinkedIn connection (and sends the browser's session again when needed) once
+        # for each hourly instant, on a Unipile install (`linkedin_connection.keep_soon`). Review B10
+        # (owner): it runs whether or not the round itself starts (a pause, a license pause, a key hold,
+        # a round still running), so a paused user is still told when LinkedIn disconnects. It starts no
+        # job and does no outreach. None: no check.
+        self.linkedin_keep = linkedin_keep
+        self._linkedin_kept = None   # the hourly instant the check last ran for
         # E2.T4 (R3): why the saved keys cannot be read now (`credentials.hold_reason`: the OS store
         # is locked or not answering), asked before a due job starts; a reason starts nothing and
         # spends nothing, and the reason is the Overview line. None: no check here.
@@ -393,6 +401,13 @@ class Loop:
                     self._events["clock:" + name] = ("clock moved back; %s rescheduled from %s" % (
                         name, dt.datetime.fromtimestamp(instants[name], dt.timezone.utc).isoformat(timespec="seconds")),
                         now.timestamp())
+            if (self.linkedin_keep is not None and "run" in instants and instants["run"] != self._linkedin_kept
+                    and config.get("linkedin_provider") == "unipile" and config.get("linkedin_transport") != "local-dev"):
+                self._linkedin_kept = instants["run"]
+                try:
+                    self.linkedin_keep()
+                except Exception:   # never stops a tick; the next hour asks again
+                    pass
             due = [name for name in names if self.last_fired.get(name) is None or instants[name] > self.last_fired[name]]
             result = {"started": [], "skipped_alive": [], "paused": False}
             if not due:
@@ -579,6 +594,23 @@ def stop():
 
 def running():
     return _current is not None and _current.running()
+
+
+def run_now(name):
+    """Start `name` now instead of at the next tick (E16.T2: the user pressed a card and is waiting for
+    the page; a tick is up to TICK_SECONDS away). The same pass a tick makes, made at once: a pause starts
+    nothing, and a child of that job still running keeps running (the round takes the request itself).
+    False when this process has no running scheduler."""
+    if _current is None:
+        return False
+    _current.run_soon(name)
+    if not _current.running():
+        return False
+    try:
+        _current.tick()
+    except Exception:   # the loop's own next tick starts it
+        return False
+    return True
 
 
 def run_soon(name):

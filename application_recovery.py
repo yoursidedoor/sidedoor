@@ -4,6 +4,7 @@ import datetime as dt
 import json
 from pathlib import PurePath, PurePosixPath
 import re
+import subprocess
 
 import applications
 import provider_limits
@@ -36,13 +37,47 @@ RECOVERABLE = {
     # no finding to act on and reconciliation is the only honest next step.
     "SUBMISSION_REPORTED_FAILED",
 }
-# AUTHENTICATION_REQUIRED, CAPTCHA_REQUIRED and MFA_REQUIRED left this set on 2026-10-11 (owner:
-# retried in an hour, abandoned on the third; applications.ACCESS_BLOCK_CODES). Recovery still
-# never takes one of them as the blocker it recovers (`recover`).
+# AUTHENTICATION_REQUIRED, CAPTCHA_REQUIRED and MFA_REQUIRED left this set on 2026-10-11. Since
+# 2026-11-10 (E15.T1) a walled job waits on the user or closes (access_outcomes; `process` starts
+# nothing for a job with an open wait), still on route ORDINARY so the dashboard is unchanged until
+# the Needs you cards (E15.T2). Recovery never takes one of them as the blocker it recovers (`recover`).
+# A failed coordinator call never abandons a job (owner, 2026-11-13, G1 to G3; the 2026-10-13 incident:
+# credits ran out and five jobs were closed). What the failure IS decides (`failure_kind`):
+# - UNREACHABLE (no answer came back): a wait, not counted against the job, its coordinator admissions
+#   or the day's compute, tried again for as long as it lasts with growing gaps: UNREACHABLE_WAIT_MINUTES
+#   by the count of consecutive unreachable results since the job's last other outcome
+#   (`consecutive_unreachable`, from the events), so a job that never gets through costs about one call
+#   a day;
+# - UNREADABLE (an answer came back that cannot be used, or anything this code cannot tell apart from
+#   that): counted. The job waits UNREADABLE_WAIT_MINUTES[n-1] after its nth, and at UNREADABLE_LIMIT
+#   it is parked for the user on NEEDS_YOU_BLOCKER (a user hold: nothing automatic runs, Try again
+#   starts a new scope). 3 sits inside the 5 coordinator admissions a scope has
+#   (application_connection.COORDINATOR_ADMISSION_CAP), so the user is asked before that cap parks the
+#   job, and at most 3 paid calls per scope are spent on answers that cannot be used.
+# Only the AI's own recorded ABANDON decision abandons.
+UNREACHABLE, UNREADABLE = "UNREACHABLE", "UNREADABLE"   # research_recovery's values (set on the error there)
+UNREACHABLE_WAIT_MINUTES = (15, 60, 360, 1440)   # 15 minutes, 1 hour, 6 hours, then once a day
+UNREADABLE_WAIT_MINUTES = (15, 60)
+UNREADABLE_LIMIT = 3
+# Executor codes recorded before failures carried a kind: both meant "the call got no usable answer back".
+UNREACHABLE_CODES = frozenset({"RECOVERY_DECISION_EXECUTOR_FAILED", "RECOVERY_DECISION_EXECUTOR_UNAVAILABLE"})
+NEEDS_YOU_BLOCKER = "APPLICATION_RECOVERY_NEEDS_YOU"
+NEEDS_YOU_EVENT = "APPLICATION_RECOVERY_NEEDS_YOU"
+NEEDS_YOU_WORDS = "This application is stuck. Press Try again."   # owner's pick T14 a, 2026-11-13: a parked job is not closed
+# A job closed by the old rule (two failed calls, whatever they were) made no decision about the job: its
+# closure is relabelled (`relabel_failed_closures`) so its page says what is true and Try again reopens it.
+OLD_FAILED_REASON = "RECOVERY_COORDINATOR_FAILED"
+ABANDONED_BLOCKER = "APPLICATION_RECOVERY_ABANDONED"
+NOT_DECIDED_BLOCKER = "APPLICATION_RECOVERY_NOT_DECIDED"
+NOT_DECIDED_EVENT = "APPLICATION_RECOVERY_CLOSURE_NOT_A_DECISION"
+NOT_DECIDED_WORDS = "This application was closed. Press Try again if you want this job."
+
 USER_HOLDS = {
     "REQUIRED_ELIGIBILITY_ANSWER", "DESIGNATED_RESUME_MISMATCH", "APPLICATION_AUTHORIZATION_REQUIRED",
     # Review mode holds the application for the owner's approval (owner, 2026-10-24).
     "AWAITING_APPLICATION_APPROVAL",
+    # The AI's answers about a problem could not be used UNREADABLE_LIMIT times (owner, 2026-11-13, G2).
+    NEEDS_YOU_BLOCKER,
 }
 # Browser permission handling is deleted (owner, 2026-09-27 item 2 and 2026-09-30): a read the
 # browser platform refused is an ordinary failed read, retried on the ordinary path and bounded
@@ -409,11 +444,97 @@ def scoped(database, key, kind, since):
     return records(database, key, kind, since)
 
 
+def failure_kind(error):
+    """UNREACHABLE or UNREADABLE for a failed coordinator call, by what the error IS: the kind its
+    executor set (`research_recovery`), else its exception type anywhere in its cause chain (a timeout
+    or a dropped connection got no answer). Anything else is UNREADABLE, the bounded class."""
+    seen = 0
+    while error is not None and seen < 8:
+        if getattr(error, "failure_kind", None) in (UNREACHABLE, UNREADABLE):
+            return error.failure_kind
+        if isinstance(error, (TimeoutError, ConnectionError, InterruptedError, subprocess.TimeoutExpired)):
+            return UNREACHABLE
+        error = error.__cause__ or error.__context__
+        seen += 1
+    return UNREADABLE
+
+
+def unreachable_record(item):
+    """True for a recorded coordinator failure in which no answer came back: its recorded kind, or, for
+    a record written before kinds, its executor code or a timeout's exception type (structured values)."""
+    if not isinstance(item, dict):
+        return False
+    if item.get("kind") in (UNREACHABLE, UNREADABLE):
+        return item["kind"] == UNREACHABLE
+    exception = item.get("exception") if isinstance(item.get("exception"), dict) else {}
+    return item.get("reason") in UNREACHABLE_CODES or exception.get("exception_type") == "TimeoutError"
+
+
+def consecutive_unreachable(database, key, since=None):
+    """How many of the job's latest coordinator results in scope were unreachable in a row: counted back
+    from the newest recorded result (a failure or a decision) to the last one of any other kind."""
+    count = 0
+    for event, detail in database.execute(
+            "SELECT event,detail FROM application_events WHERE job_key=? AND id>COALESCE(?,-1) "
+            "AND event IN ('APPLICATION_RECOVERY_DECISION_FAILED','APPLICATION_RECOVERY_DECIDED') ORDER BY id DESC", (key, since)):
+        try:
+            unreachable = event == "APPLICATION_RECOVERY_DECISION_FAILED" and unreachable_record(json.loads(detail))
+        except (TypeError, ValueError):
+            unreachable = False
+        if not unreachable:
+            break
+        count += 1
+    return count
+
+
 def counted_failures(database, key, kind, since):
     """Recorded coordinator failures that count: a usage-limit refusal (its saved executor
-    log shows it) made no decision and is a wait, not a failure."""
+    log shows it) made no decision and is a wait, not a failure, and neither is a call that got no
+    answer back (`unreachable_record`)."""
     return [item for item in scoped(database, key, kind, since)
-            if not provider_limits.decision_limited(item) and item.get("reason") != COORDINATOR_CAP_CODE]
+            if not provider_limits.decision_limited(item) and item.get("reason") != COORDINATOR_CAP_CODE
+            and not unreachable_record(item)]
+
+
+def hold_needs_you(database, job, lifecycle, failures, now):
+    """Park the job for the user after UNREADABLE_LIMIT answers that could not be used: BLOCKED on a
+    user hold with no next attempt. Refused, as `abandon` is, for a final job and for one whose
+    submission may have reached the employer. Nothing is closed and no decision about the job is recorded."""
+    current = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()
+    if not current or current["state"] in applications.FINAL or outstanding(database, current):
+        return False
+    if not applications.hold(database, current, NEEDS_YOU_BLOCKER, NEEDS_YOU_WORDS, now, "BLOCKED", route="OWNER"):
+        return False
+    applications.event(database, job["job_key"], NEEDS_YOU_EVENT, {
+        "blocker": lifecycle["blocker"], "failures": len(failures), "limit": UNREADABLE_LIMIT,
+        "terminal": False, "submission_status": "NOT_SUBMITTED_BY_RECOVERY"}, now)
+    return True
+
+
+def relabel_failed_closures(database, now):
+    """Jobs the old rule closed (ABANDONED, their last APPLICATION_ABANDONED reason
+    RECOVERY_COORDINATOR_FAILED): the stored reason becomes NOT_DECIDED_BLOCKER, so every page says what
+    is true for them and `access_outcomes.try_again` accepts them. Nothing else of the job changes (not
+    its state, its time or its history); a job the AI itself abandoned is never touched. Call inside a
+    transaction. Returns the relabelled job keys."""
+    done = []
+    for row in database.execute("SELECT job_key FROM application_jobs WHERE state='ABANDONED' AND blocker=?",
+                                (ABANDONED_BLOCKER,)).fetchall():
+        last = database.execute("SELECT detail FROM application_events WHERE job_key=? AND event='APPLICATION_ABANDONED' "
+                                "ORDER BY id DESC LIMIT 1", (row[0],)).fetchone()
+        try:
+            reason = json.loads(last[0]).get("reason") if last else None
+        except (TypeError, ValueError, AttributeError):
+            reason = None
+        if reason != OLD_FAILED_REASON:
+            continue
+        changed = database.execute("UPDATE application_jobs SET blocker=? WHERE job_key=? AND state='ABANDONED' AND blocker=?",
+                                   (NOT_DECIDED_BLOCKER, row[0], ABANDONED_BLOCKER))
+        if changed.rowcount == 1:
+            applications.event(database, row[0], NOT_DECIDED_EVENT, {"previous_blocker": ABANDONED_BLOCKER,
+                                                                     "reason": OLD_FAILED_REASON}, now)
+            done.append(row[0])
+    return done
 
 
 def investigate_claims(database, key, started_at, attempt=None):
@@ -885,14 +1006,21 @@ def recover(database, job, adapter, config, blocker, action, now, clock=None, po
                     hold_coordinator_cap(database, job, lifecycle, len(findings) + 1, now)
                 return True
             with database:
+                # A failed call is never a decision about the job (owner, 2026-11-13): it waits, and only
+                # answers that cannot be used are counted, up to the user's card. Nothing here abandons.
+                kind = failure_kind(error)
                 applications.event(database, key, "APPLICATION_RECOVERY_DECISION_FAILED", {
                     "attempt": len(findings) + 1, "reason": failure["code"] or failure["exception_type"], "exception": failure,
+                    "kind": kind, "counts": kind == UNREADABLE,
                     "artifacts": getattr(error, "artifacts", None)}, now)
                 failures = counted_failures(database, key, "APPLICATION_RECOVERY_DECISION_FAILED", since)
-                if len(failures) >= 2:
-                    abandon(database, job, lifecycle, findings, "RECOVERY_COORDINATOR_FAILED", failures, now)
+                if kind == UNREADABLE and len(failures) >= UNREADABLE_LIMIT:
+                    hold_needs_you(database, job, lifecycle, failures, now)
                 else:
-                    next_at = (dt.datetime.fromisoformat(now) + dt.timedelta(minutes=15)).isoformat()
+                    gaps, count = ((UNREACHABLE_WAIT_MINUTES, consecutive_unreachable(database, key, since))
+                                   if kind == UNREACHABLE else (UNREADABLE_WAIT_MINUTES, len(failures)))
+                    minutes = gaps[max(min(count, len(gaps)), 1) - 1]
+                    next_at = (dt.datetime.fromisoformat(now) + dt.timedelta(minutes=minutes)).isoformat()
                     applications.hold(database, job, blocker, "Obtain a valid AI recovery directive; do not select a fallback automatically", now, "BLOCKED", next_at)
             return True
         with database:
@@ -979,11 +1107,11 @@ def recover(database, job, adapter, config, blocker, action, now, clock=None, po
         if not current or current["state"] in applications.FINAL or outstanding(database, current):
             return True
         blocked = result.get("blocked")
+        if isinstance(blocked, dict) and blocked.get("code") in applications.ACCESS_BLOCK_CODES:
+            applications.hold_access_block(database, current, blocked["code"], blocked["next_action"], now, config)
+            return True
         if isinstance(blocked, dict) and user_hold(blocked.get("code")):
             applications.hold(database, current, blocked["code"], blocked["next_action"], now)
-            return True
-        if isinstance(blocked, dict) and blocked.get("code") in applications.ACCESS_BLOCK_CODES:
-            applications.hold_access_block(database, current, blocked["code"], blocked["next_action"], now)
             return True
         # Patch F threads the code the browser actually returned into `result["error"]`.
         # A code that is in RECOVERABLE is actionable, not "no progress": adopt it as the

@@ -477,6 +477,15 @@ def owner_flags(database, since):
         "SELECT task_id,flagged_at,reason FROM reply_owner_flags WHERE flagged_at>=? ORDER BY flagged_at", (since,))]
 
 
+def task_flags(database, task_id):
+    """The notes one reply decision left for the owner, for the send judge: a reply may promise an
+    owner action only when its own decision also left the note to take it (owner, 2026-11-12). Reads only."""
+    if "reply_owner_flags" not in _tables(database):
+        return []
+    return [row[0] for row in database.execute(
+        "SELECT reason FROM reply_owner_flags WHERE task_id=? ORDER BY flagged_at,reason", (task_id,))]
+
+
 def open_flags(database, limit=None, offset=0):
     """Notes not marked done, oldest first, for the Approvals page and Overview's "Needs you", each with
     its rowid (`note_id`, what [Mark done] names). Reads only; a table from before done_at existed

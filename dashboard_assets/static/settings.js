@@ -10,3 +10,11 @@ document.addEventListener("click", function (event) {
   button.setAttribute("aria-pressed", show ? "true" : "false");
   button.setAttribute("aria-label", show ? "Hide key" : "Show key");
 });
+
+// M4 (2026-11-12): Enter on a tick box marked data-enter-inert does nothing (Space toggles it). The box
+// saves on change in a small form of its own, and Enter there sent that form unchanged and reloaded
+// the page. Without JavaScript the form's Save button still sends it.
+document.addEventListener("keydown", function (event) {
+  if (event.key !== "Enter" || !event.target.matches) return;
+  if (event.target.matches("input[type=checkbox][data-enter-inert]")) event.preventDefault();
+});

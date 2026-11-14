@@ -591,7 +591,7 @@ class PolishTest(GatherBase):
                          ("question", "Answer Sidedoor's questions about Acme, asked.",
                           {"label": "Answer on Approvals", "href": "/approvals#questions"}))
         self.assertEqual((answered["calm"], answered["text"]), ("waiting", "Acme, answered: your answers are in."))
-        self.assertIn("Waiting for its next run", answered["todo"])
+        self.assertIn("Waiting for its next round", answered["todo"])
         # Only the unreadable form (a real hold) is red, and only it reaches doctor and Report a problem.
         self.assertEqual([entry["refs"]["job_key"] for entry in view["needs_you"]], ["unreadable"])
         self.assertEqual(self.items(view, "applications"), [])

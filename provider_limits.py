@@ -552,6 +552,35 @@ def antigravity_fix(kind, finished):
     return ANTIGRAVITY_WORDS[kind][1], "Open Settings", "/settings#connection-antigravity"
 
 
+# The text-AI key is refused or cannot be read (owner, 2026-11-13, K1): recorded by `text_model` when a
+# real call is refused with 401 or 403 or the saved key cannot be read, never for an outage (network,
+# timeout, server error). It is not a wait of its own (the job that met it waits as for any call that got
+# no answer); it only tells the user on Overview's health row, until a call works again (a real one, or
+# Settings' Save and test: both end in `text_model._paced`'s success path).
+KEY_PROBLEM_FILE = "openrouter-key-problem.json"
+KEY_REFUSED, KEY_UNREADABLE = "refused", "unreadable"
+KEY_PROBLEM_WORDS = {KEY_REFUSED: "Key not accepted", KEY_UNREADABLE: "Key can't be read"}
+
+
+def key_problem_noted(kind, home=None, now=None):
+    """Record that the text-AI key was refused or could not be read. The kind and the time only. Best effort."""
+    if kind not in KEY_PROBLEM_WORDS:
+        return
+    try:
+        import openai_auth
+        openai_auth._write_private(_home(home) / KEY_PROBLEM_FILE, json.dumps(
+            {"observed_at": (_utc(now) if now else dt.datetime.now(dt.timezone.utc)).isoformat(), "kind": kind}) + "\n")
+    except Exception:
+        pass
+
+
+def key_problem(home=None):
+    """{"kind", "health": Overview > Health's words} while the text-AI key is refused or unreadable, else None."""
+    recorded = _recorded(KEY_PROBLEM_FILE, home)
+    kind = recorded.get("kind") if recorded else None
+    return {"kind": kind, "health": KEY_PROBLEM_WORDS[kind]} if kind in KEY_PROBLEM_WORDS else None
+
+
 def out_of_credit_shown(home=None):
     """True while the OpenRouter out-of-credit banner shows."""
     return _recorded(CREDIT_WAIT_FILE, home) is not None

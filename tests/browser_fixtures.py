@@ -70,9 +70,12 @@ class Client:
         result = self.request("tools/call", {"name": name, "arguments": arguments or {}})
         text = "\n".join(c.get("text", "") for c in result.get("content", []) if isinstance(c, dict))
         error = bool(result.get("isError"))
+        # As Codex records a step: the result holds `content` and `structured_content` only; an answer
+        # that was an error is the step's status "failed" (Codex never writes isError).
         self.trace.append({"type": "item.completed", "item": {
             "id": "item_%d" % self.calls, "type": "mcp_tool_call", "server": "browser", "tool": name,
-            "arguments": arguments or {}, "result": result, "error": None, "status": "failed" if error else "completed"}})
+            "arguments": arguments or {}, "error": None, "status": "failed" if error else "completed",
+            "result": {"content": result.get("content", []), "structured_content": result.get("structuredContent")}}})
         return error, text
 
     def nodes(self):

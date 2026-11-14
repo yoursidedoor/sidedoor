@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidedoor"
-version = "0.4.3"
+version = "1.0.0"
 description = "Referral-first job-search agent for engineers that runs on your machine."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -15,6 +15,9 @@ dependencies = [
     "fastapi==0.158.1",
     "starlette==1.9.0",
     "uvicorn==0.54.0",
+    # The live view (E15.T5): uvicorn serves the dashboard's websocket through it, and live_view.py is a
+    # DevTools client with it. BSD-3-Clause, pure Python with an optional C speedup.
+    "websockets==17.4",
     "jinja2==3.1.6",
     "pydantic==2.14.1",
     "pydantic-core==2.50.1",
@@ -58,6 +61,9 @@ sidedoor = "orchestrator:cli"
 # modules (source checkout, `pip install -e .`, Nuitka) or from <prefix>/share/sidedoor, where
 # [tool.setuptools.data-files] below installs them for a plain `pip install .`.
 py-modules = [
+    "access_cards",
+    "access_outcomes",
+    "access_step",
     "agent_worker",
     "answering_agent",
     "application_browser",
@@ -70,12 +76,14 @@ py-modules = [
     "approvals",
     "approvals_page",
     "ats_browser",
+    "attended_submit",
     "backfill_inactivity_anchors",
     "browser_guard",
     "browser_runtime",
     "champion",
     "champion_composition",
     "champion_reporting",
+    "confirm_read",
     "conversion",
     "cover_letter",
     "credentials",
@@ -83,20 +91,27 @@ py-modules = [
     "daily_schedule",
     "decision_transport",
     "desktop_adapter",
+    "desktop_alerts",
+    "device_unlock",
     "doctor",
     "engagement",
     "engines",
     "external_history",
     "failures_page",
     "followup_execution",
+    "form_check_hold",
     "heyreach_schema",
     "identity_reconciliation",
     "inactivity_closure",
     "industry_discovery",
     "job_description",
     "license_clock",
+    "linkedin_connection",
     "linkedin_contacts",
     "linkedin_port",
+    "linkedin_reader",
+    "linkedin_session",
+    "live_view",
     "log",
     "log_retention",
     "login_item",
@@ -130,6 +145,7 @@ py-modules = [
     "manual_service_headroom",
     "manual_unknown_inspection_recovery",
     "manual_unreadable_form_escalation",
+    "metrics_page",
     "migrate_inactivity_identity",
     "model_calls",
     "networking_page",
@@ -168,10 +184,14 @@ py-modules = [
     "resources",
     "resume_intake",
     "run_locks",
+    "saved_sign_ins",
+    "saved_sign_ins_page",
     "scheduler_control",
     "scheduler_loop",
+    "session_yield",
     "settings_page",
     "setup_steps",
+    "site_sessions",
     "source_records",
     "strategy_execution",
     "support_email",
@@ -181,6 +201,7 @@ py-modules = [
     "unipile_port", "sequence", "pacing",
     "user_profile",
     "update_check",
+    "user_step",
     "version",
     "workflow_tasks",
 ]

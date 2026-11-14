@@ -85,20 +85,14 @@ UPLOAD_GIVE_UP_EVENT = "APPLICATION_UPLOAD_FAILURES_SPENT"
 # The one reopen defect class whose APPLICATION_REOPENED answers earlier upload failures
 # (recorded by the owner's reopen tool under that defect class; owner, 2026-10-02).
 UPLOAD_RESET_REOPEN_CLASS = "EMBEDDED_FRAME_UPLOAD_20261002"
-# Access blocks: three strikes (owner, 2026-10-11: "if an application retries based on captcha
-# or login required x number of times, then we just abandon it? x can be 3."). An inspect,
-# investigate or submit session that stops on one of these is no longer an owner hold: the job
-# is retried ACCESS_BLOCK_RETRY_SECONDS later (still a capability blocker, so no ordinary attempt
-# is spent), and the ACCESS_BLOCK_LIMIT-th such session abandons it. The count is read from the
-# durable sessions themselves (desktop_requests), so it is retroactive, and only sessions created
-# after the job's latest APPLICATION_REOPENED count. Reconcile/verify reads are not counted: their
-# access blocks count toward the 10 reconcile reads (RECONCILE_ACCESS_BLOCKED), unchanged.
+# Access walls (owner, 2026-11-10, E15.T1): an inspect, investigate or submit session that stops on
+# one of these codes puts the job in exactly one of three states: resolved, waiting on the user for
+# 7 days (a Needs you hold, access_outcomes.record), or closed with its reason and a Try again. The
+# hourly retry and the third-strike abandon (owner, 2026-10-11) are gone for these codes. Reconcile
+# and verify reads are unchanged: their access blocks count toward the 10 reconcile reads
+# (RECONCILE_ACCESS_BLOCKED). ACCESS_GIVE_UP_* name the rows the old rule closed; the dashboard still
+# reads them.
 ACCESS_BLOCK_CODES = frozenset({"AUTHENTICATION_REQUIRED", "CAPTCHA_REQUIRED", "MFA_REQUIRED"})
-ACCESS_BLOCK_LIMIT = 3
-# Due at the next hourly applications run: the hold is written when the session ends, often well
-# into the run, so a full hour missed the next run and waited two (review, 2026-10-11). A run
-# selects its jobs once, at its start, so a short delay never retries a job twice in one run.
-ACCESS_BLOCK_RETRY_SECONDS = 25 * 60
 ACCESS_GIVE_UP_CODE = "ACCESS_BLOCKED_3_TIMES"
 ACCESS_GIVE_UP_EVENT = "APPLICATION_ACCESS_BLOCKS_SPENT"
 EARLIEST_START_SEMANTICS = frozenset({"earliest_start_date", "earliest_available_start_date",
@@ -357,6 +351,8 @@ def initialize(database):
         database.commit()
     import decision_transport
     decision_transport.initialize(database)
+    import access_outcomes
+    access_outcomes.initialize(database)
     import external_history
     external_history.initialize(database)
 
@@ -562,7 +558,7 @@ def job_route(code, state, outstanding=False):
     of them build the code at runtime (`gate[1]`, `blocker["code"]`, `str(error)`,
     `decision[1]`), and the same code legitimately routes differently depending on where it was
     set - AUTHENTICATION_REQUIRED is RECONCILE from the reconcile path and ORDINARY from the
-    review path (OWNER before 2026-10-11: access blocks are retried, then abandoned). What disambiguates them is the STATE held alongside the code, which the old
+    review path (OWNER before 2026-10-11; since 2026-11-10 the job waits on the user, access_outcomes). What disambiguates them is the STATE held alongside the code, which the old
     conditions already used without ever saying so. So the route is a function of the pair, and
     this is that function.
 
@@ -604,7 +600,9 @@ def inferred_route(code, state):
 # positive costs a line of text instead of an application.
 
 
-def hold(database, job, code, action, now, state="BLOCKED", next_at=None, route=None):
+def hold(database, job, code, action, now, state="BLOCKED", next_at=None, route=None, notice=None):
+    """`notice`: a suffix for the notice's key (`job:code`), for a hold on the same code that needs its
+    own notice (a site hold, `access_outcomes.wait_on_host`); None keeps the one notice per job and code."""
     previous = database.execute("SELECT state,blocker FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()
     if not previous or previous["state"] in FINAL:
         return False
@@ -618,6 +616,9 @@ def hold(database, job, code, action, now, state="BLOCKED", next_at=None, route=
                                (state, code, action, next_at, now, job["job_key"]))
     if changed.rowcount != 1:
         return False
+    if state in FINAL:
+        import access_outcomes
+        access_outcomes.settle(database, job["job_key"], state, code, now)
     if previous["state"] != state or previous["blocker"] != code:
         # `route` and `previous_route` ride along so a flip between subsystems is in the ledger
         # instead of being reconstructed by hand from four tables, which is what an afternoon
@@ -631,8 +632,8 @@ def hold(database, job, code, action, now, state="BLOCKED", next_at=None, route=
     database.execute("INSERT INTO application_blockers VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_key) DO UPDATE SET code=excluded.code,owner=excluded.owner,required_input=excluded.required_input,attempts=excluded.attempts,next_retry=excluded.next_retry,updated_at=excluded.updated_at",
                      (job["job_key"], code, owner, action, job["attempts"], next_at, now))
     if owner == "user" or state == "EXHAUSTED" or code in UNCERTAIN_SUBMISSION_CODES:
-        notify(database, job["job_key"] + ":" + code,
-               f"Job search: {job['employer']} / {job['requisition']}: {code}. Attempts: {job['attempts']}. Owner: {owner}. Next: {action}. Deadline: {next_at or 'before this application can proceed'}.", now)
+        notify(database, job["job_key"] + ":" + code + (":" + notice if notice else ""),
+               f"Job search: {job['employer']} / {job['requisition']}: {code}. Attempts: {job['attempts']}. Owner: {owner}. Next: {action[:-1] if action.endswith('.') else action}. Deadline: {next_at or 'before this application can proceed'}.", now)
     return True
 
 
@@ -666,7 +667,11 @@ def log_stop(database, key, state, code, next_at):
             # written" would read as work still pending on a closed job.
             last = ("Apply by hand if you want this one." if str(code).split(":", 1)[0] == ANSWERING_GAVE_UP_CODE
                     else applications_page.last_try_reason(applications_page.overview.Reader(database), key))
-            LOG.info("%s: Sidedoor gave up on this application. %s%s", name, words, (" " + last) if last else "")
+            # Closed by the user's own Skip setting (E15.T6): a choice, not a give-up.
+            if str(code).split(":", 1)[0] == "ACCESS_SKIPPED_BY_SETTING":
+                LOG.info("%s: %s%s", name, words, (" " + last) if last else "")   # its words say it was closed, and why
+            else:
+                LOG.info("%s: Sidedoor gave up on this application. %s%s", name, words, (" " + last) if last else "")
         else:
             try:
                 when = dt.datetime.fromisoformat(next_at).astimezone(dt.timezone.utc).strftime(" at %Y-%m-%d %H:%M UTC")
@@ -2587,58 +2592,20 @@ def give_up_on_uploads(database, job, now):
     return True
 
 
-def access_blocks(database, job_key):
-    """Inspect, investigate and never-armed submit sessions of this job that stopped on an access
-    block (ACCESS_BLOCK_CODES), oldest first; only those created after its latest reopen."""
-    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='desktop_requests'").fetchone():
-        return []
-    reopened = database.execute("SELECT at FROM application_events WHERE job_key=? AND event='APPLICATION_REOPENED' "
-                                "ORDER BY id DESC LIMIT 1", (job_key,)).fetchone()
-    blocks = []
-    for request_id, operation, created_at, raw in database.execute(
-            "SELECT request_id,operation,created_at,result FROM desktop_requests WHERE job_key=? "
-            "AND operation IN ('inspect','investigate','submit') AND (operation<>'submit' OR armed_at IS NULL) "
-            "AND result IS NOT NULL ORDER BY rowid", (job_key,)):
-        try:
-            code = stop_code(json.loads(raw))
-            if reopened and dt.datetime.fromisoformat(created_at) <= dt.datetime.fromisoformat(reopened[0]):
-                continue
-        except (TypeError, ValueError):
-            continue
-        if code in ACCESS_BLOCK_CODES:
-            blocks.append({"request_id": request_id, "operation": operation, "created_at": created_at, "code": code})
-    return blocks
+def hold_access_block(database, job, code, action, now, config=None, result=None):
+    """A sign-in, code or human-check wall on the ordinary path (E15.T1): the job waits on the user
+    or, for an account wall under the Skip setting, closes at once; never retried on its own, never
+    abandoned on a count. `action` is the session's own next step; the recorded hold words come from
+    the wait reason. `result` is the session's result: its wall description is kept with the wait
+    (E15.T6). Call inside a transaction."""
+    import access_outcomes
+    # One deadline for one wall (review round 8): a wall result the adapter handed back after its
+    # ordinary reuse window counts its days from when the wall was met, as `unread_wall` does.
+    return access_outcomes.record(database, job, code, now, config=config, result=result,
+                                  since=access_outcomes.reused_wall_since(database, job["job_key"], code, now))
 
 
-def give_up_on_access_blocks(database, job, now):
-    """ABANDONED after ACCESS_BLOCK_LIMIT access blocks; never with an uncertain submission or while
-    the job is in RECONCILE. Call inside a transaction. Returns True when the job was abandoned."""
-    blocks = access_blocks(database, job["job_key"])
-    if len(blocks) < ACCESS_BLOCK_LIMIT or uncertain_submission(database, job["job_key"]):
-        return False
-    current = database.execute("SELECT state FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()
-    if not current or current[0] == "RECONCILE":
-        return False
-    action = ("Abandoned: %d application sessions stopped on a login, verification-code or CAPTCHA wall "
-              "(%s; each before arming, so nothing was submitted); requeue only after access works on this site"
-              % (len(blocks), ", ".join(sorted({block["code"] for block in blocks}))))
-    if not hold(database, job, ACCESS_GIVE_UP_CODE, action, now, "ABANDONED"):
-        return False
-    event(database, job["job_key"], ACCESS_GIVE_UP_EVENT,
-          {"blocks": blocks, "limit": ACCESS_BLOCK_LIMIT, "submission_status": "NOT_SUBMITTED",
-           "reason": "access blocked %d times" % len(blocks), "next_action": action}, now)
-    return True
-
-
-def hold_access_block(database, job, code, action, now):
-    """An access block on the ordinary path: retried in an hour, abandoned on the third.
-    Call inside a transaction."""
-    next_at = (dt.datetime.fromisoformat(now) + dt.timedelta(seconds=ACCESS_BLOCK_RETRY_SECONDS)).isoformat()
-    hold(database, job, code, action, now, "BLOCKED", next_at, route="ORDINARY")
-    give_up_on_access_blocks(database, job, now)
-
-
-def hold_submission_blocker(database, job, result, now):
+def hold_submission_blocker(database, job, result, now, config=None):
     import desktop_adapter
     blocker = result.get("blocked")
     if not isinstance(blocker, dict) or any(not isinstance(blocker.get(key), str) or not blocker[key].strip()
@@ -2657,6 +2624,25 @@ def hold_submission_blocker(database, job, result, now):
         # Conditional questions the guarded session saw appear before arming join the
         # per-requisition question set, so the next derivation asks for their answers.
         record_conditional_questions(database, job, result["observed_questions"], now)
+    if submit and blocker["code"] in ACCESS_BLOCK_CODES:
+        # A sign-in, code or human-check wall met before Submit (E15.T1): the binding above proved
+        # this session never armed, so nothing was sent. The attempt is closed here exactly as
+        # `reconcile` closes a never-armed one (try not spent: a capability blocker), and the job
+        # waits on the user like a read that met the wall, with no reconcile round in between. An
+        # armed session never reaches this branch (PREARM_BLOCKER_BINDING_MISMATCH above).
+        database.execute("UPDATE application_jobs SET attempts=MAX(attempts-1,0) WHERE job_key=?", (job["job_key"],))
+        event(database, job["job_key"], "ATTEMPT_NOT_COUNTED_CAPABILITY_BLOCKED",
+              {"request_id": submit["request_id"], "request_state": "CONSUMED", "code": blocker["code"]}, now)
+        database.execute("UPDATE application_attempts SET state='CONFIRMED_NOT_SUBMITTED',result=? "
+                         "WHERE job_key=? AND state='SUBMITTING' AND attempt_id=?",
+                         (json.dumps({"status": "NOT_SUBMITTED", "basis": "GUARD_NEVER_ARMED",
+                                      "request_id": submit["request_id"], "request_state": "CONSUMED"}),
+                          job["job_key"], submit["attempt_id"]))
+        event(database, job["job_key"], "RECONCILED_GUARD_NEVER_ARMED",
+              {"request_id": submit["request_id"], "request_state": "CONSUMED"}, now)
+        if not give_up_on_uploads(database, job, now):
+            hold_access_block(database, job, blocker["code"], blocker["next_action"], now, config, result)
+        return
     next_at = (dt.datetime.fromisoformat(now) + dt.timedelta(seconds=900)).isoformat()
     hold(database, job, blocker["code"], blocker["next_action"], now, "RECONCILE", next_at)
 
@@ -2743,6 +2729,11 @@ def release_uncreated_submission(database, job, attempt_ids, cause, now, *, free
     return closed
 
 
+def _session_yielded(pending):
+    import application_connection
+    return isinstance(pending, application_connection.SessionYielded)
+
+
 def _never_armed_submission(database, job, now):
     """True when this job's submit request provably never reached the employer.
 
@@ -2787,7 +2778,7 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
             submission_result = json.loads(submit["result"])
             if submission_result.get("prearm_blocked") is True:
                 with database:
-                    hold_submission_blocker(database, job, submission_result, now)
+                    hold_submission_blocker(database, job, submission_result, now, config)
                 return
     if result is None:
         submit = desktop_adapter.submission_request(database, job["job_key"])
@@ -2866,10 +2857,10 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
                 # Upload failures are free one at a time but bounded in total (owner, 2026-10-01).
                 if not reasked and not give_up_on_uploads(database, job, now):
                     if str(blocked.get("code") or "") in ACCESS_BLOCK_CODES:
-                        # A login/2FA/CAPTCHA stop before arming: an hour, then the third abandons
-                        # (owner, 2026-10-11).
+                        # A login/2FA/CAPTCHA stop before arming: the job waits on the user (E15.T1).
                         hold_access_block(database, job, blocked["code"], str(blocked.get("next_action") or "")
-                                          or "Retry the application after the access block", now)
+                                          or "Continue the application after the access wall", now, config,
+                                          json.loads(submit["result"]))
                     else:
                         retry(database, job, policy, now, "RECONCILED_ABSENT")
             return
@@ -2918,6 +2909,10 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
     if clock:
         now = clock()
     with database:
+        # The job has read again: a wait a confirming read left open (its deadline passed with no step
+        # from the user) is over. A blocked read below opens a new one.
+        import confirm_read
+        confirm_read.end(database, job["job_key"], now, confirm_read.READ_AGAIN)
         desktop = desktop_adapter.submission_request(database, job["job_key"])
         attempt_id = None
         if (desktop or result.get("_desktop_request")) and result.get("status") != "SUBMITTED":
@@ -2931,14 +2926,27 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
                 and isinstance(blocker.get("next_action"), str) and blocker["next_action"].strip()
                 and result.get("status") not in {"SUBMITTED", "NOT_SUBMITTED"}
                 and (attempt_id is not None or not desktop and not result.get("_desktop_request"))):
+            # A confirming read that met a sign-in or a human check waits for the user's step
+            # (confirm_read, owner's pick S7 a, 2026-11-13). The job STAYS in RECONCILE on the wall's
+            # code; only when its next read is due changes: the wait's deadline, or the moment the user
+            # finishes the step (`confirm_read.done`). Nothing here starts an application session, and
+            # no wait of `access_outcomes` is written, so nothing can release, retry or close the job.
             # An access-blocked read is an inconclusive read like any other: it counts toward
-            # RECONCILE_MAX_ATTEMPTS on the same backoff (owner, 2026-09-30). It used to return
-            # before the count, so it repeated forever every 15 minutes while the count was 0.
-            updated = database.execute("UPDATE application_jobs SET reconcile_attempts=reconcile_attempts+1 WHERE job_key=? AND state NOT IN ('SUBMITTED','DUPLICATE','INELIGIBLE','EXHAUSTED','ABANDONED')", (job["job_key"],))
+            # RECONCILE_MAX_ATTEMPTS (owner, 2026-09-30; it used to repeat forever while the count was 0).
+            reads = job["reconcile_attempts"] + 1
+            updated = database.execute("UPDATE application_jobs SET reconcile_attempts=? WHERE job_key=? AND state NOT IN ('SUBMITTED','DUPLICATE','INELIGIBLE','EXHAUSTED','ABANDONED')", (reads, job["job_key"]))
             if updated.rowcount != 1:
                 return
-            next_at = reconcile_after_read(job["reconcile_attempts"] + 1, policy, now)
-            hold(database, job, blocker["code"], blocker["next_action"], now, "RECONCILE", next_at)
+            if reads >= RECONCILE_MAX_ATTEMPTS:
+                # The reads are spent: no further wait. Held as before with next_at NULL, so the next
+                # cycle records the spent hold at once (`reconcile_after_read`).
+                confirm_read.end(database, job["job_key"], now, confirm_read.READ_AGAIN)
+                hold(database, job, blocker["code"], blocker["next_action"], now, "RECONCILE", None)
+            else:
+                deadline = confirm_read.record(database, job, blocker["code"], now)
+                hold(database, job, blocker["code"], confirm_read.action(blocker["code"]), now, "RECONCILE", deadline)
+                event(database, job["job_key"], confirm_read.RECORDED_EVENT,
+                      {"wall": blocker["code"], "deadline": deadline}, now)
             event(database, job["job_key"], "RECONCILE_ACCESS_BLOCKED", blocker, now)
             return
         updated = database.execute("UPDATE application_jobs SET state='RECONCILE',reconcile_attempts=reconcile_attempts+1 WHERE job_key=? AND state NOT IN ('SUBMITTED','DUPLICATE','INELIGIBLE','EXHAUSTED','ABANDONED')", (job["job_key"],))
@@ -4234,6 +4242,7 @@ AWAITING_APPLICATION_APPROVAL = "AWAITING_APPLICATION_APPROVAL"
 APPLICATION_APPROVED = "APPLICATION_APPROVED"
 APPLICATION_REJECTED = "APPLICATION_REJECTED_BY_YOU"
 OWNER_APPROVED_SOURCE = "owner-approved-application:"
+FORM_CHECK_ACTION = "The application is ready; the user does the form's human check while Sidedoor submits it"
 APPROVAL_HOLD_ACTION = "Approve or reject this application on Approvals; nothing is submitted until you approve it"
 
 
@@ -4340,6 +4349,32 @@ def approved_application(database, job, questions, answers, review=None, designa
     return approved
 
 
+def _waiting_job_reconciles(database, job):
+    """True for a job with an open wait that must still be reconciled: its submission is uncertain
+    AND `job_route` sends it to RECONCILE (the same inputs `process` gives it below). Any other
+    waiting job, an uncertain one on any other route included, starts nothing."""
+    if not uncertain_submission(database, job["job_key"]):
+        return False
+    outstanding = database.execute("SELECT 1 FROM application_attempts WHERE job_key=? AND state='SUBMITTING' LIMIT 1",
+                                   (job["job_key"],)).fetchone()
+    return job_route(job["blocker"], job["state"], bool(outstanding)) == "RECONCILE"
+
+
+def _waiting_jobs_to_reconcile(database, now, listed):
+    """The jobs the cycle takes up although their wait's deadline is still ahead: an open wait, the
+    job still held on that wait's code and not yet due, and `_waiting_job_reconciles` (uncertain and
+    routed to RECONCILE). `process` gives such a job its reconcile and nothing else. Every other
+    waiting job is selected exactly as before."""
+    import access_outcomes
+    if not access_outcomes.present(database):
+        return []
+    rows = database.execute(
+        f"""SELECT job.* FROM application_jobs AS job WHERE job.state='BLOCKED' AND job.next_at>? AND EXISTS
+            (SELECT 1 FROM {access_outcomes.TABLE} AS wait WHERE wait.job_key=job.job_key AND wait.state=?
+             AND wait.wall=job.blocker) ORDER BY job.updated_at,job.job_key""", (now, access_outcomes.WAITING)).fetchall()
+    return [job for job in rows if job["job_key"] not in listed and _waiting_job_reconciles(database, dict(job))]
+
+
 def process(database, job, adapter, policy, root, now, clock=None, config=None):
     import application_recovery
     config = config or {}
@@ -4347,6 +4382,15 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     if not current or current["state"] in FINAL:
         return
     job = dict(current)
+    import access_outcomes
+    if access_outcomes.open_wait(database, job["job_key"]) and not _waiting_job_reconciles(database, job):
+        # Waiting on the user (E15.T1): no session until `access_outcomes.resume`; past the deadline
+        # the wait closes with "waited 7 days". A waiting job whose submission may have reached the
+        # employer is not left unchecked (owner, 2026-11-13): it goes on to its reconcile below, the
+        # only route it can take from here, exactly as the same job without a wait would.
+        with database:
+            access_outcomes.expire(database, now, only={job["job_key"]})
+        return
     policy = with_current_kept_answers(policy)
     job["candidate_email"] = policy["answers"]["email"]["value"]
     # Same posting, another listing (owner, 2026-09-27). Before a new job's first read, when its
@@ -4390,9 +4434,18 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     with database:
         if give_up_on_uploads(database, job, now):
             return
-        # Likewise a job whose sessions stopped on an access block ACCESS_BLOCK_LIMIT times
-        # (owner, 2026-10-11), counted from the record.
-        if give_up_on_access_blocks(database, job, now):
+        # A wall result that was read too late to be reused still records its wait; no new session.
+        # Never for a job held for the owner (answers, approval): that hold stands.
+        # Both checks ask what the adapter will do with the job's finished read, and the adapter
+        # answers with its live clock, so they take the live time too: `now` is the cycle's start,
+        # minutes old by the time a long cycle reaches this job (review round 7).
+        live = clock() if clock else now
+        if route != "OWNER" and access_outcomes.unread_wall(database, job, live, config):
+            return
+        # No session on a host whose sign-in is already waiting on the user (E15.T1 cost rule):
+        # this job waits on the same wall instead of spending a session. Never a job that is waiting
+        # on the owner (owner, 2026-11-12): that hold, its card and its count stand.
+        if route != "OWNER" and access_outcomes.wait_on_host(database, job, live, config):
             return
     gate = local_gate(database, job, now, policy)
     if gate and gate[0] != "DUPLICATE" and route == "OWNER":
@@ -4471,11 +4524,32 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
                    "expires_at": (dt.datetime.fromisoformat(reused[REUSED_READ_MARKER])
                                   + dt.timedelta(seconds=RECORD_MAX_AGE_SECONDS)).isoformat(),
                    "basis": "COMPLETE_READ_OF_THIS_IDENTITY_WITH_UNCHANGED_INPUTS"}, now)
+    if reused is None:
+        # E16.T2: the user pressed the card of a form check and is waiting for the page. The read this
+        # application was answered and approved from is the one the attended submit goes on: no second read.
+        import attended_submit
+        if job["job_key"] in attended_submit.due(database, clock() if clock else now):
+            reused = attended_submit.ready_read(database, job["job_key"])
+            if reused is not None:
+                with database:
+                    event(database, job["job_key"], "APPLICATION_READ_KEPT_FOR_ATTENDED_SUBMIT",
+                          {"record_observed_at": reused[REUSED_READ_MARKER]}, now)
+    if reused is None:
+        # E16 Y1 c: this job's submit was stopped for an attended submit; it goes on from the read it was
+        # answered from (session_yield.keep_read), never back to the reading phase.
+        import session_yield
+        reused = session_yield.kept_read(database, job["job_key"])
+        if reused is not None:
+            with database:
+                event(database, job["job_key"], "APPLICATION_READ_KEPT_FOR_YIELDED_SUBMIT",
+                      {"record_observed_at": reused[REUSED_READ_MARKER]}, now)
     try:
         review = reused if reused is not None else adapter.call("inspect", {"job": job, "read_only": True})
         if clock:
             now = clock()
     except AdapterPending as pending:
+        if _session_yielded(pending):
+            return   # stopped for an attended submit: the job is exactly as it was, due again as a read
         wait_for_adapter(database, job, pending, now, "WAITING_BROWSER")
         return
     except AdapterUnavailable as error:
@@ -4485,6 +4559,11 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     except Exception as error:
         if clock:
             now = clock()
+        # E16.T3: the first read after the user's step on a human check timed out: one retry in a new
+        # session, with no try spent, no read counted and no recovery opened (the job stays due).
+        with database:
+            if access_outcomes.free_read_after_step(database, job, error, now):
+                return
         with database:
             updated = database.execute("UPDATE application_jobs SET attempts=attempts+1 WHERE job_key=? AND state=? AND attempts=? AND updated_at=?",
                                        (job["job_key"], job["state"], job["attempts"], job["updated_at"]))
@@ -4523,9 +4602,9 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
                   else "The read stopped with " + code + "; act on its saved partial review")
         blocker = dict(stated, code=code, next_action=action)
         if code in ACCESS_BLOCK_CODES:
-            # Not an owner hold any more (owner, 2026-10-11): retried in an hour, the third abandons.
+            # The job waits on the user or closes (E15.T1); no retry on its own.
             with database:
-                hold_access_block(database, job, code, action, now)
+                hold_access_block(database, job, code, action, now, config, review)
             return
         if (not application_recovery.user_hold(blocker["code"])
                 and blocker["code"] != "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED"
@@ -4761,6 +4840,22 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         with database:
             hold_for_approval(database, job, review, questions, answers, resume, designated, policy, now)
         return
+    # E16.T2 (owner, 2026-11-13): the read found a human check on the form itself. Its pass counts only in
+    # the session that presses Submit, so no unattended submit is spent on it: ready to submit (answered,
+    # and approved in Review mode), the job waits on the user here, and its card's button starts the
+    # attended submit (attended_submit.press). With that asked for, the submit goes on below.
+    import access_outcomes
+    import attended_submit
+    on_form = (access_outcomes.form_check(review.get("human_check"))
+               or access_outcomes.form_check(access_outcomes.reported_check(database, job["job_key"], None))
+               # ...or an earlier submit met it (its wait recorded the place): never a second unattended one.
+               or access_outcomes.form_check(access_outcomes.waited_check(database, job["job_key"])))
+    if on_form and job["job_key"] not in attended_submit.due(database, clock() if clock else now):
+        with database:
+            attended_submit.remember_ready(database, job["job_key"], review, now)
+            hold_access_block(database, job, "CAPTCHA_REQUIRED", FORM_CHECK_ACTION, now, config,
+                              {"blocked": {"code": "CAPTCHA_REQUIRED", "human_check": on_form}})
+        return
     if hasattr(adapter, "prepare_submission"):
         try:
             adapter.prepare_submission(job)
@@ -4783,6 +4878,8 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
     event(database, job["job_key"], "HISTORY_ANSWERS_RESUME_CLEARED", {"history_source": history.get("source"), "resume_sha256": designated["sha256"],
           "history_basis": history.get("basis")}, now)
     remember_read(database, job, review, None, now, complete=True)
+    import session_yield
+    session_yield.drop_read(database, job["job_key"])   # a read kept from a stopped submit has served
     answer_sources = {question_field(question): [saved["source"] for saved in scoped_policy["answers"].values()
                                                  if saved.get("source") and saved.get("semantic") == question.get("semantic")
                                                  and saved.get("value") == answers[question_field(question)]]
@@ -4841,7 +4938,7 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
                     retry(database, job, policy, now, SUBMIT_REQUEST_NEVER_CREATED)
                 return
             with database:
-                hold_submission_blocker(database, job, result, clock() if clock else now)
+                hold_submission_blocker(database, job, result, clock() if clock else now, config)
             return
         # A page confirmation captured by the submit session settles the job now; no verify read
         # is spent on it (owner, 2026-10-06).
@@ -4850,6 +4947,28 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         stage = "verify"
         receipt = adapter.call("verify", {"job": job, "result": result, "independent_read_required": True})
     except AdapterPending as pending:
+        if _session_yielded(pending) and stage == "submit":
+            # E16 Y1 c (owner, 2026-11-13: "continue from where it stopped"): the job is put back exactly as
+            # it was the moment before this session, due now, with its try; the attempt is closed as not
+            # submitted (the request never armed: session_yield.hand_back), the handed-back request is
+            # consumed so nothing reconciles it, and the read it was answered from is kept for the next round.
+            import session_yield
+            stopped = clock() if clock else now
+            with database:
+                database.execute("UPDATE application_attempts SET state='CONFIRMED_NOT_SUBMITTED',result=? "
+                                 "WHERE job_key=? AND state='SUBMITTING' AND attempt_id=?",
+                                 (json.dumps({"status": "NOT_SUBMITTED", "basis": session_yield.YIELDED_EVENT}),
+                                  job["job_key"], attempt_id))
+                database.execute("UPDATE application_jobs SET state=?,attempts=?,blocker=?,next_action=?,next_at=NULL,updated_at=? "
+                                 "WHERE job_key=? AND state='SUBMITTING'",
+                                 (job["state"], job["attempts"], job["blocker"], job["next_action"], stopped, job["job_key"]))
+                database.execute("UPDATE desktop_requests SET state='CONSUMED' WHERE request_id=? AND state='EXPIRED' "
+                                 "AND armed_at IS NULL", (pending.request_id,))
+                session_yield.keep_read(database, job["job_key"], review, stopped)
+                event(database, job["job_key"], session_yield.RESTORED_EVENT,
+                      {"attempt_id": attempt_id, "request_id": pending.request_id, "state": job["state"],
+                       "attempts": job["attempts"]}, stopped)
+            return
         if submit_request_never_created(database, adapter, job["job_key"], attempt_id):
             # Refused before its request row existed (no browser time left, a provider wait): a
             # compute wait, never a try (owner, 2026-09-28), and nothing to reconcile.
@@ -4954,9 +5073,23 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
     # one queued before this check existed or parked on a hold the loop below skips.
     with database:
         close_research_ineligible(database, now, only)
+    # A wait on the user past its 7 days closes with that reason (E15.T1).
+    import access_outcomes
+    with database:
+        access_outcomes.expire(database, now, only)
+        if only is None:
+            # The history behind the Metrics page is kept for 24 months (owner, 2026-11-13): finished rows
+            # older than that, which nothing can need again, go here, on the ordinary round.
+            from zoneinfo import ZoneInfo
+            access_outcomes.trim_history(database, now, ZoneInfo(config.get("timezone") or "America/Los_Angeles"))
     # Jobs waiting on a submission the submit page already confirmed are settled first, with no
     # browser read (owner, 2026-10-06).
     settle_page_confirmations(database, now, root, only)
+    # Jobs the old rule closed after two failed AI calls say what is true and can be tried again (owner,
+    # 2026-11-13, G4): their stored reason is relabelled once, nothing else of them changes.
+    import application_recovery
+    with database:
+        application_recovery.relabel_failed_closures(database, now)
     local_day = workflow_tasks.budget_day(now, config.get("timezone", "America/Los_Angeles"))
     try:
         budget_room = config.get("daily_compute_seconds", 10800) - workflow_tasks.compute_used(database, local_day)
@@ -4971,14 +5104,27 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
     # immediately - it simply no longer carries this blocker once resumed.
     rows = list(database.execute("""SELECT * FROM application_jobs WHERE state NOT IN ('SUBMITTED','DUPLICATE','INELIGIBLE','EXHAUSTED','ABANDONED')
         AND blocker IS NOT 'APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED' AND blocker IS NOT 'AWAITING_APPLICATION_APPROVAL'
+        AND blocker IS NOT 'APPLICATION_RECOVERY_NEEDS_YOU'
         AND (next_at IS NULL OR next_at<=? OR blocker='APPLICATION_BROWSER_SHARED_BUDGET_EXHAUSTED'
              OR blocker='APPLICATION_HISTORY_UNKNOWN' OR blocker='PRIOR_APPLICATION_WITHIN_90_DAYS')
         ORDER BY updated_at,job_key""", (now,)))
+    # A waiting job whose submission is uncertain is reconciled on this round, not when its wait's
+    # deadline (its next_at) passes (owner, 2026-11-13). Only while it still sits on the wait's own
+    # hold: its first reconcile moves it to RECONCILE, and reconcile's own pacing takes over.
+    unchecked = _waiting_jobs_to_reconcile(database, now, {job["job_key"] for job in rows})
+    rows = unchecked + rows
+    unchecked = {job["job_key"] for job in unchecked}
     if only is not None:
         rows = [job for job in rows if job["job_key"] in only]
+    # E16.T2: a job whose attended submit the user asked for from its card goes first: the user is waiting.
+    import attended_submit
+    asked = set(attended_submit.due(database, clock() if clock else now))
+    if asked:
+        rows = [job for job in rows if job["job_key"] in asked] + [job for job in rows if job["job_key"] not in asked]
     ready = []
     for job in rows:
-        if job["next_at"] and job["next_at"] > now and job["blocker"] != "PRIOR_APPLICATION_WITHIN_90_DAYS":
+        if (job["next_at"] and job["next_at"] > now and job["blocker"] != "PRIOR_APPLICATION_WITHIN_90_DAYS"
+                and job["job_key"] not in unchecked):
             import workflow_tasks
             available = getattr(workflow_tasks, "application_recovery_available", None)
             # A job waiting on the shared budget comes back as soon as today's budget has room
@@ -4991,6 +5137,11 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
             break
     stopped = None
     listed = {job["job_key"] for job in ready}
+    # The attended requests among `ready` from the start, and those taken during the round: each once.
+    attended_taken = {item for item in attended_submit.due_requests(database, clock() if clock else now) if item[0] in listed}
+    import session_yield
+    with database:
+        session_yield.round_started(database, only, now)   # what a pressed card may stop a session for (`round_takes`)
     for job in ready:   # `ready` grows below: an application approved during this run joins it
         if should_stop is not None and should_stop():
             stopped = "YIELDED_TO_DAILY_RESEARCH"
@@ -5040,6 +5191,34 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
             if approved["job_key"] not in listed and (only is None or approved["job_key"] in only):
                 listed.add(approved["job_key"])
                 ready.append(approved)
+        # E16.T2 (Y5): an attended submit asked for while this run is going is taken next, after the job in
+        # hand; nothing running is interrupted.
+        # Each REQUEST is taken once in a round, with a fresh row, also for a job this round already handled
+        # (the ordinary case: its card came from this very round; review, 2026-11-13).
+        position = next((index for index, item in enumerate(ready) if item is job), len(ready) - 1) + 1
+        attended_next = False
+        for key, requested in attended_submit.due_requests(database, clock() if clock else now):
+            if (key, requested) not in attended_taken and (only is None or key in only):
+                asked_job = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (key,)).fetchone()
+                if asked_job is not None and asked_job["state"] not in FINAL:
+                    attended_taken.add((key, requested))
+                    listed.add(key)
+                    ready.insert(position, asked_job)
+                    position += 1
+                    attended_next = True
+        # E16 Y1 c (owner: "the other job continues"): a job whose session was stopped for that attended submit
+        # runs again in this round, right after it, from where it stopped; once per stop, so nothing loops (a
+        # stop needs a press). A round that ends first (research's turn, a pause) leaves it due at the next start.
+        import session_yield
+        for key in session_yield.take_stopped():
+            # ...and only behind an attended job put in just now: otherwise it is left for the next start.
+            if attended_next and (only is None or key in only):
+                stopped_job = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (key,)).fetchone()
+                if stopped_job is not None and stopped_job["state"] not in FINAL:
+                    ready.insert(position, stopped_job)
+                    position += 1
+    with database:
+        session_yield.round_ended(database)
     result = report(database, now)
     if stopped:
         result["stopped"] = stopped

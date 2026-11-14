@@ -153,7 +153,8 @@
   {% endif %}
 
 {% elif x.name == "mode" %}
-  <h2>Mode</h2>
+  <h2>Applying</h2>
+  <h3>Mode</h3>
   <form class="mode" method="post" action="/settings/mode" hx-post="/settings/mode" hx-trigger="change" hx-target="#mode" hx-swap="outerHTML">
     <label class="choice"><input type="radio" name="mode" value="automatic"{% if x.state.mode != "review" %} checked{% endif %}>
       <span><strong>Automatic.</strong> Sidedoor sends LinkedIn invitations, messages, follow-ups and replies, and submits job applications, on its own, within its safety rules. Messages are shown on Networking &amp; Referrals, applications on Applications.</span></label>
@@ -181,6 +182,20 @@
   </div>
   {% endif %}
   <p class="muted">{{ x.not_recalled }}</p>
+  <h3 id="account-setting">{{ x.account.title }}</h3>
+  <form class="mode" method="post" action="/settings/account" hx-post="/settings/account" hx-trigger="change" hx-target="#mode" hx-swap="outerHTML">
+    {% for value, label in x.account.options %}
+    <label class="choice"><input type="radio" name="account" value="{{ value }}"{% if x.account.chosen == value %} checked{% endif %}>
+      <span><strong>{{ label }}</strong></span></label>
+    {% endfor %}
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
+  {% if x.account.note %}<p class="muted" id="account-note">{{ x.account.note }}</p>{% endif %}
+  <p><a href="/settings/saved-sign-ins">Saved sign-ins</a></p>
+  {% if x.account.unreadable %}<p class="note note-warning" role="status">{{ x.account.unreadable }}</p>
+  {% elif not x.account.chosen %}<p class="muted" id="account-not-chosen">{{ x.account.not_chosen }}</p>{% endif %}
+  {% if x.account_error %}<p class="field-error" role="alert">{{ x.account_error }}</p>{% endif %}
+  {% if x.saved_account %}<p class="note note-success" role="status">Saved: {{ x.account.labels[x.account.chosen] }}.{% if x.account_closed %} {{ x.account_closed }}{% endif %}</p>{% endif %}
 
 {% elif x.name == "connections" %}
   <h2>Connections</h2>
@@ -261,7 +276,8 @@
   <p class="muted">{{ x.no_portal }} {{ x.support }}.</p>
   {% endif %}
   <form method="post" action="/settings/progress" hx-post="/settings/progress" hx-trigger="change" hx-target="#license" hx-swap="outerHTML">
-    <label class="choice"><input type="checkbox" name="enabled" id="s-share-progress"{% if x.share_progress %} checked{% endif %}> <span>{{ x.share_progress_label }}</span></label>
+    <label class="choice"><input type="checkbox" name="enabled" aria-describedby="s-share-progress-help" data-enter-inert id="s-share-progress"{% if x.share_progress %} checked{% endif %}> <span>{{ x.share_progress_label }}</span></label>
+    <p class="muted choice-help" id="s-share-progress-help">{{ x.share_progress_help }}</p>
     <noscript><button class="button" type="submit">Save</button></noscript>
   </form>
 
@@ -281,5 +297,10 @@
   </form>
   {% endif %}
   {% endif %}
+  <h3>Notifications</h3>
+  <form method="post" action="/settings/notifications" hx-post="/settings/notifications" hx-trigger="change" hx-target="#login" hx-swap="outerHTML">
+    <label class="choice"><input type="checkbox" name="enabled" id="s-desktop-alerts"{% if x.desktop_alerts %} checked{% endif %}> <span>{{ x.desktop_alerts_label }}</span></label>
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
 {% endif %}
 </section>

@@ -381,6 +381,9 @@ def submitted_today(reader, start, end):
     return len(applications_page.submitted_today_keys(reader, start, end)[0])
 
 
+PARKED_CODE = "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED"   # application_recovery.CLAIMS_EXHAUSTED_BLOCKER
+
+
 def _blocked(reader):
     """(owner holds, automatic waits): BLOCKED jobs by `applications.job_route`, as job keys.
 
@@ -398,7 +401,9 @@ def _blocked(reader):
         if code == jobs.APPLICATION_APPROVED:
             continue   # approved on Approvals and due: neither a hold nor a retry wait (owner, 2026-10-24)
         spent = code == "SUBMISSION_OUTCOME_UNKNOWN" and (reads or 0) >= jobs.RECONCILE_MAX_ATTEMPTS
-        (owner if spent or jobs.job_route(code, "BLOCKED") == "OWNER" else waiting).append(key)
+        # A job parked because its reads of the posting are spent is never retried on its own (the cycle
+        # skips it; only a reopen releases it): it needs the user, never "Waiting to retry" (owner, 2026-11-14).
+        (owner if spent or code == PARKED_CODE or jobs.job_route(code, "BLOCKED") == "OWNER" else waiting).append(key)
     return owner, waiting
 
 
@@ -411,7 +416,26 @@ def retrying_keys(reader, now):
     import applications_page
     reading = applications_page.reading_keys(reader, now)
     later = [key for (key,) in reader.rows("SELECT job_key FROM application_jobs WHERE state='RETRY_WAIT'", (), "application_jobs")]
-    return [key for key in later + _blocked(reader)[1] if key not in reading]
+    # A job waiting on the user behind a sign-in or a human check is never retried on its own (E15.T2).
+    waiting = set(waiting_keys(reader))
+    return [key for key in later + _blocked(reader)[1] if key not in reading and key not in waiting]
+
+
+def waiting_keys(reader):
+    """THE "waiting on a sign-in or a human check" rule (E15.T2), the one test behind Overview's and
+    Approvals' cards, the Needs you count `sign_ins` and Applications' words: a job with an open wait
+    (`access_outcomes`, table application_access_waits) that is still held on that wait's own code.
+    Each job once, the oldest wait first; a job held behind a site's sign-in is one of them. A job
+    that is also an owner hold (`_blocked`) is left to that count, so nothing is counted twice."""
+    owner = set(_blocked(reader)[0])
+    rows = reader.rows("SELECT wait.job_key FROM application_access_waits AS wait JOIN application_jobs AS job "
+                       "ON job.job_key=wait.job_key WHERE wait.state='WAITING' AND job.state='BLOCKED' "
+                       # A job only waiting behind another job's profile step or questions on its site needs
+                       # nothing from the user: never a card, never counted (owner, 2026-11-14).
+                       "AND wait.reason<>'PROFILE_PENDING' "
+                       "AND job.blocker=wait.wall GROUP BY wait.job_key ORDER BY MIN(wait.id)", (),
+                       "application_access_waits", "application_jobs")
+    return [row[0] for row in rows if row[0] not in owner]
 
 
 def right_now(reader, now):
@@ -466,17 +490,42 @@ def blocked_on_owner_keys(reader, now):
     return [key for key in owner if blocked_on_owner(True, key in asked, blockers.get(key))]
 
 
+# The rows of the one "Needs you" card, in the order shown: (key in `needs_you`, words for one, words for
+# several, the page that handles it, the button's label). Overview's card and the desktop notification
+# (E15.T3, desktop_alerts) both read this, so a new kind of thing waiting is one row here plus its count
+# in `needs_you` (the sign-in and human-check cards of E15.T2 and E16 go here).
+NEEDS_ROWS = (("questions", "question to answer", "questions to answer", "/approvals#questions", "Answer"),
+              ("messages", "message to approve", "messages to approve", "/approvals#messages", "Review"),
+              ("applications_held", "application to approve", "applications to approve", "/approvals#applications", "Review"),
+              ("couldnt_send", "message not sent yet", "messages not sent yet", "/approvals#refused", "Review"),
+              ("notes", "note for you", "notes for you", "/approvals#notes", "Read"),
+              ("applications", "application blocked on you", "applications blocked on you",
+               "/applications?show=needs_you", "Open"),
+              # E15.T2: the applications waiting on a sign-in or a human check (`sign_ins`, each job once),
+              # shown as cards on Approvals under "Sign-ins and human checks".
+              # Counted as the cards shown (C7): jobs waiting on one site's sign-in are one.
+              # A full sentence, so it ends with its full stop (the row and the notification both say it).
+              ("sign_ins", "sign-in or human check to do",
+               "sign-ins or human checks to do", "/approvals#sign-ins", "Open"))
+
+
 def needs_you(reader, now):
     """The one "Needs you" card (owner, 2026-10-24): questions to answer, messages waiting for approval
     (`approvals.waiting_count`) and the reply AI's notes not marked done (`reply_tools.open_flags`),
     each the total of its section of Approvals (E6.T4), the applications Review holds for approval
     (`held_application_keys`, Approvals' "Applications waiting"), and the applications blocked on the owner
     (`blocked_on_owner_keys`), the total of Applications' "Blocked, needs you" filter
-    (`applications_page.counts`). A held job with a question on Approvals counts only as a question."""
+    (`applications_page.counts`). A held job with a question on Approvals counts only as a question.
+    `sign_ins` (E15.T2) is the cards shown for the jobs waiting on a sign-in or a human check
+    (`access_cards.card_count`: jobs waiting on one site's sign-in are one card, C7), so the number is
+    what the user sees; never also under `applications`. The desktop alert and tray count (E15.T3)
+    read this key. Applications' "Blocked, needs you" filter counts jobs (`needs_you_keys`)."""
     import approvals
     import reply_tools
+    import access_cards
     present = reader.database is not None
     return {"questions": len(_pending_questions(reader, now)), "applications": len(blocked_on_owner_keys(reader, now)),
+            "sign_ins": access_cards.card_count(reader),
             "applications_held": len(held_application_keys(reader)),
             "messages": approvals.waiting_count(reader.database) if present else 0,
             "couldnt_send": approvals.refused_count(reader.database) if present else 0,
@@ -662,15 +711,17 @@ SETTINGS_LICENSE = "/settings#license"
 NOT_CHECKED = "Not checked yet"
 
 
-def _item(name, tone, text, at=None, fix=None, checked=None, timed=True, banner=False):
+def _item(name, tone, text, at=None, fix=None, checked=None, timed=True, banner=False, state=None):
     """One health line. tone: success (green), warning (amber), error (red). `at` is the last time
     the check was good; `checked` the time of a stored check that was not good (Setup keeps only
     each check's latest result, so an earlier good time is not on record); `fix` is
     {"label", "href"} or {"label", "post"} (a form button). A line whose text already says it was
     never checked carries no time line. `banner`: a banner (dashboard.layout) or the "not running"
-    card already says this at the top of the page, so `alerts` leaves it out."""
+    card already says this at the top of the page, so `alerts` leaves it out. `state`: which of the
+    item's conditions this is, from its producer (the license state, the LinkedIn status, the wait's
+    kind...), never shown: the desktop notification tells one condition from another by it (E15.T3 U4)."""
     return {"name": name, "tone": tone, "text": text, "at": at, "fix": fix, "checked": None if at else checked,
-            "timed": timed and text != NOT_CHECKED, "banner": banner}
+            "timed": timed and text != NOT_CHECKED, "banner": banner, "state": state}
 
 
 def alerts(items):
@@ -752,19 +803,31 @@ def scheduler_item(scheduler, cycle, pause, fmt):
     elif flags.get("user_paused_at"):
         item = _item("Scheduler", "warning", "Paused by you since %s. " % fmt(_utc(flags["user_paused_at"])) + last, at,
                      {"label": "Resume", "post": "/resume"}, timed=bool(at))
+        item["user_paused_at"] = flags["user_paused_at"]   # the user's own doing (E15.T3: notified only after a week)
     else:
         tone = "warning" if notes else "success"
         item = _item("Scheduler", tone, "Running. " + last, at, {"label": "Pause", "post": "/pause"}, timed=bool(at))
     item["notes"] = notes
+    # Which condition this is (E15.T3 U4): the loop's state and flags, and whether a job stopped.
+    item["state"] = "|".join(
+        ["stopped" if not scheduler.get("running") else "license" if flags.get("license_paused_at") else
+         "user" if flags.get("user_paused_at") else "running"]
+        + (["schedule"] if scheduler.get("last_error") else [])
+        + (["job"] if scheduler.get("job_failures") else [])   # which jobs is left out: one flapping job is one condition (K1)
+        + (["data"] if scheduler.get("data_hold") else []) + (["flags"] if pause == UNAVAILABLE else []))
     return item
 
 
-def browser_unavailable():
+def browser_unavailable(live=True):
     """Why Sidedoor's browser cannot start now ("RUNTIME_MISSING", "PROFILE_IN_USE"), "SESSION_BUSY" when a
     Sidedoor session owns the Chrome on the profile (FG1 problem 2: never "close the window" then), or
     None (browser_runtime.display_state). Never raises."""
     try:
         import browser_runtime
+        if not live:
+            # Files only: the bundled parts are there or not. No process is looked at or closed and the
+            # browser lock is never taken or cleared, so a held profile is not seen by this read.
+            return "RUNTIME_MISSING" if browser_runtime.missing(None) else None
         return browser_runtime.display_state(None)
     except Exception:
         return None
@@ -789,7 +852,30 @@ def browser_window_words():
     return browser_runtime.window_words(config if isinstance(config, dict) else None)
 
 
-def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
+def linkedin_item(linkedin):
+    """Overview's LinkedIn line for the saved LinkedIn step."""
+    status, offer = linkedin.get("status"), linkedin.get("offer")
+    if status == "done":
+        return _item("LinkedIn", "success", "Connected", _good_at(linkedin))
+    if status == "checking":
+        return _item("LinkedIn", "warning", "Waiting for LinkedIn", fix={"label": "Check LinkedIn", "href": SETTINGS_CONNECTIONS},
+                     state="checking")
+    if status is None:
+        return _item("LinkedIn", "warning", NOT_CHECKED, fix={"label": "Check LinkedIn", "href": SETTINGS_CONNECTIONS},
+                     state="not_checked")
+    # E18: one sign-in, in Sidedoor's browser; Settings shows its two buttons for each of these.
+    # Round 6 (3): "sent" is the step whose sentence says "Click Check again": the button names that action.
+    label = ("Check again" if offer == "sent" else
+             "Sign in to LinkedIn" if offer in ("connect", "reconnect", "signin") else "Check LinkedIn")
+    import linkedin_connection
+    return _item("LinkedIn", "error", linkedin_connection.shown(linkedin.get("message")) or "Needs you",
+                 fix={"label": label, "href": SETTINGS_CONNECTIONS}, checked=_utc(linkedin.get("at")),
+                 state="%s:%s" % (status, offer or ""))
+
+
+def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None, live=True):
+    """`live` False (the desktop notification's check, E15.T3 U2): the browser line comes from files
+    only (`browser_unavailable`); Overview itself always passes True."""
     state = progress["state"]
     steps = state["steps"]
     items = []
@@ -803,24 +889,15 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
         fix = {"label": action["label"], "post": action["post"]} if action.get("post") else \
             {"label": action["label"], "href": action["href"]}
     if license["state"] == "no_license":
-        items.append(_item("License", "warning", "No license yet", fix={"label": "Enter license key", "href": SETTINGS_LICENSE}))
+        items.append(_item("License", "warning", "No license yet", fix={"label": "Enter license key", "href": SETTINGS_LICENSE},
+                           state="no_license"))
     else:
         tone = license["tone"] if license["tone"] in ("error", "warning") else "success"
         items.append(_item("License", "warning" if license["state"] == "checking" else tone,
-                           license["text"], checked, fix, banner=license_clock.banner(license) is not None))
+                           license["text"], checked, fix, banner=license_clock.banner(license) is not None,
+                           state="%s:%s" % (license["state"], license.get("problem") or "")))
 
-    linkedin = steps.get("linkedin", {})
-    status, offer = linkedin.get("status"), linkedin.get("offer")
-    if status == "done":
-        items.append(_item("LinkedIn", "success", "Connected", _good_at(linkedin)))
-    elif status == "checking":
-        items.append(_item("LinkedIn", "warning", "Waiting for LinkedIn", fix={"label": "Check LinkedIn", "href": SETTINGS_CONNECTIONS}))
-    elif status is None:
-        items.append(_item("LinkedIn", "warning", NOT_CHECKED, fix={"label": "Check LinkedIn", "href": SETTINGS_CONNECTIONS}))
-    else:
-        label = {"connect": "Connect LinkedIn", "reconnect": "Reconnect LinkedIn"}.get(offer, "Check LinkedIn")
-        items.append(_item("LinkedIn", "error", linkedin.get("message") or "Needs you",
-                           fix={"label": label, "href": SETTINGS_CONNECTIONS}, checked=_utc(linkedin.get("at"))))
+    items.append(linkedin_item(steps.get("linkedin", {})))
 
     import provider_limits  # the waits the banners show, read through the same function (never disagree)
     waits = provider_limits.waits(home, now, finished=bool(progress.get("finished")))
@@ -833,12 +910,19 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     openrouter = steps.get("openrouter", {})
     if waits["out_of_credit"]:  # the same fix as the "out of credits" banner
         items.append(_item("OpenRouter", "error", waits["out_of_credit"]["health"], fix=wait_fix(waits["out_of_credit"]),
-                           timed=False, banner=True))
+                           timed=False, banner=True, state="out_of_credit"))
+    elif provider_limits.key_problem(home):
+        # K1 (owner, 2026-11-13): a real call was refused for the key, or the saved key cannot be read. The
+        # same button as an untested key; it goes when a call works again or Settings' Save and test passes.
+        problem = provider_limits.key_problem(home)
+        items.append(_item("OpenRouter", "error", problem["health"], fix={"label": "Replace key", "href": SETTINGS_CONNECTIONS},
+                           timed=False, state="key_%s" % problem["kind"]))
     elif openrouter.get("status") == "done":
         items.append(_item("OpenRouter", "success", "Key works", _good_at(openrouter)))
     else:
         items.append(_item("OpenRouter", "error", openrouter.get("message") or NOT_CHECKED,
-                           fix={"label": "Replace key", "href": SETTINGS_CONNECTIONS}, checked=_utc(openrouter.get("at"))))
+                           fix={"label": "Replace key", "href": SETTINGS_CONNECTIONS}, checked=_utc(openrouter.get("at")),
+                           state=str(openrouter.get("status") or "not_checked")))
 
     # U1 3g G1: the row names the chosen engine and shows its own status (waits already filtered, G2).
     engine = setup_steps.chosen_engine(state)
@@ -846,16 +930,16 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
     record = steps.get(engine if engine in ("claude", "antigravity") else "codex", {})
     if waits.get("claude"):  # the same fix as the Claude banner
         items.append(_item(label, "error", waits["claude"]["health"], fix=wait_fix(waits["claude"]),
-                           timed=False, banner=True))
+                           timed=False, banner=True, state="claude:%s" % waits["claude"].get("kind")))
     elif waits.get("antigravity"):  # U1 4: the same fix as the Antigravity banner
         items.append(_item(label, "error", waits["antigravity"]["health"], fix=wait_fix(waits["antigravity"]),
-                           timed=False, banner=True))
+                           timed=False, banner=True, state="antigravity:%s" % waits["antigravity"].get("kind")))
     elif waits["codex_missing"]:  # the same fix as the "can't find Codex" banner
         items.append(_item(label, "error", waits["codex_missing"]["health"], fix=wait_fix(waits["codex_missing"]),
-                           timed=False, banner=True))
+                           timed=False, banner=True, state="codex_missing"))
     elif progress["done"][6] and waits["usage_limit"]:  # the same link as the ChatGPT usage banner
         items.append(_item(label, "warning", waits["usage_limit"]["health"], fix=wait_fix(waits["usage_limit"]),
-                           timed=False, banner=True))
+                           timed=False, banner=True, state="usage_limit"))
     elif progress["done"][6]:
         good = ("Signed in with ChatGPT" if engine == "codex" else
                 "Signed in with your Google account" if engine == "antigravity" else
@@ -865,31 +949,35 @@ def health(home, progress, scheduler, cycle, pause=None, fmt=None, now=None):
         failed = record.get("message") if record.get("status") == "failed" else None
         items.append(_item(label, "error", failed or "%s stopped working" % label,
                            fix={"label": "Fix", "href": SETTINGS_CONNECTIONS}, checked=_utc(record.get("at")),
-                           banner=bool(progress.get("finished"))))   # dashboard.layout's "<engine> stopped working."
+                           banner=bool(progress.get("finished")),    # dashboard.layout's "<engine> stopped working."
+                           state="stopped:%s" % (record.get("status") or "")))
 
     email = steps.get("email", {})
-    browser = browser_unavailable() if setup_steps.chrome_path() else None
+    browser = browser_unavailable(live) if setup_steps.chrome_path() else None
     if not setup_steps.chrome_path():  # the same fix as the "Google Chrome stopped working." banner
         items.append(_item("Browser profile", "error", "Google Chrome stopped working", fix={"label": "Fix", "href": SETTINGS_CONNECTIONS},
-                           banner=bool(progress.get("finished"))))   # dashboard.layout's "Google Chrome stopped working."
+                           banner=bool(progress.get("finished")),    # dashboard.layout's "Google Chrome stopped working."
+                           state="chrome_missing"))
     elif browser == "RUNTIME_MISSING":   # E7.T1: the bundled Node / @playwright/mcp is gone
         import browser_runtime
         items.append(_item("Browser profile", "error", browser_runtime.UNAVAILABLE_WORDS["RUNTIME_MISSING"] + " "
-                           + browser_runtime.UNAVAILABLE_TODO["RUNTIME_MISSING"]))
+                           + browser_runtime.UNAVAILABLE_TODO["RUNTIME_MISSING"], state="RUNTIME_MISSING"))
     elif browser == "PROFILE_IN_USE":    # a Chrome window holds Sidedoor's profile and no session owns it
         import browser_runtime
         items.append(_item("Browser profile", "warning", browser_runtime.UNAVAILABLE_WORDS["PROFILE_IN_USE"] + " "
                            + browser_runtime.UNAVAILABLE_TODO["PROFILE_IN_USE"],
-                           fix={"label": "Open Settings", "href": SETTINGS_CONNECTIONS}))
+                           fix={"label": "Open Settings", "href": SETTINGS_CONNECTIONS}, state="PROFILE_IN_USE"))
     elif email.get("mismatch"):  # the same fix as the mailbox banner
         items.append(_item("Browser profile", "error", "Signed in to a different mailbox",
-                           fix={"label": "Open Sidedoor's browser", "href": SETTINGS_CONNECTIONS}, banner=True))
+                           fix={"label": "Open Sidedoor's browser", "href": SETTINGS_CONNECTIONS}, banner=True,
+                           state="mailbox_mismatch"))
     elif setup_steps.email_locked(state):
         at = _good_at(email) or _utc(state.get("email_check_passed_at"))
         items.append(_item("Browser profile", "success", "Mailbox matches", at))
     else:
         items.append(_item("Browser profile", "warning", email.get("message") or "Email check not done yet",
-                           fix={"label": "Open Settings", "href": SETTINGS_CONNECTIONS}))
+                           fix={"label": "Open Settings", "href": SETTINGS_CONNECTIONS},
+                           state="email:%s" % (email.get("status") or "")))
     if setup_steps.chrome_path() and browser_offscreen():   # FG1 = b: where the window is, and when it shows
         import browser_runtime
         items.append(_item("Browser window", "success", browser_window_words(), timed=False))
@@ -954,9 +1042,31 @@ def when(moment, now, zone):
     return "%s %d, %s" % (local.strftime("%b"), local.day, clock)
 
 
+def _sign_ins(reader, config, fmt, now=None):
+    """The Needs you cards for jobs waiting on a sign-in or a human check (E15.T2, `access_cards`)."""
+    import access_cards
+    return access_cards.view(reader, config, fmt, limit=access_cards.OVERVIEW_LIMIT, now=now)
+
+
 def duration(seconds):
     minutes = int(seconds) // 60
     return "%d h %02d min" % divmod(minutes, 60) if minutes >= 60 else "%d min" % minutes
+
+
+def attention(database, config, home, progress, scheduler, now=None):
+    """What the desktop notification and the tray count read (E15.T3): Overview's own "needs" and
+    "health" (the same functions `gather` calls, nothing else of the page), so they never say
+    something Overview does not. {"needs": the counts or UNAVAILABLE, "health": the items}."""
+    if not isinstance(scheduler, dict):
+        scheduler = {"running": bool(scheduler)}
+    now = now or dt.datetime.now(dt.timezone.utc)
+    zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+    reader = Reader(database)
+    cycle = section(reader, last_cycle)
+    pause = section(reader, pause_flags)
+    return {"needs": section(reader, needs_you, now),
+            "health": health(home, progress, scheduler, cycle, pause, lambda moment: when(moment, now, zone), now,
+                             live=False)}
 
 
 def gather(database, config, home, progress, scheduler, now=None, root=None):
@@ -982,6 +1092,8 @@ def gather(database, config, home, progress, scheduler, now=None, root=None):
              "submitted": section(reader, submitted_today, start, end),
              "right_now": section(reader, right_now, now),
              "needs": section(reader, needs_you, now),
+             "sign_ins": section(reader, _sign_ins, config, fmt, now),
+             "needs_rows": NEEDS_ROWS,
              "compute": {"used": section(reader, compute, config, now),
                          "in_flight": section(reader, compute_in_flight, config, now),
                          "allowed": config.get("daily_compute_seconds", DEFAULT_COMPUTE_SECONDS),

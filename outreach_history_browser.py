@@ -178,7 +178,7 @@ def communicate(worker, prompt, timeout, directory, arguments, clock=time.monoto
     """Send the prompt and wait for the worker until `timeout` seconds have passed. A support email's
     sign-in wait (support_email.SignInWait) writes its SIGNIN_FILE in `directory`: the deadline then moves
     to that file's `until`, never past SIGNIN_SECONDS + SIGNIN_FINISH beyond the first deadline (as
-    application_browser.execute does for the CAPTCHA wait)."""
+    application_browser.execute does for a hold's HOLD_FILE)."""
     import support_email
     deadline = clock() + timeout
     ceiling = deadline + support_email.SIGNIN_SECONDS + support_email.SIGNIN_FINISH
@@ -195,8 +195,15 @@ def communicate(worker, prompt, timeout, directory, arguments, clock=time.monoto
         remaining = deadline - clock()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(arguments, timeout)
+        import browser_runtime
+        if browser_runtime.guard_stopped(directory):
+            # The guard stopped its own session (browser_guard.Proxy.stop_session; the reason is in its
+            # audit): an ordinary failed session, ended now.
+            raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED")
         try:
             worker.communicate(pending, timeout=min(0.5, remaining))
+            if browser_runtime.guard_stopped(directory):
+                raise RuntimeError("HISTORY_BROWSER_EXECUTOR_FAILED")
             return
         except subprocess.TimeoutExpired:
             pending = None
@@ -261,8 +268,16 @@ def execute(config, prompt, directory, timeout):
             if arguments is not None:
                 engine.run_ended(arguments)   # U1 4: Antigravity's per-run MCP config goes (N3e: Popen failed too)
             if worker is not None:
+                import browser_runtime
+                if config.get("_browser_operation") and config["_browser_operation"] not in browser_runtime.SHOWN_OPERATIONS:
+                    # Over and decided, outside the time limit: Chrome is asked to close itself and write its
+                    # cookies before anything is stopped (application_browser.execute does the same). Never raises.
+                    browser_runtime.close_cleanly(config, directory)
                 portable.kill_tree(worker.pid)
-                worker.wait(timeout=5)
+                try:
+                    worker.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass   # never in place of the session's own outcome (application_browser.execute)
                 if timed_out:   # A5: stopped at its time limit, its model_calls row all the same
                     trace.flush()
                     engine.record_timed_out(directory / "trace.jsonl", command=arguments,

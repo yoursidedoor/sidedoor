@@ -9,12 +9,13 @@ AVAILABLE = (ROOT / "relay" / "server.py").is_file() and (ROOT / "tests" / "test
 
 if AVAILABLE:
     try:
-        from test_relay import LICENSE, MINE, UNLINKED_LICENSE, RelayHarness
+        from test_relay import LICENSE, MINE, OTHER_LICENSE, THEIRS, UNLINKED_LICENSE, RelayHarness
     except ImportError:   # run as tests.<module> from the repo root
-        from tests.test_relay import LICENSE, MINE, UNLINKED_LICENSE, RelayHarness
+        from tests.test_relay import LICENSE, MINE, OTHER_LICENSE, THEIRS, UNLINKED_LICENSE, RelayHarness
     from relay import server
 else:
     LICENSE, UNLINKED_LICENSE, MINE = "LIC-AAAA-1111", "LIC-CCCC-3333", "acct-mine"
+    OTHER_LICENSE, THEIRS = "LIC-BBBB-2222", "acct-theirs"
     server = None
 
     class RelayHarness(unittest.TestCase):

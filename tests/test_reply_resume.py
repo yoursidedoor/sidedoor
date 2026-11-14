@@ -94,6 +94,7 @@ class ResumeWorkerTests(unittest.TestCase):
         self.assertTrue(all(message["body"] in prompt for message in messages[3:]))
         self.assertTrue("PINNED_INVITATION" in prompt, "Original invitation must remain separate")
         self.assertEqual([], packet["reply_context"]["conversation_context"])
+        self.assertNotIn("owner_notes", packet)   # no note left: the packet is as it always was
         self.assertTrue(packet["reply_context"]["candidate_resume"] == self.packet, "Full verified resume must reach sender judge")
         self.assertEqual(saved_before, json.dumps(saved, sort_keys=True))
         self.assertEqual(original, json.dumps(observation, sort_keys=True))
@@ -102,6 +103,18 @@ class ResumeWorkerTests(unittest.TestCase):
         self.assertEqual(9, len(packet["observation"]["observations"][0]["raw"]["messages"]))
         audit = self.worker.database.execute("SELECT record FROM outreach_agent_audit WHERE kind='OBSERVATION'").fetchone()[0]
         self.assertTrue("OLD_SENTINEL" not in audit, "Older history must not survive in serialized judge audit")
+        # A note this reply's decision left for the owner reaches the judge, so it can tell a promise
+        # with its note from one without (owner, 2026-11-12).
+        import datetime
+        import reply_tools
+        reply_tools.initialize(self.worker.database)
+        self.worker.database.execute("INSERT INTO reply_owner_flags(task_id,flagged_at,reason) VALUES (?,?,?)",
+                                     ("old-result", "2026-09-17T12:00:00+00:00", "Synthetic note"))
+        self.worker.database.execute("INSERT INTO reply_owner_flags(task_id,flagged_at,reason) VALUES (?,?,?)",
+                                     ("another-reply", "2026-09-17T12:00:00+00:00", "Someone else's note"))
+        with patch.object(reply_execution, "context", return_value=(saved, handoff, {})):
+            context = adapter.judgment_context(action, self.worker.config, datetime.datetime.now(datetime.timezone.utc))
+        self.assertEqual(["Synthetic note"], context["owner_notes"])
 
     def test_full_packet_reaches_actual_mocked_worker_and_immutable_audit(self):
         task = self.worker.enqueue("Could you explain your experience and education?")

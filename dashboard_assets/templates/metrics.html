@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% macro cells(c) %}<td>{{ c.met }}</td>{% for key, label in m.buckets %}<td>{{ c[key] }}</td>{% endfor %}{% endmacro %}
+{% macro head(first) %}<thead><tr><th scope="col">{{ first }}</th><th scope="col">{{ m.met_label }}</th>{% for key, label in m.buckets %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead>{% endmacro %}
+{% block content %}
+<div class="metrics-page">
+<h1 class="title">Metrics</h1>
+<p class="muted">How often a site asked for a sign-in or a human check before Sidedoor could apply, and how each of those ended. These numbers stay on this computer.</p>
+{% if m.unreadable %}<p class="note note-warning" role="status">Sidedoor couldn't read its records.</p>
+{% elif m.unavailable %}<div class="card"><p class="muted">Not available</p></div>
+{% elif not m.view.total.met %}<div class="card empty"><p>{{ m.none_yet }} When one does, it is counted here.</p></div>
+{% else %}
+{% set v = m.view %}
+<section class="card">
+  <h2>In total</h2>
+  <table class="metrics-table">
+    {{ head("") }}
+    <tbody>
+      <tr><th scope="row">All time</th>{{ cells(v.total) }}</tr>
+      <tr><th scope="row">Last {{ v.recent_days }} days</th>{{ cells(v.recent) }}</tr>
+    </tbody>
+  </table>
+  <p class="muted">Each one is counted in the month the site asked, under how it stands today. {{ m.could_not_show_label }}: {{ v.could_not_show }}.</p>
+</section>
+<section class="card">
+  <h2>By month</h2>
+  <table class="metrics-table">
+    {{ head("Month") }}
+    <tbody>
+      {% for month in v.months %}
+      <tr{% if month.key == v.chosen %} class="metrics-chosen"{% endif %}><th scope="row"><a href="/metrics?month={{ month.key }}#sites">{{ month.label }}</a></th>{{ cells(month.counts) }}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">Pick a month to see its sites below.</p>
+</section>
+<section class="card" id="sites">
+  <h2>By site: {{ v.chosen_label }}</h2>
+  {% if v.chosen %}<p><a href="/metrics#sites">Show all time</a></p>{% endif %}
+  <table class="metrics-table">
+    {{ head("Site") }}
+    <tbody>
+      {% for site in v.sites %}
+      <tr><th scope="row">{{ site.site }}</th>{{ cells(site.counts) }}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+</div>
+{% endblock %}

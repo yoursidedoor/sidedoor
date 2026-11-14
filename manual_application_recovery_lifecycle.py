@@ -229,8 +229,22 @@ def no_blind_retry(fixture):
     fixture.adapter.decisions = [identical, identical]
     fixture.cycle(901)
     fixture.cycle(1802)
-    assert fixture.job(key)["state"] == "ABANDONED"
-    assert fixture.events(key, "APPLICATION_ABANDONED")[0]["reason"] == "RECOVERY_COORDINATOR_FAILED"
+    # Owner, 2026-11-13: an answer that cannot be used is not a decision about the job. Two of them wait
+    # (the second for an hour); nothing is abandoned and no read is repeated.
+    job = fixture.job(key)
+    assert job["state"] == "BLOCKED"
+    assert not fixture.events(key, "APPLICATION_ABANDONED")
+    assert len(application_recovery.counted_failures(fixture.database, key, "APPLICATION_RECOVERY_DECISION_FAILED", None)) == 2
+    assert dt.datetime.fromisoformat(job["next_at"]) - dt.datetime.fromisoformat(job["updated_at"]) == dt.timedelta(minutes=60)
+    # The third parks the job for the user: never closed, and never asked again by itself.
+    fixture.adapter.decisions = [identical]
+    fixture.cycle(1802 + 3601)
+    job = fixture.job(key)
+    assert (job["state"], job["blocker"], job["next_at"]) == ("BLOCKED", application_recovery.NEEDS_YOU_BLOCKER, None)
+    assert not fixture.events(key, "APPLICATION_ABANDONED")
+    asked = len(fixture.adapter.decision_packets)
+    fixture.cycle(1802 + 3601 + 86400)
+    assert len(fixture.adapter.decision_packets) == asked
     assert len(fixture.adapter.investigations) == 1
 
 
@@ -355,7 +369,8 @@ def coordinator_failure_artifacts(fixture):
     fixture.adapter.decisions = [error, error]
     fixture.cycle()
     fixture.cycle(901)
-    assert fixture.job(key)["state"] == "ABANDONED"
+    assert fixture.job(key)["state"] == "BLOCKED"          # owner, 2026-11-13: failed calls never abandon
+    assert not fixture.events(key, "APPLICATION_ABANDONED")
     assert not fixture.adapter.investigations
     assert fixture.events(key, "APPLICATION_RECOVERY_DECISION_FAILED")[0]["artifacts"] == error.artifacts
 

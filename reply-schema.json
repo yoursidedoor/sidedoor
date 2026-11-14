@@ -15,7 +15,8 @@
     "next_action",
     "review_at",
     "champion_handoff",
-    "speaker_context"
+    "speaker_context",
+    "asks_to_stop_contact"
   ],
   "properties": {
     "output_version": {
@@ -52,6 +53,9 @@
         "string",
         "null"
       ]
+    },
+    "asks_to_stop_contact": {
+      "type": "boolean"
     },
     "speaker_context": {
       "type": "string",

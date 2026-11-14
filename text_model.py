@@ -109,6 +109,9 @@ class TextModelError(Exception):
 
 
 class TextModelHTTPError(TextModelError):
+    # True only for the provider's own invalid-credentials answer (`invalid_credentials`), never a 403.
+    invalid_credentials = False
+
     def __init__(self, status, body):
         self.status, self.body = status, body
         super().__init__("HTTP %s: %s" % (status, body))
@@ -119,6 +122,17 @@ class TextModelResponseError(TextModelError):
     content_limit_exceeded = False
     transport_error = None        # the network error's class name, when the call never got an answer
     certificate_error = False     # that error was an SSL certificate / handshake failure (tls_setup)
+
+
+def invalid_credentials(error):
+    """True when `error` (the "error" object of a parsed answer) is the provider's own invalid-credentials
+    error: its documented JSON error shape, {"code": 401, "message": ...}. OpenRouter's error reference
+    (https://openrouter.ai/docs/api-reference/errors, read 2026-11-13): "401: Invalid credentials (OAuth
+    session expired, disabled/invalid API key)"; "403: Forbidden (insufficient permissions, guardrail block,
+    or moderation flag)". So a 403 never says the key is wrong, and neither does a page that is not this
+    JSON (a CDN or proxy answer)."""
+    return (isinstance(error, dict) and str(error.get("code")) == "401" and type(error.get("code")) in (int, str)
+            and isinstance(error.get("message"), str))
 
 
 def _transport_failure(error, secret):
@@ -239,6 +253,13 @@ def _paced(config, prompt, worker, meta, *, system, effort, max_tokens, timeout,
             # key under test (`api_key`, Setup and doctor) records nothing.
             import provider_limits
             raise error from provider_limits.out_of_credit(str(error))
+        if error.invalid_credentials and api_key is None:
+            # The provider refused the saved key on a real call (owner, 2026-11-13, K1): Overview's health
+            # row says so. Only its own invalid-credentials answer (`invalid_credentials`): a 403, or a 401
+            # page that is not the provider's JSON, is a call that got no answer and shows nothing.
+            # Not a wait of its own and not chained: the caller's failure is what it was.
+            import provider_limits
+            provider_limits.key_problem_noted(provider_limits.KEY_REFUSED)
         if str(error.status) == "429" and api_key is None:
             # Too many requests (2026-10-27): the same short wait as a Codex 429, chained the same way.
             import provider_limits
@@ -252,6 +273,7 @@ def _paced(config, prompt, worker, meta, *, system, effort, max_tokens, timeout,
     # A call that worked ends the out-of-credit banner at once: a real call, and also a key test that
     # passed (Setup's and Settings' Save/Test, doctor --online: each is this call with `api_key`).
     provider_limits.clear(provider_limits.CREDIT_WAIT_FILE)
+    provider_limits.clear(provider_limits.KEY_PROBLEM_FILE)   # K1: the key works again (a real call, or a test that passed)
     if api_key is None:
         import provider_pacing
         provider_pacing.succeeded("openrouter")
@@ -285,7 +307,13 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
         raise ValueError("TEXT_MODEL_NOT_CONFIGURED")
     if timeout <= 0:
         raise TimeoutError("Text model deadline exhausted")
-    secret = api_key if api_key is not None else key(config)
+    try:
+        secret = api_key if api_key is not None else key(config)
+    except OSError:
+        # The saved key is missing or cannot be read (K1): told on Overview's health row. Raised as before.
+        import provider_limits
+        provider_limits.key_problem_noted(provider_limits.KEY_UNREADABLE)
+        raise
     if messages is None:
         messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
     body = {"model": chosen["model"], "messages": messages, "reasoning": {"effort": effort},
@@ -315,7 +343,14 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
         raise TimeoutError("Text model call exceeded its deadline")
     text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
     if status != 200:
-        raise TextModelHTTPError(status, _short(text, secret))
+        refused = TextModelHTTPError(status, _short(text, secret))
+        try:
+            body = json.loads(text)
+        except ValueError:
+            body = None
+        # The key is refused only when the provider itself says so, in its own error shape, on a 401.
+        refused.invalid_credentials = str(status) == "401" and isinstance(body, dict) and invalid_credentials(body.get("error"))
+        raise refused
     try:
         answer = json.loads(text)
     except ValueError:
@@ -331,7 +366,9 @@ def _complete(config, prompt, *, system=None, effort="low", max_tokens=4000, tim
     error = error or (choice.get("error") if isinstance(choice, dict) else None)
     if error:
         code = error.get("code") if isinstance(error, dict) else None
-        raise TextModelHTTPError(code if code is not None else status, _short(json.dumps(error), secret))
+        refused = TextModelHTTPError(code if code is not None else status, _short(json.dumps(error), secret))
+        refused.invalid_credentials = invalid_credentials(error)
+        raise refused
     message = choice.get("message") if isinstance(choice, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     tool_calls = message.get("tool_calls") if isinstance(message, dict) else None

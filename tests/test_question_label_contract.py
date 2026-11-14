@@ -191,6 +191,8 @@ class TheInspectContractAsksForTheQuestionsOwnText(unittest.TestCase):
             # inspect could ever supply it and "Mooby, Inc." against stored "mooby" was refused.
             "employer_matches_expected",
             "facts", "form_revision", "history",
+            # 2026-11-12 (E16.T2): where a human check sits (access_outcomes.clean_check).
+            "human_check",
             "official_destination_verified", "official_url", "questions", "requisition", "role",
             # 2026-10-07 (item 3): the read's own judgement that the page's role is this job's
             # role under another rendering (`application_destination.role_reconciliation`).

@@ -521,6 +521,32 @@ def stop_state(database, profile):
     return "OPTED_OUT" if "OPTED_OUT" in states else "REPLY_REQUIRES_CONTEXT" if states else None
 
 
+def apply_stop_request(database, profile, identity, asks, source, source_id):
+    """Record or lift a person's opt-out from the reply model's structured judgment of ONE inbound
+    message (owner, 2026-11-12: "record opt-outs of opt-in (if the person starts replying again.)").
+
+    `asks` True: the person asked for contact to stop; engagement_stops holds OPTED_OUT, which every
+    existing send check already refuses on. `asks` False: they wrote again without asking to stop, so a
+    recorded OPTED_OUT goes back to REPLY_REQUIRES_CONTEXT, the state any reply leaves. None (a decision
+    from before the field existed) changes nothing. Each decision acts on its own value, whichever
+    message it is about; there is no ordering rule (owner, 2026-11-12), so a decision on an older
+    message that arrives late still records or lifts. Returns "RECORDED", "LIFTED" or None.
+    The caller owns the transaction. No words are matched here; the model judged the message.
+    """
+    if type(asks) is not bool:
+        return None
+    if asks:
+        database.execute("""INSERT INTO engagement_stops VALUES (?,?,?,?)
+            ON CONFLICT(identity) DO UPDATE SET state='OPTED_OUT', source=excluded.source, source_id=excluded.source_id""",
+                         (identity, "OPTED_OUT", source, source_id))
+        return "RECORDED"
+    identities = identity_keys(database, profile)
+    placeholders = ",".join("?" for unused in identities)
+    lifted = database.execute("UPDATE engagement_stops SET state='REPLY_REQUIRES_CONTEXT' WHERE state='OPTED_OUT' AND identity IN ("
+                              + placeholders + ")", identities).rowcount
+    return "LIFTED" if lifted else None
+
+
 def stop_label(database, profile):
     """stop_state, but naming an undecodable-conversation hold for what it is.
 
@@ -1032,12 +1058,30 @@ def _deferred_note_done(database, identity):
                             " AND json_extract(result,'$.deferred_note_done') IS NOT NULL", identities).fetchone() is not None
 
 
+def _needs_acceptance(event):
+    """An initial_sent that was an invitation carrying the note: a HeyReach campaign invitation or a
+    Unipile INVITE. No message reaches the person until they accept; these are the first contacts
+    whose follow-up waits for the acceptance read (followup_execution._sources: sent_not_before)."""
+    return bool(event.get("preparation_action_id")) or (event.get("source") == "unipile" and event.get("purpose") == "INVITE")
+
+
+# Owner, 2026-11-12: "never send a follow-up more than 14 days after it was due". This plan is the one
+# place that says a follow-up is DUE, and every step towards a send asks it: the writer and its
+# rewrites (followup_execution.plan, which promote, the repair, the side rewrite and _write all call), the judge's
+# read and the claim (followup_execution.binding_gates, outreach.action_gates) and the final checks
+# of a claimed send and of a resend after a check (action_gates again). A constant, not a setting.
+FOLLOWUP_SEND_WINDOW_DAYS = 14
+FOLLOWUP_TOO_LATE = "FOLLOWUP_TOO_LATE"
+
+
 def next_action(database, profile, now=None, recipient="", campaign_id=None):
     """Plan only. Weekdays exclude weekends; no holiday calendar is assumed.
 
     Acceptance window is inclusive 12–24h; missed windows require review.
     Urgent default is conservatively 48h elapsed and 23–25h before interview.
     Follow-up two is five business days after the actual first follow-up.
+    A follow-up more than FOLLOWUP_SEND_WINDOW_DAYS past its own due time is BLOCKED, FOLLOWUP_TOO_LATE;
+    the first follow-up after an invitation counts from the acceptance when that came after the due time.
     """
     now = timestamp(now or dt.datetime.now(dt.timezone.utc))
     identity = profile_key(profile)
@@ -1090,8 +1134,26 @@ def next_action(database, profile, now=None, recipient="", campaign_id=None):
                     "due_at": max(initial + dt.timedelta(hours=48), interview - dt.timedelta(hours=25)).isoformat(),
                     "expires_at": (interview - dt.timedelta(hours=23)).isoformat()}
     due = business_days_after(follows[-1]["occurred_at"], 5) if follows else business_days_after(initial, 3)
-    return {"state": "DUE" if now >= due else "WAITING", "purpose": "FOLLOWUP",
-            "ordinal": len(follows) + 1, "due_at": due.isoformat()}
+    planned = {"state": "DUE" if now >= due else "WAITING", "purpose": "FOLLOWUP",
+               "ordinal": len(follows) + 1, "due_at": due.isoformat()}
+    # Counted from when THIS follow-up became due, never from the original message.
+    start = due
+    if not follows and _needs_acceptance(initials[0]):
+        # Owner, 2026-11-12: "for an invitation, count the 14 days from when they accept." Nothing can
+        # reach the person before they accept, so a first follow-up to someone who has just accepted
+        # is timely, not late. Not accepted yet: never too late; the plan answers as it did without
+        # the window and the acceptance read keeps its own polling and its own end. Accepted before
+        # the follow-up became due: the due time, as for everyone else. When it is due is unchanged.
+        accepted = next((timestamp(event["occurred_at"]) for event in events
+                         if event["kind"] == "accepted" and event.get("verified") is True and event.get("evidence")
+                         and timestamp(event["occurred_at"]) <= now), None)
+        if accepted is None:
+            return planned
+        start = max(due, accepted)
+    if now > start + dt.timedelta(days=FOLLOWUP_SEND_WINDOW_DAYS):
+        # It is not sent, so no later one becomes due either: the sequence ends here, as at FOLLOWUP_LIMIT.
+        planned.update(state="BLOCKED", blocker=FOLLOWUP_TOO_LATE)
+    return planned
 
 
 def _read_pass(database, client, source, role, page_cursor, now, item, outcome, counted=None):

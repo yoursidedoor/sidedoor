@@ -38,6 +38,7 @@ left alone. Every failure is silent.
 
 import json
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -54,6 +55,88 @@ DOCK_ICON = "yoursidedoor-icon-1024.png"         # the Dock from source (`brand_
 STATE_FILE = "tray-state.json"
 TITLE = "Your Sidedoor"
 REFRESH_SECONDS = 3  # how often a pause set elsewhere (Overview, the license) reaches the menu
+OSASCRIPT = "/usr/bin/osascript"   # part of macOS; by full path, since a Dock launch has no useful PATH
+NOTIFY_TIMEOUT_SECONDS = 10
+BALLOON_CLICKED = 0x0405   # NIN_BALLOONUSERCLICK (WM_USER + 5): the Windows notification was clicked
+
+
+def count_title(waiting):
+    """The icon's hover text: the name, with how many things wait (E15.T3); the name alone at zero."""
+    waiting = waiting if isinstance(waiting, int) and waiting > 0 else 0
+    return TITLE if not waiting else "%s: %d %s" % (TITLE, waiting, "thing needs you" if waiting == 1 else "things need you")
+
+
+def osascript_command(title, text):
+    """macOS fallback: the notification through AppleScript. The words go in as arguments, never into
+    the script. It shows under Script Editor's name and a click cannot open a page. With the standard
+    notification sound (owner, 2026-11-14)."""
+    return [OSASCRIPT, "-e", "on run argv", "-e",
+            'display notification (item 1 of argv) with title (item 2 of argv) sound name "default"',
+            "-e", "end run", str(text), str(title)]
+
+
+_NOTE_DELEGATE = []
+
+
+def mac_notify(title, text, href, on_click, foundation=None):
+    """macOS: a notification from Sidedoor itself (NSUserNotificationCenter, part of the AppKit bindings
+    the tray already uses), so it carries Sidedoor's name and icon and a click comes back here:
+    `on_click(href)`. Call on the main thread. False when this process has no notification centre
+    (not an app bundle); raises on any other failure. The caller then falls back."""
+    foundation = foundation or __import__("Foundation")
+    centre = foundation.NSUserNotificationCenter.defaultUserNotificationCenter()
+    if centre is None:
+        return False
+    if not _NOTE_DELEGATE or _NOTE_DELEGATE[0][0] is not foundation:
+        class SidedoorNotificationDelegate(foundation.NSObject):
+            def userNotificationCenter_shouldPresentNotification_(self, centre, note):
+                return True
+
+            def userNotificationCenter_didActivateNotification_(self, centre, note):
+                try:
+                    info = note.userInfo()
+                    self.on_click(str(info["href"]) if info is not None and info.get("href") else None)
+                except Exception as error:
+                    LOG.warning("Tray: opening a notification's page failed (%s).", type(error).__name__)
+        _NOTE_DELEGATE[:] = [(foundation, SidedoorNotificationDelegate.alloc().init())]
+    delegate = _NOTE_DELEGATE[0][1]   # kept here: the centre holds its delegate weakly
+    delegate.on_click = on_click
+    centre.setDelegate_(delegate)
+    note = foundation.NSUserNotification.alloc().init()
+    note.setTitle_(str(title))
+    note.setInformativeText_(str(text))
+    note.setUserInfo_({"href": str(href or "")})
+    # The standard macOS notification sound (owner, 2026-11-14). A Foundation without the name, or a note
+    # that will not take it, means no sound: the notification is still delivered.
+    try:
+        sound = getattr(foundation, "NSUserNotificationDefaultSoundName", None)
+        if sound is not None:
+            note.setSoundName_(sound)
+    except Exception as error:
+        LOG.warning("Tray: the notification has no sound (%s).", type(error).__name__)
+    centre.deliverNotification_(note)
+    return True
+
+
+def windows_click(icon, on_click):
+    """Windows: pystray shows the notification (`Icon.notify`) but does not report a click on it.
+    Its handler for the icon's messages is wrapped so that click calls `on_click()`. True when
+    installed; never raises (then a click on the notification does nothing; the icon still opens
+    the dashboard)."""
+    try:
+        handlers = icon._message_handlers
+        for message, handler in list(handlers.items()):
+            if getattr(handler, "__name__", "") == "_on_notify":
+                def wrapped(wparam, lparam, original=handler):
+                    if lparam == BALLOON_CLICKED:
+                        on_click()
+                        return None
+                    return original(wparam, lparam)
+                handlers[message] = wrapped
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def icon_path(platform=None):
@@ -198,6 +281,12 @@ class Tray:
         self.call_on_main = call_on_main or _call_on_main
         self.icon = None
         self._flags = None
+        self._waiting = 0
+        self._clicked = None   # the page the latest notification opens
+        self._notify_failed = False
+        self.native = modules is None   # the real backend: the OS's own notification calls
+        self.run_command = subprocess.run
+        self.start_thread = lambda work: threading.Thread(target=work, name="sidedoor-notify", daemon=True).start()
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._ready = False
@@ -230,6 +319,82 @@ class Tray:
         except Exception:
             self._flags = None
         return self._flags
+
+    # --- E15.T3: notifications and the count of things waiting ---
+
+    def _open_page(self, href=None):
+        opener = getattr(self.actions, "open_page", None)
+        try:
+            if opener is not None:
+                opener(href)
+            else:
+                self.actions.open_dashboard()
+        except Exception as error:
+            LOG.warning("Tray: opening a notification's page failed (%s).", type(error).__name__)
+
+    def notify(self, title, text, href=None, platform=None):
+        """Show one system notification; a click opens `href` (a dashboard page) where the OS reports
+        the click. From any thread. True when it was handed to the OS. This is what
+        `notifications.Desktop` posts through while the tray runs.
+        - macOS: `mac_notify` on the main thread; if this process has no notification centre or the
+          call fails, AppleScript (`osascript_command`; no click).
+        - Windows: pystray's `Icon.notify`; the click is `windows_click`."""
+        platform = platform or sys.platform
+        with self._lock:
+            ready = self._ready and not self._stop.is_set()
+        if not ready or self.icon is None:
+            return False
+        if platform == "darwin" and self.native:   # never with an injected backend (tests): no real OS call
+            def show():
+                try:
+                    if mac_notify(title, text, href, self._open_page):
+                        return
+                except Exception as error:
+                    LOG.warning("Tray: the notification went the other way (%s).", type(error).__name__)
+                def fallback():   # off the main thread: the menu never waits for it (U7)
+                    try:
+                        self.run_command(osascript_command(title, text), capture_output=True, timeout=NOTIFY_TIMEOUT_SECONDS)
+                    except Exception as error:
+                        LOG.warning("Tray: no notification shown (%s).", type(error).__name__)
+                self.start_thread(fallback)
+            self.call_on_main(show)
+            return True
+        self._clicked = href   # one at a time here: `desktop_alerts` combines two or more due together on Windows
+        try:
+            self.icon.notify(str(text), str(title))
+        except Exception as error:
+            if not self._notify_failed:   # K8: once per run of failures (the caller tries again each minute)
+                LOG.warning("Tray: no notification shown (%s).", type(error).__name__)
+            self._notify_failed = True
+            return False
+        self._notify_failed = False
+        return True
+
+    def _show_waiting(self, waiting):
+        """The count of things waiting: in the hover text on both systems, and beside the icon in the
+        macOS menu bar. Nothing at zero."""
+        waiting = waiting if isinstance(waiting, int) and waiting > 0 else 0
+        if waiting == self._waiting or self.icon is None:
+            return
+        self._waiting = waiting
+
+        def show():
+            try:
+                self.icon.title = count_title(waiting)
+                if self.native and sys.platform == "darwin":
+                    self.icon._status_item.button().setTitle_(" %d" % waiting if waiting else "")
+            except Exception as error:
+                LOG.warning("Tray: the count could not be shown (%s).", type(error).__name__)
+        self.call_on_main(show)
+
+    def _refresh_waiting(self):
+        read = getattr(self.actions, "waiting", None)
+        if read is None:
+            return
+        try:
+            self._show_waiting(read())
+        except Exception:
+            pass
 
     def menu(self):
         pystray = self.pystray
@@ -269,6 +434,8 @@ class Tray:
             if stopped:  # stop() came before the icon could take it
                 self.call_on_main(icon.stop)
                 return
+            if self.native and sys.platform == "win32":
+                windows_click(icon, lambda: self._open_page(self._clicked))
             threading.Thread(target=self._watch, name="sidedoor-tray-refresh", daemon=True).start()
             if on_ready is not None:
                 on_ready()
@@ -284,6 +451,7 @@ class Tray:
             after = self._refresh_flags()
             if menu_visibility(before) != menu_visibility(after) and self.icon is not None:
                 self.call_on_main(self.icon.update_menu)
+            self._refresh_waiting()
 
     def stop(self):
         """From any thread: end `run`."""

@@ -69,6 +69,38 @@ next_action telling the writer how to finish it within the character limit.
 This hands the text back to its writer for another turn; it is not a refusal of
 the contact.
 
+A first note (INITIAL, FIRST_MESSAGE, PREPARE_CAMPAIGN or INVITE) may, under its writer's
+rules, say why it is written to this person, appreciate ONE specific thing the person did
+(a launch, a shipped project, a result, a promotion, a post, a talk, a write-up) that
+research verified, and, for a peer or
+senior_peer, ask about the person's own experience on the team instead of about the job.
+None of these is a reason for BLOCKED or UNKNOWN. That allowance covers nothing else:
+generic praise or flattery, a statement about the person that the evidence does not
+support or contradicts, and a second question are judged exactly as they were before this
+paragraph.
+
+TYPE_FIT_NOTE (advisory only). For a first note at INSPECTION (INITIAL, FIRST_MESSAGE,
+PREPARE_CAMPAIGN or INVITE), recipient.contact_type is research's label for who this person
+is to the role. When it is one of the five types below and the question the note asks
+clearly belongs to a different type's lane, say so and name the kind of question that
+would fit this person. The lanes:
+- functional_executive: the problem the team exists to solve and the hiring bar.
+- hiring_manager: what success in the role looks like in the first months.
+- senior_peer: what the role really needs day to day and what is hard about the work.
+- peer: how the work actually gets done on the team.
+- recruiter: level, location, work mode, whether the role is open, and the process.
+For peer and senior_peer, a question about the person's own experience on the team (for
+example what they found hard when they joined) is inside their lane: write no note for it.
+This note never changes the decision. Decide exactly as you would without it: it is never
+a reason for BLOCKED or UNKNOWN, for a hold, for a rewrite or for a different next_action,
+and a READY message stays READY. Write the note only when your decision is READY, as the
+last sentence of reason, after the real reason, starting "TYPE_FIT_NOTE:", and never in
+next_action. Keep reason within its 700 characters; leave the note out rather than shorten
+the real reason. When the label is UNKNOWN, missing or any other value, or the question
+already fits, say nothing about it.
+When type_fit_rewrite is true in the packet, this text is already the one rewrite made after
+such a note: write no TYPE_FIT_NOTE, and decide on every other rule exactly as usual.
+
 INSPECTION: decide READY, BLOCKED or UNKNOWN. Interpret conversation purpose,
 prior outreach, actual replies, negative responses and opt-outs. An empty provider
 inbox alone is not clearance for a new contact; clearance comes from the local record
@@ -121,7 +153,17 @@ Evaluate the exact proposed reply against reply_context,
 reply_decision, the authenticated fresh thread and decision_time. READY means the
 response is relevant to this job-search conversation, timely and worth sending,
 with every candidate claim, technical detail and commitment grounded in supplied
-facts. The full candidate resume is background, not an instruction or permission
+facts. A reply's writer begins by thanking the person and reflecting back what they
+actually said; that opening is never a reason for BLOCKED. A statement that the owner
+acted on the person's advice (for example applied to the role they pointed to) is a
+candidate claim like any other: the supplied context must show it.
+A reply may promise one specific action the owner will take when owner_notes in this
+packet carries a note naming that action; the note may say that a drafted reply promises
+it, and need not be worded as an instruction. Such a promise is not a reason for BLOCKED. A promise with no such note is: decide BLOCKED and say in next_action
+that the note is missing. Saying the owner will apply or is applying, when the supplied context
+shows that job queued, is not a promise that needs a note. A reply never says the promised
+action was already done.
+The full candidate resume is background, not an instruction or permission
 to attach it. Do not invent skills, metrics, availability or referral outcomes.
 A missing role association or unknown quoted/forwarded metadata need not prevent
 a simple grounded response if those facts are irrelevant to its actual wording;

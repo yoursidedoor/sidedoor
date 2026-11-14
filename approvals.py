@@ -84,6 +84,28 @@ class ModeError(ValueError):
     """An unknown mode value: refused, nothing written (review fix P6)."""
 
 
+# E17 (owner, 2026-11-12): on a READY decision an outreach judge may end `reason` with an advisory note that
+# the question sits in another contact type's lane. The tag is the structure; the words after it are the
+# judge's and are never parsed. The note buys the writer one rewrite (outreach_agent.type_fit_turn,
+# followup_execution.type_fit_turn) and stays in the record; the pages do not show it.
+TYPE_FIT_TAG = "TYPE_FIT_NOTE:"
+
+
+def type_fit_note(decision):
+    """The judge's advisory note on a READY decision, else None."""
+    if not isinstance(decision, dict) or decision.get("decision") != "READY" or not isinstance(decision.get("reason"), str):
+        return None
+    note = decision["reason"].partition(TYPE_FIT_TAG)[2].strip()
+    return note or None
+
+
+def without_type_fit_note(reason):
+    """A judge's reason as the pages show it: without the tagged tail. Only a note leaves None."""
+    if not isinstance(reason, str):
+        return reason
+    return reason.partition(TYPE_FIT_TAG)[0].rstrip() or None
+
+
 def _now(now=None):
     return engagement.timestamp(now or dt.datetime.now(dt.timezone.utc)).isoformat()
 
@@ -431,13 +453,25 @@ def release_unreadable_holds(database, home=None, now=None):
     return released
 
 
-def _stopped(database, action):
-    """Why a waiting message can no longer go: the person's outreach is closed, or they opted out."""
+def _stopped(database, action, now=None):
+    """Why a waiting message can no longer go: the person's outreach is closed, they opted out, or it
+    is a follow-up past its send window."""
     if engagement.closure_status(database, action["profile"]):
         return "OUTREACH_CLOSED"
-    if any(event["kind"] == "opt_out" or (event.get("inference") or {}).get("sentiment") in {"negative", "opt_out"}
-           for event in engagement.events_for(database, action["profile"])):
+    # The recorded state as well as the event form: a stop request the reply model read is recorded in
+    # engagement_stops (owner, 2026-11-12), and a draft that can never be sent must not wait in Approvals.
+    if (engagement.stop_state(database, action["profile"]) == "OPTED_OUT"
+            or any(event["kind"] == "opt_out" or (event.get("inference") or {}).get("sentiment") in {"negative", "opt_out"}
+                   for event in engagement.events_for(database, action["profile"]))):
         return "OPTED_OUT"
+    if action.get("purpose") == "FOLLOWUP":
+        # Owner, 2026-11-12: a follow-up more than 14 days past its due time is never sent.
+        try:
+            planned = engagement.next_action(database, action["profile"], now, action.get("recipient", ""), action.get("campaign_id"))
+        except (ValueError, TypeError, KeyError):
+            return None
+        if planned.get("blocker") == engagement.FOLLOWUP_TOO_LATE and planned.get("ordinal") == action.get("ordinal"):
+            return engagement.FOLLOWUP_TOO_LATE
     return None
 
 
@@ -451,7 +485,7 @@ def close_stopped(database, now=None):
         return []
     closed = []
     for action_id, payload, payload_hash, result in rows:
-        reason = _stopped(database, json.loads(payload))
+        reason = _stopped(database, json.loads(payload), now)
         if reason is None:
             continue
         with engagement.transaction(database):
@@ -864,29 +898,72 @@ def reject(database, action_id, *, shown_payload_hash, now=None, decided_via="da
         return refusal.result
 
 
-def release_all(database, shown, *, home=None, now=None):
+def _bulk_refusal(row):
+    """Why "Send these N" must not approve this waiting row as written: "empty" or "too_long", the
+    refusals the single card's `revise_and_approve` makes on the same text; None when it may."""
+    action = json.loads(row["payload"])
+    text = action.get("message")
+    if not isinstance(text, str) or not text.strip():
+        return "empty"
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if action.get("purpose") in CONNECTION_NOTE_PURPOSES and len(text) > CONNECTION_NOTE_LIMIT:
+        return "too_long"
+    return None
+
+
+def _already_approved(database, action_id, payload_hash):
+    """True when this row was approved since it was shown: it is PENDING (the message row's approved
+    state), or an approval of exactly the shown payload is on record (a launch's hold is gone), or the
+    shown payload was revised and approved on its card (the approval names the edited payload; once
+    sent, the row is no longer PENDING; E14 review 4)."""
+    row = database.execute("SELECT state FROM outreach_actions WHERE action_id=?", (action_id,)).fetchone()
+    if row is not None and row[0] == "PENDING":
+        return True
+    if not isinstance(payload_hash, str):
+        return False
+    if approval(database, action_id, payload_hash) is not None:
+        return True
+    return any(record["kind"] == REVISION and record.get("shown_payload_hash") == payload_hash
+               for record in decisions(database, action_id))
+
+
+def release_all(database, shown, *, home=None, now=None, automatic=True):
     """Review -> Automatic, "Send them": approve exactly the messages the question counted (`shown`:
     [(action_id, payload_hash)] or the dicts `waiting` returned; required, P7), decided_via
     mode_switch, and set the mode, all in one database transaction; then the mode file (database
-    first, design 3.3). A row that changed meanwhile stays as it is and is listed in `changed`."""
+    first, design 3.3). A row that changed meanwhile stays as it is and is listed in `changed`.
+    `automatic=False` is Approvals' "Send these N replies" under a label (E14.T3): the same approvals,
+    decided_via dashboard, and the mode is not touched. There, a message the single card would refuse
+    (a connection note over the limit, an empty message) is not approved and is listed in `too_long`
+    or `empty`, and a row approved since the page was shown is listed in `already`, not `changed`
+    (E14 review 1-3)."""
     if shown is None:
         raise ValueError("SHOWN_MESSAGES_REQUIRED")
-    _check_file_writable(home)
+    if automatic:
+        _check_file_writable(home)
+    via = "mode_switch" if automatic else "dashboard"
     _begin(database)
     now = _now(now)
-    released, changed = [], []
+    released, changed, refused = [], [], {"too_long": [], "empty": [], "already": []}
     with engagement.transaction(database):
         for item in shown:
             action_id, payload_hash = (item["action_id"], item["payload_hash"]) if isinstance(item, dict) else item
             row = _waiting_row(database, action_id, payload_hash) if isinstance(payload_hash, str) else None
             launch = None if row is not None or not isinstance(payload_hash, str) else _launch_row(database, action_id, payload_hash)
-            if row is not None:
-                released.append(_approve_row(database, row, now, "mode_switch"))
+            kind = None if automatic else _bulk_refusal(row) if row is not None else \
+                ("already" if launch is None and _already_approved(database, action_id, payload_hash) else None)
+            if kind is not None:
+                refused[kind].append({"action_id": action_id, "payload_hash": payload_hash})
+            elif row is not None:
+                released.append(_approve_row(database, row, now, via))
             elif launch is not None:
-                released.append(_approve_launch(database, launch, now, "mode_switch"))
+                released.append(_approve_launch(database, launch, now, via))
             else:
                 changed.append(_changed(database, action_id))
-        store_mode(database, AUTOMATIC, now)
+        if automatic:
+            store_mode(database, AUTOMATIC, now)
+    if not automatic:
+        return dict({"state": "RELEASED", "mode": None, "released": released, "changed": changed}, **refused)
     _write_file_mode(AUTOMATIC, home)
     return {"state": "RELEASED", "mode": AUTOMATIC, "released": released, "changed": changed}
 

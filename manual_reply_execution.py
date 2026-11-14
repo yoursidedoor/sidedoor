@@ -250,7 +250,7 @@ class Fixture:
             body = inbox["text"]
             quote = {"start": 0, "end": len(body), "text": body}
             return json.dumps({
-                "output_version": reply_worker.VERSION, "source_sha256": packet["source_sha256"],
+                "output_version": reply_worker.VERSION, "asks_to_stop_contact": False, "source_sha256": packet["source_sha256"],
                 "label": "QUESTION", "literal_quote": body, "quote_span": quote,
                 "role_reference": None, "reason": "Synthetic contextual question interpretation.",
                 "unknown_factual_requirements": self.unknowns.get(inbox["message_id"], []),

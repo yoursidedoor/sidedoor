@@ -473,12 +473,23 @@ def superseding_payload(scaffold, *, invitation, first_message, composition=None
     return payload
 
 
-def insert_version(database, identity, payload, now):
-    """Append the next immutable rw_drafts version (caller owns the transaction)."""
+def _next_version(database, identity, payload, now):
     content_hash = research.digest({field: value for field, value in payload.items() if field != "plan_id"})
     version = database.execute("SELECT COALESCE(MAX(version),0)+1 FROM rw_drafts WHERE identity=?", (identity,)).fetchone()[0]
     payload = dict(payload, version=version, created_at=research.timestamp(now).isoformat(),
                    draft_id=research.digest([identity, version, content_hash]))
+    return version, content_hash, payload
+
+
+def next_version(database, identity, payload, now):
+    """The rw_drafts row `insert_version` would append now, as a dict; nothing is written."""
+    version, content_hash, payload = _next_version(database, identity, payload, now)
+    return {"identity": identity, "version": version, "content_hash": content_hash, "payload": research.encoded(payload)}
+
+
+def insert_version(database, identity, payload, now):
+    """Append the next immutable rw_drafts version (caller owns the transaction)."""
+    version, content_hash, payload = _next_version(database, identity, payload, now)
     database.execute("INSERT INTO rw_drafts VALUES (?,?,?,?)", (identity, version, content_hash, research.encoded(payload)))
     return payload
 

@@ -41,6 +41,7 @@ import urllib.parse
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import access_step
 import decision_transport
 import overview_page as overview
 import workflow_tasks
@@ -81,6 +82,9 @@ STATE_WORDS = {"QUEUED": "Queued", "RETRY_WAIT": "Waiting to retry", "WAITING_BR
                "SUBMITTING": "Waiting for confirmation",
                "RECONCILE": "Waiting for confirmation", "SUBMITTED": "Submitted", "INELIGIBLE": "Not eligible",
                "DUPLICATE": "Duplicate", "EXHAUSTED": "Given up", "ABANDONED": "Given up"}
+# A job the old rule closed after failed AI calls was not given up by a decision (owner, 2026-11-14): its chip.
+NOT_DECIDED_CODE = "APPLICATION_RECOVERY_NOT_DECIDED"
+NOT_DECIDED_STATE = "Closed"
 STATE_TONES = {"SUBMITTED": "success", "SUBMITTING": "info", "RECONCILE": "info", "QUEUED": "muted",
                "RETRY_WAIT": "warning", "WAITING_BROWSER": "info", "INELIGIBLE": "muted", "DUPLICATE": "muted", "EXHAUSTED": "muted",
                "ABANDONED": "muted"}
@@ -138,6 +142,8 @@ CODE_WORDS = {
     # Tries that failed and are retried (owner, 2026-10-25: counted on Failures)
     "APPLICATION_BROWSER_EXECUTOR_FAILED": "The AI running the browser stopped with an error before it finished.",
     "APPLICATION_BROWSER_FAILED": "The browser session stopped with an error before it finished.",
+    # V13 (owner, 2026-11-12): the guard stopped the session (browser_runtime.SETUP_STOPPED_CODE).
+    "APPLICATION_BROWSER_SETUP_STOPPED": "Sidedoor stopped this session because its browser could not be set up correctly.",
     "APPLICATION_TOOL_LIMIT": "The browser session used all of its allowed steps before it finished.",
     "FORM_UNAVAILABLE": "The application form could not be opened.",
     "RECONCILED_ABSENT": "The submit try did not go through. Sidedoor checked and found no application at the site.",
@@ -163,7 +169,16 @@ CODE_WORDS = {
     "DATE_ORDER_UNCLEAR": "The site's date field doesn't show whether it's day/month or month/day.",
     "FILE_UPLOAD_FAILED_3_TIMES": "The site refused the résumé upload three times.",
     "ACCESS_BLOCKED_3_TIMES": "The site asked for a sign-in or a human check three times.",
+    # A job that waited on you behind a sign-in or a human check (E15.T1; access_outcomes.CLOSE_WORDS).
+    "ACCESS_ABANDONED_BY_YOU": "You abandoned this application.",
+    "ACCESS_WAITED_7_DAYS": "Sidedoor waited 7 days for you and closed this application.",
+    "ACCESS_SKIPPED_BY_SETTING": "Closed by your setting.",
+    "ACCESS_POSTING_CLOSED": "The posting closed while this application waited for you.",
     "APPLICATION_RECOVERY_ABANDONED": "Sidedoor looked into a problem and decided it cannot apply.",
+    # Closed by the old rule after failed AI calls, and parked for the user (owner, 2026-11-13, G2, G4).
+    # The same sentences as application_recovery.NOT_DECIDED_WORDS and NEEDS_YOU_WORDS (a test holds them equal).
+    "APPLICATION_RECOVERY_NOT_DECIDED": "This application was closed. Press Try again if you want this job.",
+    "APPLICATION_RECOVERY_NEEDS_YOU": "This application is stuck. Press Try again.",
     "APPLICATION_COORDINATOR_ATTEMPTS_EXHAUSTED": "Sidedoor ran out of tries working out a problem.",
 }
 # Codes that show no reason line under "Waiting for confirmation" (owner, 2026-10-29, L3).
@@ -175,6 +190,12 @@ ROUTE_WORDS = {"OWNER": "This application needs you.",
                "RECONCILE": "Sidedoor is checking whether the application went through.",
                "RECOVER": "Sidedoor is looking into a problem with this posting.",
                "ORDINARY": "Sidedoor ran into a problem it will retry."}
+# The job's stored next step while Sidedoor's own sign-in step is ahead of it (`access_step._go_on`).
+ACCESS_STEP_WORDS = frozenset({access_step.PLANNED_WORDS, access_step.CONFIRM_WORDS})
+PARKED_TODO = "Press Try again if you want this job."
+# A job held behind its site's profile (another job's questions for the user, or its step still to run).
+PROFILE_HELD_STATE = "Waiting"
+PROFILE_HELD_WORDS = {"ASKED": "Waiting for your answers on Approvals.", "STEP": "Waiting for another application on this site."}
 CLOSED_WORDS = {"INELIGIBLE": "Sidedoor judged this role does not fit your search.",
                 "DUPLICATE": "Sidedoor matched this to an application you already have.",
                 "EXHAUSTED": "Sidedoor stopped trying.", "ABANDONED": "Sidedoor stopped trying."}
@@ -184,9 +205,9 @@ ATTEMPT_WORDS = {"SUBMITTING": "Submitting, outcome being checked", "VERIFIED": 
 ELIGIBLE_WORDS = "Eligible: fits your search."
 
 # Owner, 2026-10-24: a job held for the owner's answers is not "Blocked": while its question is open on
-# Approvals it waits calmly for the answer; once answered it continues on the next run by itself.
+# Approvals it waits calmly for the answer; once answered it continues on the next round by itself.
 WAITING_ANSWER_WORDS = "Waiting for your answer"
-ANSWERED_WORDS = "Continues on the next run"
+ANSWERED_WORDS = "Continues on the next round"
 ANSWER_LABEL, ANSWER_HREF = "Answer on Approvals", "/approvals#questions"
 # Review mode holds applications for approval (owner, 2026-10-24): `overview.approval_hold`.
 HELD_WORDS, APPROVE_LABEL, APPROVE_HREF = "Waiting for your approval", "Approve on Approvals", "/approvals#applications"
@@ -277,10 +298,25 @@ def counts(reader, now, start, end):
     reading_states = _states_being_read(reader, now)
     for key in LIVE_STATE_FILTERS:
         found[key] -= sum(1 for state in reading_states if state in STATE_FILTERS[key])
-    found.update(all=sum(by_state.values()), needs_you=len(overview.blocked_on_owner_keys(reader, now)), retrying=len(overview.retrying_keys(reader, now)),
+    # "Blocked, needs you" is Overview's applications blocked on the owner plus the jobs waiting on a
+    # sign-in or a human check (E15.T2: `overview.waiting_keys`, Overview's `sign_ins`), each once.
+    found.update(all=sum(by_state.values()), needs_you=len(needs_you_keys(reader, now)), retrying=len(overview.retrying_keys(reader, now)),
                  submitted_today=overview.submitted_today(reader, start, end))
     found["reading"] = len(reading_now_keys(reader, now))
     return found
+
+
+def needs_you_keys(reader, now):
+    """The jobs under "Blocked, needs you": the owner holds (`overview.blocked_on_owner_keys`) and the
+    jobs waiting on a sign-in or a human check (`overview.waiting_keys`, never one of the former).
+    Never a waiting job whose submission may have reached the employer (F2): Sidedoor is checking
+    it, and nothing waits on the user."""
+    import applications
+    import access_cards
+    behind = access_cards.behind_keys(reader)   # only waiting behind another application's card: In progress
+    return overview.blocked_on_owner_keys(reader, now) + [
+        key for key in overview.waiting_keys(reader)
+        if key not in behind and not applications.uncertain_submission(reader.database, key)]
 
 
 def _states_being_read(reader, now):
@@ -349,7 +385,7 @@ def ordered_keys(reader, show, now, start, end, company=None, query=None):
         rows = [row for row in rows if any(needle in value.casefold() for value in _names(row[1], row[2]))]
     keys = [row[0] for row in rows]
     if show in ("needs_you", "retrying"):
-        wanted = set(overview.blocked_on_owner_keys(reader, now) if show == "needs_you" else overview.retrying_keys(reader, now))
+        wanted = set(needs_you_keys(reader, now) if show == "needs_you" else overview.retrying_keys(reader, now))
         keys = [key for key in keys if key in wanted]
     elif show == "submitted_today":
         today, _ = submitted_today_keys(reader, start, end)
@@ -396,6 +432,10 @@ def _receipt(state, text):
 # wording stands, so the user is never told to apply by hand while Sidedoor may still submit.
 APPLY_YOURSELF = ("The site needs a sign-in or a human check that Sidedoor can't do. If you want this job, open the "
                   "posting and apply yourself.")
+# Closed by the user's Skip setting (E15.T6): their choice, so nothing about what Sidedoor can't do.
+SKIPPED_TODO = "If you want this job, open the posting and apply yourself."
+# A closed posting takes no application, so that card never says to apply by hand (owner, 2026-11-12).
+POSTING_CLOSED_TODO = "The posting has closed, so there is nothing for you to do."
 
 
 def _awaits_answers(row, owner_hold):
@@ -417,7 +457,11 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
     """(text, href, label): what happens next, or what the user does, in plain words. Only a sign-in or
     human check that made Sidedoor stop ever tells the user to apply by hand (owner 2026-10-24)."""
     state, code = row["state"], code_root(row["blocker"])
-    if state in ("EXHAUSTED", "ABANDONED") and code == "ACCESS_BLOCKED_3_TIMES":
+    if state in ("EXHAUSTED", "ABANDONED") and code == "ACCESS_POSTING_CLOSED":
+        return (POSTING_CLOSED_TODO, None, None)
+    if state in ("EXHAUSTED", "ABANDONED") and code == "ACCESS_SKIPPED_BY_SETTING":
+        return (SKIPPED_TODO, None, None)
+    if state in ("EXHAUSTED", "ABANDONED") and (code == "ACCESS_BLOCKED_3_TIMES" or code in ACCESS_CLOSE_CODES):
         return (APPLY_YOURSELF, None, None)
     next_at = overview._utc(row["next_at"]) if row["next_at"] else None
     retry = "Will try again automatically" + (" " + fmt(next_at) if next_at else "") + "."
@@ -428,8 +472,11 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
                 "Sidedoor filled this application. It is submitted once you approve it on Approvals.",
                 APPROVE_HREF, APPROVE_LABEL)
     if state == "BLOCKED" and code == "APPLICATION_APPROVED":
-        return ("You approved this application. Sidedoor submits it on its next applications run.", None, None)
+        return ("You approved this application. Sidedoor submits it on its next round.", None, None)
     if owner_hold:
+        if code == overview.PARKED_CODE:
+            # Never retried on its own (owner, 2026-11-14): the reason line says why; Try again is beside it.
+            return (PARKED_TODO, None, None)
         if code == "SUBMISSION_OUTCOME_UNKNOWN":
             return ("Check your applicant account or confirmation email at %s to see whether it went through. "
                     "Sidedoor will not submit it again on its own." % company, None, None)
@@ -444,7 +491,7 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
         if code == "UNKNOWN_REQUIRED_ANSWERS":
             # No open question: the owner answered (or a card expired and is asked again). The job is due
             # again and continues on its own; it must never tell the owner to apply by hand (2026-10-24).
-            return ("Your answers are in. Sidedoor continues this application on its next run, and asks again on "
+            return ("Your answers are in. Sidedoor continues this application on its next round, and asks again on "
                     "Approvals if anything is still open.", None, None)
         if code == "REQUIRED_ELIGIBILITY_ANSWER":
             return ("Check the posting. If you can work there, update your work authorization in Settings.",
@@ -455,6 +502,9 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
             # The hold is the `preapproved_applications` setting being off; no dashboard control sets it.
             return ("Sidedoor's settings do not allow it to submit applications, and there is no switch for this on "
                     "the dashboard yet. Contact support@yoursidedoor.com to turn it on.", None, None)
+        if CODE_WORDS.get(code):
+            # The code's own sentence is the line (owner, 2026-11-14): never the generic one beside it.
+            return (CODE_WORDS[code], None, None)
         return ("Sidedoor is holding this application for the reason above.", None, None)
     if state == "BLOCKED" or state == "RETRY_WAIT":
         return (retry, None, None)
@@ -467,7 +517,7 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
     if state in ("SUBMITTING", "RECONCILE"):
         return ("Sidedoor is checking whether the application went through. Nothing to do.", None, None)
     if state == "QUEUED":
-        return ("Sidedoor reads the posting on its next applications run.", None, None)
+        return ("Sidedoor reads the posting on its next round.", None, None)
     return (None, None, None)
 
 
@@ -478,7 +528,9 @@ def _route_of(row, key="route"):
     return value if isinstance(value, str) else None
 
 
-def job_view(row, owner_keys, asked, live_reading, fmt):
+def job_view(row, owner_keys, asked, live_reading, fmt, waits=None):
+    """`waits`: the jobs waiting on a sign-in or a human check with their words (`access_cards.by_job`);
+    such a job needs the user, is never retried on its own and has no next attempt (E15.T2)."""
     payload = overview._json(row["payload"]) or {}
     company = _text(payload.get("company")) or _text(row["employer"]) or "Unknown company"
     role = _text(payload.get("role")) or _text(payload.get("title")) or "Role not recorded"
@@ -489,8 +541,21 @@ def job_view(row, owner_keys, asked, live_reading, fmt):
     asked_here = row["job_key"] in asked
     answers = _awaits_answers(row, owner_hold)
     answered = answers and not asked_here
-    needs = overview.blocked_on_owner(owner_hold, asked_here, code)
-    if owner_hold and overview.approval_hold(code):
+    wait = (waits or {}).get(row["job_key"]) if state == "BLOCKED" and not owner_hold else None
+    unsure = bool(wait and wait.get("uncertain"))   # may already be with the employer: not waiting on the user (F2)
+    # Only waiting behind another application's card (owner, 2026-11-14): the user acts on that card, not on
+    # this job, so it is In progress with "Waiting" and has no button of its own.
+    behind = bool(wait and wait.get("behind")) and not unsure
+    needs = overview.blocked_on_owner(owner_hold, asked_here, code) or (bool(wait) and not unsure and not behind)
+    if unsure:
+        words, tone = STATE_WORDS["RECONCILE"], STATE_TONES["RECONCILE"]
+    elif behind:
+        words, tone = PROFILE_HELD_STATE, "info"
+    elif wait:
+        words, tone = "Blocked, needs you", "error"
+    elif state == "BLOCKED" and "profile_held" in row.keys() and row["profile_held"]:
+        words, tone = PROFILE_HELD_STATE, "info"   # nothing is asked of the user for this job
+    elif owner_hold and overview.approval_hold(code):
         words, tone = HELD_WORDS, "info"   # counted as an application to approve only (owner 2026-10-24)
     elif state == "BLOCKED" and code == "APPLICATION_APPROVED":
         words, tone = APPROVED_WORDS, "info"
@@ -505,21 +570,55 @@ def job_view(row, owner_keys, asked, live_reading, fmt):
     elif state == "BLOCKED" or (state in ("SUBMITTING", "RECONCILE") and "never_armed" in row.keys() and row["never_armed"]):
         # A submit that stopped before arming sent nothing: it waits to retry, not for a confirmation.
         words, tone = "Waiting to retry", "warning"
+    elif state == "ABANDONED" and code_root(code) == NOT_DECIDED_CODE:
+        words, tone = NOT_DECIDED_STATE, "muted"
     else:
         words, tone = STATE_WORDS.get(state, "In progress"), STATE_TONES.get(state, "muted")
     todo, href, label = _what_to_do(row, company, route, owner_hold, asked_here, fmt)
     problem = None
-    if overview.approval_hold(code) or code == "APPLICATION_APPROVED":
+    confirming = (waits or {}).get(row["job_key"]) if state == "RECONCILE" else None
+    if wait:
+        # One true line (E15.T2): what is needed and when it closes, or that it waits behind another
+        # application's sign-in. Never "will try again", and no problem line the job never met.
+        todo, href, label = wait["words"], wait["href"], wait["label"]
+        if behind:
+            href = label = None
+    elif confirming and confirming.get("confirming"):
+        # Its confirming read waits on the user's step (confirm_read): the card's own sentences, never
+        # "Nothing to do." The job stays where it is: still being confirmed, not one of the waiting jobs.
+        todo, href, label = confirming["words"], confirming["href"], confirming["label"]
+    elif state == "RETRY_WAIT" and not code and "host_released" in row.keys() and row["host_released"]:
+        # Released from a host hold, or by the user's own step (F7): no problem occurred, and the to-do
+        # line says what happens, never "Will try again automatically".
+        import access_outcomes
+        todo, href, label = access_outcomes.HOST_RELEASED_WORDS, None, None
+    elif state == "BLOCKED" and "profile_held" in row.keys() and row["profile_held"]:
+        # No problem occurred and nothing is retried on a clock: the one true line for how it is held.
+        todo, href, label = PROFILE_HELD_WORDS[row["profile_held"]], None, None
+    elif state == "RETRY_WAIT" and not code and "next_action" in row.keys() and row["next_action"] in ACCESS_STEP_WORDS:
+        # On its way to Sidedoor's own sign-in step, or waiting for the site's email (E15.T8): nothing went
+        # wrong, and the line is the sentence `access_step` stored with the job, never "Will try again".
+        todo, href, label = row["next_action"], None, None
+    elif state == "BLOCKED" and "passkey_wait" in row.keys() and row["passkey_wait"]:
+        # A site that signs in only with a passkey (E15.T6, owner's pick R8 b): Sidedoor does not try
+        # again on its own, so the line says the owner's words, never "Will try again automatically".
+        import access_outcomes
+        todo, href, label = access_outcomes.WAIT_REASONS["PASSKEY"], None, None
+        problem = code_words(code, route)
+    elif overview.approval_hold(code) or code == "APPLICATION_APPROVED":
         pass   # nothing went wrong: the to-do line says what happens
     elif words == STATE_WORDS["RECONCILE"] and code_root(code) in NO_REASON_WHILE_CONFIRMING:
         pass   # L3: "Waiting for confirmation" says it all; no reason line, never the raw code
     elif state in ("BLOCKED", "RETRY_WAIT", "WAITING_BROWSER") or (state in ("SUBMITTING", "RECONCILE") and code):
         problem = code_words(code, "OWNER" if owner_hold else route)
+    if problem == todo:
+        problem = None   # one sentence, once (owner, 2026-11-14)
     closed = None
     if state in CLOSED_WORDS:
         closed = CODE_WORDS.get(code_root(code)) or CLOSED_WORDS[state]
-    next_at = overview._utc(row["next_at"]) if row["next_at"] and state not in FINAL else None
+    next_at = overview._utc(row["next_at"]) if row["next_at"] and state not in FINAL and not wait else None
     receipt = _receipt(state, row["receipt"])
+    import access_cards
     # `needs_you` and `attention` (shown in red) are the one needs-you rule (`overview.blocked_on_owner`):
     # never for a job with a question on Approvals, or whose answers are in.
     return {"attention": needs, "group": group(state, needs),
@@ -528,7 +627,25 @@ def job_view(row, owner_keys, asked, live_reading, fmt):
             "url": _safe_url(payload.get("url")), "state": words, "reading": reading, "tone": tone, "needs_you": needs,
             "problem": problem, "todo": todo, "todo_href": href, "todo_label": label, "closed": closed,
             "updated": overview._utc(row["updated_at"]), "next_at": next_at,
-            "receipt": receipt, "attempts": []}
+            "receipt": receipt, "attempts": [],
+            # Never offered while the job's submission may have reached the employer (`unsure`; the lists
+            # also ask `applications.uncertain_submission`, `_no_try_again_when_uncertain`).
+            "try_again": access_cards.TRY_AGAIN_LABEL if not unsure and (
+                access_cards.can_try_again(state, code)
+                or access_cards.access_outcomes.recovery_try_again(state, code)) else None}
+
+
+def _no_try_again_when_uncertain(reader, view):
+    """Try again is never shown on a job whose submission may have reached the employer (hard line: the
+    button would be refused, `access_outcomes.try_again`). Asked only for a row that would show it."""
+    if view.get("try_again") and reader.database is not None:
+        import applications
+        try:
+            if applications.uncertain_submission(reader.database, view["key"]):
+                view["try_again"] = None
+        except Exception:
+            view["try_again"] = None
+    return view
 
 
 def attempts(reader, key, full=False, current_resume=None):
@@ -578,6 +695,11 @@ def history(reader, key):
     # Where each answering failure has its own "Try N failed" line, the retry hold's "Held: Some form
     # answers still need to be written" repeats it (and reads as pending work once the job closed).
     per_try = any(row["event"] == "ANSWERING_FAILED" for row in rows)
+    # A hold written because another application on the site waits for a sign-in: this job never met
+    # one, so its line says that (E15.T2). The wait's own record names it, written at the same instant.
+    import access_outcomes
+    behind = {row["at"] for row in rows if row["event"] == access_outcomes.RECORDED_EVENT
+              and str((overview._json(row["detail"]) or {}).get("source") or "").startswith("host:")}
     for row in rows:
         detail = overview._json(row["detail"]) or {}
         event = str(row["event"] or "")
@@ -587,6 +709,9 @@ def history(reader, key):
             code = detail.get("code")
             route = detail.get("route") if isinstance(detail.get("route"), str) and detail["route"] in ROUTE_WORDS else None
             text = STATE_EVENTS[event] + (": " + code_words(code, route) if code else "")
+            if event == "BLOCKED" and code in access_outcomes.WALL_REASONS and row["at"] in behind:
+                import access_cards   # a past hold: the sentence that is true whatever the card offered (D7)
+                text = STATE_EVENTS[event] + ": " + access_cards.HELD_NO_STEP_WORDS
         elif event == "ELIGIBILITY_CHECKED":
             decision = detail.get("decision")
             text = "Read the posting: " + (ELIGIBLE_WORDS if decision == "ELIGIBLE" else code_words(decision))
@@ -653,6 +778,9 @@ def closing_reason(reader, key, state):
 # host's recorded note in plain words. Never a raw code or a path.
 HOST_INSTRUCTION = re.compile(r"\s*\b(Retain|Continue the existing|Inspect failure|Resolve the failure)\b.*$", re.S)
 RAW_TEXT = re.compile(r"\b[A-Z]+_[A-Z0-9_]+\b|/|\\")
+# Closed after waiting on the user (E15.T1): the closed card keeps the apply-by-hand line.
+ACCESS_CLOSE_CODES = frozenset({"ACCESS_ABANDONED_BY_YOU", "ACCESS_WAITED_7_DAYS", "ACCESS_SKIPPED_BY_SETTING",
+                                "ACCESS_POSTING_CLOSED"})
 ACCESS_NOUNS = {"AUTHENTICATION_REQUIRED": "a sign-in", "MFA_REQUIRED": "a sign-in code", "CAPTCHA_REQUIRED": "a human check"}
 GEOGRAPHY_POINTER = "/facts/hiring_geography_includes_candidate"
 
@@ -705,6 +833,8 @@ def closed_reason(reader, key, state, code, closing=None):
     import applications
     if state not in CLOSED_STATES:
         return None
+    if code_root(code) == NOT_DECIDED_CODE:
+        return None   # the headline is the whole of it: its recorded "reason" is a code, never the AI's words
     if closing and _text(closing.get("reason")):
         return _sentence(closing["reason"])        # the AI's own words (same-posting match, recovery)
     root = code_root(code)
@@ -733,6 +863,8 @@ def closed_reason(reader, key, state, code, closing=None):
             nouns = sorted({ACCESS_NOUNS.get(block.get("code"), "a sign-in or a human check") for block in blocks})
             return ("The application site asked for %s each of the %d times Sidedoor tried, so nothing was submitted."
                     % (" or ".join(nouns), len(blocks)))
+    if root in ACCESS_CLOSE_CODES:
+        return None   # the headline already says why and the to-do line says to apply by hand: once each
     if root == applications.UPLOAD_GIVE_UP_CODE:
         detail = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND event='%s' "
                                         "ORDER BY id DESC LIMIT 1" % applications.UPLOAD_GIVE_UP_EVENT, key)) or {}
@@ -849,15 +981,33 @@ def _rows_for(reader, keys):
                        "WHERE request.job_key=application_jobs.job_key AND request.operation='submit' "
                        "AND attempt.state='SUBMITTING' ORDER BY attempt.started_at DESC,request.rowid DESC LIMIT 1)"
                        if reader.has("desktop_requests", "application_attempts") else "NULL")
-        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,receipt,updated_at,%s AS approval,"
-                               "%s AS never_armed FROM application_jobs WHERE job_key IN (%s)"
-                               % (approval, never_armed, ",".join("?" * len(chunk))),
+        # Released from a host hold and its one session not started yet (`access_outcomes.released_pass`).
+        host_released = ("(SELECT wait.outcome IN ('host_released','released') AND NOT EXISTS (SELECT 1 FROM desktop_requests AS request "
+                         "WHERE request.job_key=wait.job_key AND request.created_at>=wait.updated_at AND request.claims>0) "
+                         "FROM application_access_waits AS wait WHERE wait.job_key=application_jobs.job_key "
+                         "ORDER BY wait.id DESC LIMIT 1)"
+                         if reader.has("application_access_waits", "desktop_requests") else "NULL")
+        # The job's own open wait is on a site that signs in only with a passkey (E15.T6).
+        passkey_wait = ("(SELECT 1 FROM application_access_waits AS wait WHERE wait.job_key=application_jobs.job_key "
+                        "AND wait.state='WAITING' AND wait.reason='PASSKEY' AND wait.source NOT LIKE 'host:%' LIMIT 1)"
+                        if reader.has("application_access_waits") else "NULL")
+        # Held behind another job's profile step or open profile questions on its site (E15): 'ASKED' while
+        # the site's questions are open, else 'STEP'.
+        asked = ("EXISTS (SELECT 1 FROM site_profile_asks AS ask JOIN user_decisions AS question ON question.job_key=ask.job_key "
+                 "WHERE ask.site=wait.host AND ask.state='OPEN' AND question.state='PENDING' AND question.field LIKE 'site_profile:%')"
+                 if reader.has("site_profile_asks", "user_decisions") else "0")
+        profile_held = ("(SELECT CASE WHEN %s THEN 'ASKED' ELSE 'STEP' END FROM application_access_waits AS wait "
+                        "WHERE wait.job_key=application_jobs.job_key AND wait.state='WAITING' AND wait.reason='PROFILE_PENDING' LIMIT 1)" % asked
+                        if reader.has("application_access_waits") else "NULL")
+        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,next_action,receipt,updated_at,%s AS approval,"
+                               "%s AS never_armed,%s AS host_released,%s AS passkey_wait,%s AS profile_held FROM application_jobs WHERE job_key IN (%s)"
+                               % (approval, never_armed, host_released, passkey_wait, profile_held, ",".join("?" * len(chunk))),
                                tuple(chunk), "application_jobs"):
             rows[row["job_key"]] = row
     return [rows[key] for key in keys if key in rows]
 
 
-def _grouped(reader, keys, owner, asked):
+def _grouped(reader, keys, owner, asked, waiting=()):
     """The keys under their headings (Needs you, In progress, Submitted, Closed), the given order kept
     inside each, so paging walks the headings in order."""
     found = {}
@@ -867,7 +1017,7 @@ def _grouped(reader, keys, owner, asked):
                                % ",".join("?" * len(chunk)), tuple(chunk), "application_jobs"):
             hold = row["job_key"] in owner
             found[row["job_key"]] = GROUP_RANK[group(row["state"], overview.blocked_on_owner(
-                hold, row["job_key"] in asked, row["blocker"]))]
+                hold, row["job_key"] in asked, row["blocker"]) or row["job_key"] in waiting)]
     keys = sorted(keys, key=lambda key: found.get(key, GROUP_RANK["progress"]))
     # Each heading's number counts the whole filtered list, not just this page (owner 2026-10-24).
     totals = {key: 0 for key, _ in GROUPS}
@@ -877,18 +1027,22 @@ def _grouped(reader, keys, owner, asked):
     return keys, totals
 
 
-def listing(reader, show, page, company, query, now, start, end, fmt):
+def listing(reader, show, page, company, query, now, start, end, fmt, zone=None):
     owner, _ = overview._blocked(reader)
     owner = set(owner)
     asked = {row[0] for row in overview._pending_questions(reader, now)}
-    keys, totals = _grouped(reader, ordered_keys(reader, show, now, start, end, company, query), owner, asked)
+    import access_cards
+    waits = access_cards.by_job(reader, fmt, now, zone)
+    keys, totals = _grouped(reader, ordered_keys(reader, show, now, start, end, company, query), owner, asked,
+                            {key for key, wait in waits.items() if not wait["uncertain"] and not wait.get("confirming")
+                             and not wait.get("behind")})
     pages = max(1, math.ceil(len(keys) / PAGE_SIZE))
     page = min(max(1, page), pages)
     window = keys[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
     live = reading_keys(reader, now)
     jobs = []
     for row in _rows_for(reader, window):
-        view = job_view(row, owner, asked, live, fmt)
+        view = _no_try_again_when_uncertain(reader, job_view(row, owner, asked, live, fmt, waits))
         view["attempts"] = attempts(reader, row["job_key"])
         if row["state"] in ("DUPLICATE", "ABANDONED"):
             view["closing"] = closing_reason(reader, row["job_key"], row["state"])
@@ -899,13 +1053,15 @@ def listing(reader, show, page, company, query, now, start, end, fmt):
     return {"jobs": jobs, "groups": [item for item in groups if item["jobs"]], "total": len(keys), "page": page, "pages": pages}
 
 
-def detail(reader, key, now, fmt, current_resume):
+def detail(reader, key, now, fmt, current_resume, zone=None):
     rows = _rows_for(reader, [key])
     if not rows:
         return None
     owner, _ = overview._blocked(reader)
     asked = {row[0] for row in overview._pending_questions(reader, now)}
-    view = job_view(rows[0], set(owner), asked, reading_keys(reader, now), fmt)
+    import access_cards
+    view = _no_try_again_when_uncertain(reader, job_view(rows[0], set(owner), asked, reading_keys(reader, now), fmt,
+                                                         access_cards.by_job(reader, fmt, now, zone)))
     view["attempts"] = attempts(reader, key, True, current_resume)
     view["history"] = history(reader, key)
     view["verdict"] = verdict(reader, key)
@@ -947,10 +1103,10 @@ def gather(database, config, home=None, show="all", page=1, company=None, query=
              "unreadable": reader.broken, "unavailable": UNAVAILABLE, "job": None, "detail_missing": False}
     found["counts"] = overview.section(reader, counts, now, start, end)
     if job:
-        found["job"] = overview.section(reader, detail, str(job), now, fmt, current_resume_sha(home))
+        found["job"] = overview.section(reader, detail, str(job), now, fmt, current_resume_sha(home), zone)
         found["detail_missing"] = found["job"] is None
         return found
-    found["list"] = overview.section(reader, listing, show, _int(page), company, query, now, start, end, fmt)
+    found["list"] = overview.section(reader, listing, show, _int(page), company, query, now, start, end, fmt, zone)
     if found["list"] != UNAVAILABLE and company:
         names = [item["company"] for item in found["list"]["jobs"]]
         found["company_name"] = names[0] if names else company

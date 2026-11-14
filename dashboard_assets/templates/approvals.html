@@ -17,8 +17,10 @@
 <p class="note note-{{ top.tone }}" role="status">{{ top.text }}</p>
 {% if top.kept %}<label class="approvals-kept">Your text (not saved; copy it if you need it)<textarea readonly rows="4">{{ top.kept }}</textarea></label>{% endif %}
 {% endif %}
+{% if v.chips %}{% include "approvals_labels.html" %}{% endif %}
 
-{% set quiet = not v.messages and not v.unreadable and v.paging.messages.total == 0 %}
+{% if v.shows("messages") %}
+{% set quiet = not v.messages and (not v.unreadable or v.label != "all") and v.paging.messages.total == 0 %}
 <section class="card approvals-section{{ ' approvals-empty' if quiet }}" id="messages" aria-labelledby="messages-title">
   <h2 id="messages-title">Messages waiting</h2>
   {% if not review %}
@@ -27,11 +29,15 @@
   {% elif not v.messages %}
   <p class="muted">Nothing is waiting for you.</p>
   {% endif %}
-  {% if v.unreadable %}<p class="note note-warning">{{ v.unreadable }} waiting message{{ "s" if v.unreadable != 1 }} could not be read, so {{ "they are" if v.unreadable != 1 else "it is" }} not shown. Nothing is sent while {{ "they wait" if v.unreadable != 1 else "it waits" }}.</p>{% endif %}
+  {# The unreadable count is of every waiting message, so it shows under All only (E14 review 4). #}
+  {% if v.unreadable and v.label == "all" %}<p class="note note-warning">{{ v.unreadable }} waiting message{{ "s" if v.unreadable != 1 }} could not be read, so {{ "they are" if v.unreadable != 1 else "it is" }} not shown. Nothing is sent while {{ "they wait" if v.unreadable != 1 else "it waits" }}.</p>{% endif %}
+  {% include "approvals_release.html" %}
   {% for m in v.messages %}{% with item = m, f = cards.get(m.dom) %}{% include "approvals_message.html" %}{% endwith %}{% endfor %}
   {{ pager(v, "messages", "messages", "waiting") }}
 </section>
+{% endif %}
 
+{% if v.shows("applications") %}
 {% set held = v.applications or [] %}
 <section class="card approvals-section{{ ' approvals-empty' if not held }}" id="applications" aria-labelledby="applications-title">
   <h2 id="applications-title">Applications waiting</h2>
@@ -44,8 +50,13 @@
   {% for a in held %}{% with item = a, f = cards.get(a.dom) %}{% include "approvals_application.html" %}{% endwith %}{% endfor %}
   {{ pager(v, "applications", "applications", "waiting") }}
 </section>
+{% endif %}
 
-{% if v.refused or v.paging.refused.total %}
+{# E15.T2: applications waiting on a sign-in or a human check (access_cards.view); its own template,
+   so an action on a card redraws this section alone. Under All and under its own chip (E14: "sign-ins"). #}
+{% if v.shows("sign-ins") %}{% with s = v.sign_ins, f = flash.access, query = v.query %}{% include "access_section.html" %}{% endwith %}{% endif %}
+
+{% if v.shows("refused") and (v.refused or v.paging.refused.total) %}
 <section class="card approvals-section" id="refused" aria-labelledby="refused-title">
   <h2 id="refused-title">Not sent yet.</h2>
   <p class="muted">You approved these. Sidedoor hasn't sent them yet.</p>
@@ -54,20 +65,25 @@
 </section>
 {% endif %}
 
+{% if v.shows("questions") %}
 <section class="card approvals-section{{ ' approvals-empty' if not v.questions }}" id="questions" aria-labelledby="questions-title">
   <h2 id="questions-title">Questions for you</h2>
   {% if not v.questions %}<p class="muted">No questions right now.</p>{% endif %}
   {% for q in v.questions %}{% with item = q, f = cards.get(q.dom) %}{% include "approvals_question.html" %}{% endwith %}{% endfor %}
   {{ pager(v, "questions", "questions") }}
 </section>
+{% endif %}
 
+{% if v.shows("notes") %}
 <section class="card approvals-section{{ ' approvals-empty' if not v.notes }}" id="notes" aria-labelledby="notes-title">
   <h2 id="notes-title">Notes for you</h2>
   {% if not v.notes %}<p class="muted">No notes right now.</p>{% endif %}
   {% for n in v.notes %}{% with item = n, f = cards.get(n.dom) %}{% include "approvals_note.html" %}{% endwith %}{% endfor %}
   {{ pager(v, "notes", "notes") }}
 </section>
+{% endif %}
 
+{% if v.shows("notices") %}
 <section class="card approvals-section{{ ' approvals-empty' if not v.notices }}" id="notices" aria-labelledby="notices-title">
   <h2 id="notices-title">Recent notices</h2>
   {% if not v.notices %}<p class="muted">No notices yet.</p>{% else %}
@@ -75,6 +91,9 @@
   {% endif %}
   {{ pager(v, "notices", "notices") }}
 </section>
+{% endif %}
 </div>
 <script src="{{ asset_url('/static/approvals.js') }}" defer></script>
+{# E15 join: a card's "Sign in" / "Do the human check" embeds the live view, which this script runs. #}
+<script src="{{ asset_url('/static/live_view.js') }}" defer></script>
 {% endblock %}

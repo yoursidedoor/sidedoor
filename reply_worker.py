@@ -14,11 +14,13 @@ import traceback
 import os
 import re
 import signal
+import sqlite3
 from pathlib import Path
 import tempfile
 import time
 
 import engines
+import log
 import pipeline_routing as routing
 import portable
 import champion_composition
@@ -30,6 +32,7 @@ import text_model
 import workflow_tasks
 
 
+LOG = log.get(__name__)
 VERSION = "reply-decision-v2"
 REASONS = (
     "UNSUPPORTED_CONTEXTUAL_CLASSIFICATION_EXECUTOR:literal-whole-message-required",
@@ -195,6 +198,57 @@ def _defer_capacity(database, task_id, config, now, timeout, budget):
                 "next_action": next_action, "next_at": next_at, "attempts": task["attempts"], "deadline": task["deadline"]}
 
 
+def recipient_contact_type(database, profiles):
+    """Research's label for who this person is, in the current vocabulary; "UNKNOWN" when none is on file.
+
+    E17.T2: context for the follow-up and reply writers only, never a gate. The label lives on the
+    person's research draft (rw_drafts payload, person_evidence.contact_type.value), the record the
+    first-contact packet reads (outreach_agent.composition_packet). A person research never
+    labelled (a cold inbound, an imported contact, a draft with no such record) is "UNKNOWN", and
+    so is anything that cannot be read: nothing here may hold, fail or re-route a message.
+    """
+    research = routing.research
+    identities = []
+    try:
+        tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"rw_drafts", "rw_aliases"} <= tables:
+            return "UNKNOWN"
+        for profile in profiles:
+            if not isinstance(profile, str) or not profile.strip():
+                continue
+            try:
+                # rw_drafts is keyed by research's spelling of a profile, through its aliases.
+                key = research.profile_key(profile if "://" in profile else "https://" + profile)
+            except ValueError:
+                continue
+            for identity in (key, research.canonical(database, "contact", key)):
+                if identity not in identities:
+                    identities.append(identity)
+        if not identities:
+            return "UNKNOWN"
+        row = database.execute("SELECT payload FROM rw_drafts WHERE identity IN (" + ",".join("?" for unused in identities)
+                               + ") ORDER BY version DESC LIMIT 1", identities).fetchone()
+        evidence = json.loads(row[0]).get("person_evidence") if row else None
+        record = evidence.get("contact_type") if isinstance(evidence, dict) else None
+        value = research.contact_type(record.get("value")) if isinstance(record, dict) else None
+    except (ValueError, TypeError, AttributeError, sqlite3.Error) as error:
+        # Still "UNKNOWN", never a gate; but a record that could not be read is said once, so a
+        # broken draft or database is not mistaken for a person research never labelled (who logs
+        # nothing). The person is a short hash of the research key: never a name or a profile.
+        LOG.warning("contact type not read for person %s (%s); treated as UNKNOWN",
+                    sha(identities[0])[:12] if identities else "unknown", type(error).__name__)
+        return "UNKNOWN"
+    # A record of the wrong shape is unreadable too, not "never labelled": person_evidence or its
+    # contact_type that is not an object, or a value that is not text. An absent one logs nothing.
+    for name, found, kind in (("person_evidence", evidence, dict), ("contact_type", record, dict),
+                              ("contact_type value", value, str)):
+        if found is not None and not isinstance(found, kind):
+            LOG.warning("contact type not read for person %s (%s); treated as UNKNOWN",
+                        sha(identities[0])[:12], "%s is %s" % (name, type(found).__name__))
+            return "UNKNOWN"
+    return value.strip() if value and value.strip() else "UNKNOWN"
+
+
 def _source(database, task, config, now):
     current_task = routing.one(database, "SELECT * FROM workflow_tasks WHERE task_id=?", (task["task_id"],))
     if not current_task or any(current_task[field] != task[field] for field in
@@ -315,6 +369,14 @@ def _source(database, task, config, now):
         # resolved or checked (owner, 2026-09-27).
         request["source_span_resolution"] = "EXACT_UNIQUE_QUOTE"
     request["decision_time"] = bound.get("review_at") or stored["first_seen_at"]
+    # Who this person is to the role (E17.T2), named as the first-contact packet names it
+    # (recipient.contact_type). Context for the writer, never a gate. It is read once: a task with
+    # a saved input keeps what that input carried (or its absence, for an input saved before this
+    # field existed), so the packet of an in-flight read never changes under it.
+    if previous is None:
+        request["recipient"] = {"contact_type": recipient_contact_type(database, people)}
+    elif "recipient" in previous:
+        request["recipient"] = previous["recipient"]
     # The judge's objection to the reply it rejected last time, so this turn fixes that exact
     # problem rather than writing the same thing again (owner, 2026-09-23: "do replies and
     # followups too"). None on a first attempt. Same shape as answering_agent's repair_feedback.
@@ -616,7 +678,11 @@ def _validate(raw, request, message, source_holds):
     fields = {"output_version", "source_sha256", "label", "literal_quote", "quote_span", "role_reference",
               "reason", "unknown_factual_requirements", "reply_proposal", "next_action", "review_at"}
     if (not isinstance(output, dict) or not fields <= set(output)
-            or set(output) - fields - {"champion_handoff", "speaker_context"}):
+            or set(output) - fields - {"champion_handoff", "speaker_context", "asks_to_stop_contact"}):
+        raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID")
+    # The model's own judgment that the person asks for contact to stop (owner, 2026-11-12). A boolean
+    # or absent (decisions saved before the field existed); pipeline_routing.apply_reply_decision acts on it.
+    if type(output.get("asks_to_stop_contact", False)) is not bool:
         raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID")
     if "speaker_context" in output and (not isinstance(output["speaker_context"], str)
             or output["speaker_context"] not in {"DIRECT_SPEAKER", "QUOTED_OR_FORWARDED", "UNKNOWN"}):
@@ -1344,6 +1410,12 @@ def cycle(root, database, config, now=None):
             feedback = size_feedback(database, task["task_id"])
             raw = execute_text(dict(config, _reply_tools=tools), feedback + "\n\n" + prompt if feedback else prompt, schema, timeout)
             handoff = _validate(raw, request, message, holds)
+            # A NEW decision must answer whether the person asks for contact to stop (owner, 2026-11-12).
+            # The schema is only enforced on the forced final turn, so a missing answer is held and retried
+            # here: no reply can go out on a decision that did not answer it. _validate stays lenient for
+            # saved decisions from before the field existed.
+            if type(handoff["classification"].get("asks_to_stop_contact")) is not bool:
+                raise Held("CLASSIFICATION_STOP_CONTACT_ANSWER_REQUIRED", retry=True)
             checked, unused_message, unused_holds = _source(database, task, config, current())
             if routing.encoded(checked) != routing.encoded(request):
                 raise Held("CLASSIFICATION_SOURCE_CHANGED")

@@ -7,9 +7,13 @@
   {% if message and message_at == at %}<p class="note note-info start-result" role="status">{{ message }}</p>{% endif %}
 {% endmacro %}
 {% macro run_line(when, last, next) %}
-  {# One line: "Last run 03:04 (finished) · next 04:00" (owner, 2026-10-24). #}
-  <p class="overview-run">{% if last and last.at and when(last.at) %}Last run {{ when(last.at) }} <span class="muted">({{ last.words }})</span>{% else %}Not run yet{% endif %}
-    <span class="muted" aria-hidden="true">·</span> {% if next.at %}next {{ when(next.at) }}{% else %}next: {{ next.label }}{% endif %}</p>
+  {# One sentence per state (owner, 2026-11-14): "Last run 03:04 (finished), next run 04:00." The second half is
+     the scheduler's own answer (`overview_page.next_run`, `research`), worded here. #}
+  {% set clauses = {"Running now": "running now", "Now": "starts now", "As soon as Sidedoor runs": "starts when Sidedoor is running",
+                    "Once Sidedoor finds Codex": "starts when Codex is found", "Off": "turned off", "Turned off": "turned off",
+                    "Not running": "and Sidedoor is not running", "Waiting to move your data": "waiting to move your data",
+                    "Paused": "paused", "after today's research": "next run after today's research"} %}
+  <p class="overview-run">{% if last and last.at and when(last.at) %}Last run {{ when(last.at) }} <span class="muted">({{ last.words }})</span>{% else %}Not run yet{% endif %}, {% if next.at %}next run {{ when(next.at) }}{% else %}{{ clauses.get(next.label, next.label) }}{% endif %}.</p>
 {% endmacro %}
 {% macro run_rows(v, job) %}
   {# Outreach / Applications runs, as the Research card shows them (overview_page.job_runs). #}
@@ -137,32 +141,7 @@
     </div>
   </section>
 
-  {# One "Needs you" card (owner, 2026-10-24): each kind of thing waiting on the user, with its own way
-     there. The counts are the ones those pages total: Approvals' messages, applications waiting, questions and notes, and
-     Applications' "Blocked, needs you" filter. A zero row is not shown; all zero says "Nothing needs you right now.". #}
-  <section class="card overview-needs" aria-labelledby="needs-title">
-    <h2 id="needs-title">Needs you</h2>
-    {% if v.needs == na %}
-    <p class="muted">Not available</p>
-    {% else %}
-    {% set rows = (("questions", "question to answer", "questions to answer", "/approvals#questions", "Answer"),
-                   ("messages", "message to approve", "messages to approve", "/approvals#messages", "Review"),
-                   ("applications_held", "application to approve", "applications to approve", "/approvals#applications", "Review"),
-                   ("couldnt_send", "message not sent yet", "messages not sent yet", "/approvals#refused", "Review"),
-                   ("notes", "note for you", "notes for you", "/approvals#notes", "Read"),
-                   ("applications", "application blocked on you", "applications blocked on you", "/applications?show=needs_you", "Open")) %}
-    <ul class="overview-needs-list">
-      {% for key, one, many, href, label in rows %}{% set count = v.needs[key] %}{% if count %}
-      <li class="overview-needs-row">
-        <span class="overview-number">{{ count }}</span>
-        <span class="overview-needs-what">{{ one if count == 1 else many }}</span>
-        <a class="button overview-needs-go" href="{{ href }}">{{ label }}</a>
-      </li>
-      {% endif %}{% endfor %}
-    </ul>
-    {% if not (v.needs.questions or v.needs.messages or v.needs.couldnt_send or v.needs.notes or v.needs.applications or v.needs.applications_held) %}<p class="muted">Nothing needs you right now.</p>{% endif %}
-    {% endif %}
-  </section>
+  {% with needs = v.needs, rows = v.needs_rows, sign_ins = v.sign_ins, na = na, f = needs_flash %}{% include "overview_needs.html" %}{% endwith %}
 
   <section class="card overview-now" aria-labelledby="now-title">
     <h2 id="now-title">Right now <span class="muted overview-since">applications</span></h2>
@@ -194,4 +173,6 @@
 </div>
 {% endif %}
 </div>
+{# E15 join: a Needs you card's "Sign in" / "Do the human check" embeds the live view, which this script runs. #}
+<script src="{{ asset_url('/static/live_view.js') }}" defer></script>
 {% endblock %}

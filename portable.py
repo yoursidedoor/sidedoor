@@ -483,6 +483,309 @@ def wait_profile_free(path, wait_seconds=5.0, poll_seconds=0.1):
 
 
 # ---------------------------------------------------------------------------------------------
+# What this Windows machine and its Chrome are (E15.T5b: the hidden Chrome reports what the same Chrome
+# reports in a window). Each reader answers None when the value cannot be read: never a made-up one.
+
+PE_AMD64, PE_ARM64 = 0x8664, 0xAA64
+VERSION_SIGNATURE = 0xFEEF04BD
+ENUM_CURRENT_SETTINGS = 0xFFFFFFFF
+SM_CXSCREEN = 0
+MONITOR_DEFAULTTOPRIMARY = 1
+MDT_EFFECTIVE_DPI = 0
+CONTRACTS_KEY = r"SOFTWARE\Microsoft\WindowsRuntime\WellKnownContracts"
+CONTRACT_NAME = "Windows.Foundation.UniversalApiContract"
+
+
+def _fixed_file_info():
+    import ctypes
+
+    class FixedFileInfo(ctypes.Structure):   # VS_FIXEDFILEINFO
+        _fields_ = [(name, ctypes.c_uint32) for name in (
+            "dwSignature", "dwStrucVersion", "dwFileVersionMS", "dwFileVersionLS", "dwProductVersionMS",
+            "dwProductVersionLS", "dwFileFlagsMask", "dwFileFlags", "dwFileOS", "dwFileType", "dwFileSubtype",
+            "dwFileDateMS", "dwFileDateLS")]
+    return FixedFileInfo
+
+
+def _devmode():
+    import ctypes
+
+    class DevMode(ctypes.Structure):   # DEVMODEW, the display layout of its union
+        _fields_ = [("dmDeviceName", ctypes.c_wchar * 32), ("dmSpecVersion", ctypes.c_uint16),
+                    ("dmDriverVersion", ctypes.c_uint16), ("dmSize", ctypes.c_uint16),
+                    ("dmDriverExtra", ctypes.c_uint16), ("dmFields", ctypes.c_uint32),
+                    ("dmPositionX", ctypes.c_int32), ("dmPositionY", ctypes.c_int32),
+                    ("dmDisplayOrientation", ctypes.c_uint32), ("dmDisplayFixedOutput", ctypes.c_uint32),
+                    ("dmColor", ctypes.c_int16), ("dmDuplex", ctypes.c_int16), ("dmYResolution", ctypes.c_int16),
+                    ("dmTTOption", ctypes.c_int16), ("dmCollate", ctypes.c_int16),
+                    ("dmFormName", ctypes.c_wchar * 32), ("dmLogPixels", ctypes.c_uint16),
+                    ("dmBitsPerPel", ctypes.c_uint32), ("dmPelsWidth", ctypes.c_uint32),
+                    ("dmPelsHeight", ctypes.c_uint32), ("dmDisplayFlags", ctypes.c_uint32),
+                    ("dmDisplayFrequency", ctypes.c_uint32), ("dmICMMethod", ctypes.c_uint32),
+                    ("dmICMIntent", ctypes.c_uint32), ("dmMediaType", ctypes.c_uint32),
+                    ("dmDitherType", ctypes.c_uint32), ("dmReserved1", ctypes.c_uint32),
+                    ("dmReserved2", ctypes.c_uint32), ("dmPanningWidth", ctypes.c_uint32),
+                    ("dmPanningHeight", ctypes.c_uint32)]
+    return DevMode
+
+
+def _version_api():
+    import ctypes
+    api = ctypes.WinDLL("version", use_last_error=True)
+    api.GetFileVersionInfoSizeW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p]
+    api.GetFileVersionInfoSizeW.restype = ctypes.c_uint32
+    api.GetFileVersionInfoW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    api.GetFileVersionInfoW.restype = ctypes.c_int
+    api.VerQueryValueW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p]
+    api.VerQueryValueW.restype = ctypes.c_int
+    return api
+
+
+def file_version(path, api=None):
+    """The version in a Windows program file's own version resource ("157.0.8103.51"), or None. For
+    chrome.exe this is the version of the Chrome that file starts; Chrome is never started for it."""
+    import ctypes
+    try:
+        if api is None:
+            if not WINDOWS:
+                return None
+            api = _version_api()
+        size = api.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        data = ctypes.create_string_buffer(size)
+        if not api.GetFileVersionInfoW(str(path), 0, size, data):
+            return None
+        value, length = ctypes.c_void_p(), ctypes.c_uint32()
+        structure = _fixed_file_info()
+        if not api.VerQueryValueW(data, "\\", ctypes.byref(value), ctypes.byref(length)) or not value.value \
+                or length.value < ctypes.sizeof(structure):
+            return None
+        info = structure.from_address(value.value)
+        if info.dwSignature != VERSION_SIGNATURE:
+            return None
+        return "%d.%d.%d.%d" % (info.dwFileVersionMS >> 16, info.dwFileVersionMS & 0xFFFF,
+                                info.dwFileVersionLS >> 16, info.dwFileVersionLS & 0xFFFF)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def pe_machine(path):
+    """The machine a Windows program file was built for (its PE header: PE_AMD64, PE_ARM64, ...), or None."""
+    try:
+        with open(path, "rb") as stream:
+            head = stream.read(64)
+            if len(head) < 64 or head[:2] != b"MZ":
+                return None
+            stream.seek(int.from_bytes(head[60:64], "little"))
+            header = stream.read(6)
+    except OSError:
+        return None
+    if len(header) < 6 or header[:4] != b"PE\0\0":
+        return None
+    return int.from_bytes(header[4:6], "little")
+
+
+class _MachineApi:
+    def __init__(self):
+        import ctypes
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        self.kernel32.IsWow64Process2.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        self.kernel32.IsWow64Process2.restype = ctypes.c_int
+
+    def GetCurrentProcess(self):
+        return self.kernel32.GetCurrentProcess()
+
+    def IsWow64Process2(self, process, own, native):
+        return self.kernel32.IsWow64Process2(process, own, native)
+
+
+def native_machine(api=None):
+    """The machine this Windows itself runs on (IsWow64Process2's native machine: PE_AMD64, PE_ARM64, ...),
+    whatever this process or Chrome was built for (an x64 program on Windows-on-ARM still reads PE_ARM64),
+    or None (Windows before 10 1709 has no such call)."""
+    import ctypes
+    try:
+        if api is None:
+            if not WINDOWS:
+                return None
+            api = _MachineApi()
+        own, native = ctypes.c_uint16(), ctypes.c_uint16()
+        if not api.IsWow64Process2(api.GetCurrentProcess(), ctypes.byref(own), ctypes.byref(native)):
+            return None
+        return native.value or None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _read_contract():
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, CONTRACTS_KEY, 0,
+                        winreg.KEY_QUERY_VALUE | winreg.KEY_WOW64_64KEY) as key:
+        return winreg.QueryValueEx(key, CONTRACT_NAME)[0]
+
+
+def api_contract_version(read=None):
+    """(major, minor) of this Windows' UniversalApiContract, from the registry value Chrome itself reads for
+    its platform version (HKLM CONTRACTS_KEY, CONTRACT_NAME: a DWORD, major in the high word), or None.
+    Windows 11 24H2 has 19.0; the kernel's "10.0" is never used for this."""
+    try:
+        if read is None:
+            if not WINDOWS:
+                return None
+            read = _read_contract
+        value = read()
+    except (OSError, ImportError, ValueError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value < 2 ** 32 or not value >> 16:
+        return None
+    return value >> 16, value & 0xFFFF
+
+
+class _DisplayApi:
+    def __init__(self):
+        import ctypes
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self.shcore = ctypes.WinDLL("shcore", use_last_error=True)
+        self.user32.EnumDisplaySettingsW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_void_p]
+        self.user32.EnumDisplaySettingsW.restype = ctypes.c_int
+        self.user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+        self.user32.GetSystemMetrics.restype = ctypes.c_int
+        self.user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self.user32.MonitorFromWindow.restype = ctypes.c_void_p
+        self.shcore.GetDpiForMonitor.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+        self.shcore.GetDpiForMonitor.restype = ctypes.c_long
+
+    def EnumDisplaySettingsW(self, device, mode, out):
+        return self.user32.EnumDisplaySettingsW(device, mode, out)
+
+    def GetSystemMetrics(self, index):
+        return self.user32.GetSystemMetrics(index)
+
+    def MonitorFromWindow(self, window, flags):
+        return self.user32.MonitorFromWindow(window, flags)
+
+    def GetDpiForMonitor(self, monitor, kind, x, y):
+        return self.shcore.GetDpiForMonitor(monitor, kind, x, y)
+
+    def SystemParametersInfoW(self, action, parameter, out, flags):
+        self.user32.SystemParametersInfoW.argtypes = [ctypes_module().c_uint32, ctypes_module().c_uint32,
+                                                      ctypes_module().c_void_p, ctypes_module().c_uint32]
+        self.user32.SystemParametersInfoW.restype = ctypes_module().c_int
+        return self.user32.SystemParametersInfoW(action, parameter, out, flags)
+
+
+def ctypes_module():
+    import ctypes
+    return ctypes
+
+
+SPI_GETWORKAREA = 0x0030
+
+
+def _rect():
+    import ctypes
+
+    class Rect(ctypes.Structure):   # RECT
+        _fields_ = [("left", ctypes.c_int32), ("top", ctypes.c_int32), ("right", ctypes.c_int32),
+                    ("bottom", ctypes.c_int32)]
+    return Rect
+
+
+def work_area(api=None):
+    """(left, top, width, height) of the primary display's work area (the screen less the taskbar) in the
+    CSS pixels `primary_display` reports, or None. SystemParametersInfoW(SPI_GETWORKAREA) answers in the
+    same units as GetSystemMetrics' width for this process, so both are scaled by the same factor."""
+    import ctypes
+    import math
+    try:
+        if api is None:
+            if not WINDOWS:
+                return None
+            api = _DisplayApi()
+        display = primary_display(api)
+        told = int(api.GetSystemMetrics(SM_CXSCREEN))
+        rect = _rect()()
+        if not display or told <= 0 or not api.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            return None
+        factor = display[0] / told
+        left, top = math.ceil(rect.left * factor - 1e-9), math.ceil(rect.top * factor - 1e-9)
+        right, bottom = math.floor(rect.right * factor + 1e-9), math.floor(rect.bottom * factor + 1e-9)
+        if left < 0 or top < 0 or right <= left or bottom <= top or right > display[0] or bottom > display[1]:
+            return None
+        return left, top, right - left, bottom - top
+    except (OSError, AttributeError, ValueError, ZeroDivisionError):
+        return None
+
+
+APP_PATHS_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+
+
+def _read_app_path(name):
+    import winreg
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(root, APP_PATHS_KEY + "\\" + name) as key:
+                value = winreg.QueryValueEx(key, None)[0]
+            if isinstance(value, str) and value.strip():
+                return value.strip().strip('"')
+        except OSError:
+            continue
+    return None
+
+
+def app_path(name, read=None):
+    """Windows: where program `name` ("chrome.exe") is installed, as its installer registered it (App Paths,
+    the user's then the machine's), or None. Needs no environment variable."""
+    try:
+        if read is None:
+            if not WINDOWS:
+                return None
+            read = _read_app_path
+        value = read(name)
+    except (OSError, ImportError, ValueError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def primary_display(api=None):
+    """(width, height, scale) of the primary display as a Chrome window on it reports them: the size in
+    CSS pixels (the real pixels over the scale) and the display scale (1.25 for 125%), or None.
+
+    Real pixels: EnumDisplaySettingsW (never scaled for the calling process). Scale: what this process is
+    told the width is (GetSystemMetrics) and the monitor's DPI as this process sees it (GetDpiForMonitor)
+    differ with the process's DPI awareness, but real / told * dpi / 96 is the display's scale in every
+    awareness mode (unaware: told is already divided by the scale and the DPI reads 96; aware: told is the
+    real width and the DPI is the real one)."""
+    import ctypes
+    import math
+    try:
+        if api is None:
+            if not WINDOWS:
+                return None
+            api = _DisplayApi()
+        mode = _devmode()()
+        mode.dmSize = ctypes.sizeof(mode)
+        if not api.EnumDisplaySettingsW(None, ENUM_CURRENT_SETTINGS, ctypes.byref(mode)):
+            return None
+        width, height = int(mode.dmPelsWidth), int(mode.dmPelsHeight)
+        told = int(api.GetSystemMetrics(SM_CXSCREEN))
+        monitor = api.MonitorFromWindow(None, MONITOR_DEFAULTTOPRIMARY)
+        x, y = ctypes.c_uint32(), ctypes.c_uint32()
+        if not monitor or api.GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, ctypes.byref(x), ctypes.byref(y)) != 0:
+            return None
+        if width <= 0 or height <= 0 or told <= 0 or not x.value:
+            return None
+        scale = round(width / told * x.value / 96, 2)   # 1.25 for 125%; a custom scale such as 110% is 1.1
+        if not 1 <= scale <= 5:
+            return None
+        return math.ceil(width / scale - 1e-9), math.ceil(height / scale - 1e-9), scale
+    except (OSError, AttributeError, ValueError, ZeroDivisionError):
+        return None
+
+
+# ---------------------------------------------------------------------------------------------
 # Logs (R1, R2)
 
 def fsync_path(path):

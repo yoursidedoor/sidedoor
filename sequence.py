@@ -478,8 +478,22 @@ def sequence_view(database, profile, now=None, recipient=""):
     else:
         stage = "NOT_STARTED"
     following = engagement.next_action(database, profile, now, recipient)
+    due = _due(following)
+    if due and following.get("purpose") == "FOLLOWUP" and _closed_before_send(database, identity, following.get("ordinal")):
+        due = None   # display only: `next` is still the plan, and nothing that sends reads `due`
     return {"profile": profile, "stage": stage, "invite_action": invite[0] if invite else None,
-            "next": following, "steps": _steps(events), "due": _due(following)}
+            "next": following, "steps": _steps(events), "due": due}
+
+
+def _closed_before_send(database, identity, ordinal):
+    """True when this person's follow-up of that ordinal was closed before sending (outreach.cycle:
+    past its 14 days, or a situation that never cleared). The plan can still answer DUE for it until
+    the 14 days pass; nothing will be sent, so the page shows no "Follow-up due" (owner, 2026-11-12)."""
+    identities = sorted(engagement.identity_keys(database, identity))
+    row = database.execute("SELECT 1 FROM outreach_actions WHERE identity IN (" + ",".join("?" for unused in identities)
+                           + ") AND slot=? AND state='CLOSED' AND json_extract(result,'$.closed_before_send') IS NOT NULL",
+                           (*identities, "FOLLOWUP:" + str(ordinal))).fetchone()
+    return row is not None
 
 
 def _steps(events):

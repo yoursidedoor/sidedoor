@@ -1,0 +1,69 @@
+{# The cards for applications waiting on a sign-in or a human check (E15.T2; access_cards.view): `s`
+   the view, `at` the page they are on ("overview" or "approvals"), `target` the element an action
+   redraws, `query` the Approvals page's own query (its label and pages; none on Overview), `f` what the last action said. One card per waiting job; jobs waiting on one site's
+   sign-in share a card with one action. The contact finder's card (`c.finder`: LinkedIn asks for the
+   user) is drawn by the same markup: no role, no posting, one button. #}
+{% set f = f or {} %}{% set q = ("?" + query) if query else "" %}
+{% if f.text %}<p class="note note-{{ f.tone }} access-flash" role="status">{{ f.text }}</p>{% endif %}
+{% for c in s.cards %}
+<article class="approval-card access-card" id="{{ c.dom }}">
+  <p class="access-head"><strong>{{ c.company }}</strong>{% if c.role %} <span class="muted">· {{ c.role }}</span>{% endif %}</p>
+  <p class="access-need{% if c.quiet %} note note-success{% endif %}">{{ c.need }}{% if c.closes %} <span class="muted">{{ c.closes }}</span>{% endif %}</p>
+  {# The lead's own lines stay together, above the list of the other jobs (F6). #}
+  {% if c.url %}<p class="access-apply muted">{% if c.apply %}{{ c.apply }} {% endif %}<a href="{{ c.url }}" rel="noopener noreferrer" target="_blank">{{ s.posting_label }}</a></p>{% endif %}
+  {% if c.others %}
+  <p class="access-others"><span class="muted">{{ s.also_waiting }}</span></p>
+  <ul class="access-others-list">
+    {% for o in c.others %}
+    <li>{{ o.company }} <span class="muted">· {{ o.role }}</span>{% if o.note %} <span class="muted">{{ o.note }}</span>{% endif %}{% if o.closes %} <span class="muted">{{ o.closes }}</span>{% endif %}{% if o.url %} <a href="{{ o.url }}" rel="noopener noreferrer" target="_blank">{{ s.posting_label }}</a>{% endif %}
+      {% if o.abandon %}<form class="access-inline" method="post" action="/access/abandon{{ q }}" hx-post="/access/abandon{{ q }}" hx-target="#{{ target }}" hx-swap="outerHTML">
+        <input type="hidden" name="job_key" value="{{ o.key }}"><input type="hidden" name="at" value="{{ at }}">
+        <button class="button-link" type="submit" aria-label="Abandon {{ o.company }}, {{ o.role }}">Abandon</button>
+      </form>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if c.hint %}<p class="access-hint muted">{{ c.hint }}</p>{% endif %}
+  {% if c.setting and s.setting_href %}<p class="access-setting muted">{% if s.setting_words %}{{ s.setting_words }} {% endif %}<a href="{{ s.setting_href }}">{{ s.setting_label }}</a></p>{% endif %}
+  {# After Done an attended card offers nothing (`c.quiet`): no row of actions, so no space is kept for one. #}
+  {% if not c.quiet %}<div class="approval-actions access-actions">
+    {% if c.step and not c.quiet %}
+    <form class="approval-inline" method="post" action="/access/step{{ q }}" hx-post="/access/step{{ q }}" hx-target="#{{ c.dom }} .access-step" hx-swap="innerHTML">
+      <input type="hidden" name="job_key" value="{{ c.key }}"><input type="hidden" name="at" value="{{ at }}">
+      <button class="button" type="submit">{{ c.step.label }}</button>
+    </form>
+    {% endif %}
+    {% if c.done_label %}
+    <form class="approval-inline" method="post" action="/access/done{{ q }}" hx-post="/access/done{{ q }}" hx-target="#{{ target }}" hx-swap="outerHTML">
+      <input type="hidden" name="job_key" value="{{ c.key }}"><input type="hidden" name="at" value="{{ at }}">
+      <button class="button{% if c.step %} button-quiet{% endif %}" type="submit">{{ c.done_label }}</button>
+    </form>
+    {% endif %}
+    {% if c.resend_label %}
+    <form class="approval-inline" method="post" action="/access/resend{{ q }}" hx-post="/access/resend{{ q }}" hx-target="#{{ target }}" hx-swap="outerHTML">
+      <input type="hidden" name="job_key" value="{{ c.key }}"><input type="hidden" name="at" value="{{ at }}">
+      <button class="button" type="submit">{{ c.resend_label }}</button>
+    </form>
+    {% endif %}
+    {% if c.abandon %}
+    <form class="approval-inline" method="post" action="/access/abandon{{ q }}" hx-post="/access/abandon{{ q }}" hx-target="#{{ target }}" hx-swap="outerHTML">
+      <input type="hidden" name="job_key" value="{{ c.key }}"><input type="hidden" name="at" value="{{ at }}">
+      <button class="button button-quiet" type="submit">Abandon</button>
+    </form>
+    {% endif %}
+  </div>{% endif %}
+  {# The live view goes here, inside this one card: the other cards stay as they are. After Done the list
+     is drawn again with what Done said (the application no longer waits); after any other ending this card
+     keeps the view's own sentence. The hx-target below is for that one redraw only: what `/access/step`
+     puts in here names its own target (`user_step.FRAGMENT`), or it would inherit this one and replace
+     the whole section. #}
+  {# E16.T2 (owner, 2026-11-13): a form check's one instruction, before the press and directly above the view. #}
+  {% if c.warning %}<p class="access-warning" role="note">{{ c.warning }}</p>
+  {# Its attended session ended while the view was open: the section is drawn again, with whatever the job now is. #}
+  <div hidden hx-get="/access/section{{ (q + '&') if q else '?' }}at={{ at }}" hx-trigger="live-view-over from:closest .access-card" hx-target="#{{ target }}" hx-swap="outerHTML"></div>{% endif %}
+  {% if c.step %}<div class="access-step{% if c.quiet %} access-step-quiet{% endif %}" hx-get="/access/section{{ (q + '&') if q else '?' }}at={{ at }}&ended=done" hx-trigger="live-view-done" hx-target="#{{ target }}" hx-swap="outerHTML">{% if c.attended %}{# E16.T2: an attended submit is under way; its line or its view loads here by itself. #}<div hx-post="/access/step" hx-vals='{{ {"job_key": c.key, "at": at, "poll": "1"}|tojson }}' hx-trigger="load" hx-target="this" hx-swap="outerHTML"></div>{% endif %}</div>{% endif %}
+</article>
+{% endfor %}
+{# Under Skip no account card is left to carry the link to the setting: it shows once here (F8a). #}
+{% if s.setting_footer %}<p class="access-setting muted"><a href="{{ s.setting_href }}">{{ s.setting_label }}</a></p>{% endif %}
+{% if s.more %}<p class="muted access-more">{{ s.more }} more {{ "is" if s.more == 1 else "are" }} waiting. <a href="{{ s.approvals_href }}">See all on Approvals</a></p>{% endif %}

@@ -295,7 +295,7 @@ class MigrationTest(Base):
         credentials.use_backend(credentials.NO_STORE)
         self.write("license", LICENSE)
         self.assertEqual(credentials.migrate(self.home), {"openrouter": "absent", "license": "no_store", "openai": "absent",
-                                                          "anthropic": "absent"})
+                                                          "anthropic": "absent", "vault": "absent"})   # vault: E15.T4
         self.assertTrue(self.exists("license"))
         line = doctor.check_credentials(self.home)
         self.assertEqual(line["status"], doctor.WARN)

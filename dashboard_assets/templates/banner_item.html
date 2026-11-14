@@ -36,7 +36,7 @@
     {% if banner.notes %}<p class="banner-notes-panel">{{ banner.notes }}</p>{% endif %}
   </div>
 {% else %}
-  <div class="banner banner-{{ banner.tone }}" role="status"{% if banner.poll %} id="update-banner" hx-get="/update/banner?next={{ back | urlencode }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  <div class="banner banner-{{ banner.tone }}{% if banner.dismiss_action %} banner-dismissable{% endif %}" role="status"{% if banner.poll %} id="update-banner" hx-get="/update/banner?next={{ back | urlencode }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
     <span>{{ banner.text }}</span>
     {% if banner.action_post %}
     {% with check_next=back, check_label=banner.action_label %}{% include "license_check.html" %}{% endwith %}
@@ -58,5 +58,11 @@
     {% endif %}
     {% if banner.steps %}<details class="banner-notes"><summary>Or by hand</summary><ol>{% for step in banner.steps %}<li>{{ step }}</li>{% endfor %}</ol></details>{% endif %}
     {% if banner.second %}<a class="banner-second" href="{{ banner.second.href }}">{{ banner.second.label }}</a>{% endif %}
+    {% if banner.dismiss_action %}{# E15.T10: a banner the user can end for good #}
+    <form method="post" action="{{ banner.dismiss_action }}" class="banner-dismiss">
+      <input type="hidden" name="next" value="{{ back }}">
+      <button class="banner-second" type="submit">Dismiss</button>
+    </form>
+    {% endif %}
   </div>
 {% endif %}

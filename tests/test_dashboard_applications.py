@@ -474,7 +474,7 @@ class GatherTest(unittest.TestCase):
         self.database.commit()
         item = self.gather()["list"]["jobs"][0]
         self.assertNotIn("apply yourself", item["todo"])
-        self.assertIn("continues this application on its next run", item["todo"])
+        self.assertIn("continues this application on its next round", item["todo"])
 
     def test_a5_the_authorization_hold_links_to_no_missing_control(self):
         job(self.database, "auth", "BLOCKED", "APPLICATION_AUTHORIZATION_REQUIRED")
@@ -537,7 +537,7 @@ class GatherTest(unittest.TestCase):
         self.assertEqual((asked["state"], asked["tone"], asked["attention"], asked["needs_you"]),
                          ("Waiting for your answer", "info", False, False))   # a question only (one rule)
         self.assertEqual((asked["todo_href"], asked["todo_label"]), ("/approvals#questions", "Answer on Approvals"))
-        self.assertEqual((answered["state"], answered["attention"], answered["group"]), ("Continues on the next run", False, "progress"))
+        self.assertEqual((answered["state"], answered["attention"], answered["group"]), ("Continues on the next round", False, "progress"))
         self.assertTrue(jobs["resume"]["attention"])
         self.assertEqual(jobs["done"]["submitted_at"], self.inside)
         self.assertEqual([item["key"] for item in listing["jobs"]], ["resume", "queued", "answered", "asked", "done", "copy", "gone"])

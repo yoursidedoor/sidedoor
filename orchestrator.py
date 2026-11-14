@@ -252,10 +252,42 @@ def unipile_ready(config, port=None):
     config by `with_sender`); without one, SenderNotConfigured. Both are holds `worker_step` records
     before any paid model call, provider write or attempt."""
     import unipile_port
+    import linkedin_connection
+    if linkedin_connection.held(user_profile.home()):   # E18, owner A5: disconnected, so outreach waits
+        raise unipile_port.LinkedInDisconnected("ACCOUNT_DISCONNECTED")
     port = port or linkedin_port_for(config)
     if type(config.get("sender_id")) is not int or config["sender_id"] <= 0 or not config.get("sender_profile"):
         raise unipile_port.SenderNotConfigured("SENDER_NOT_SAVED")
     return port
+
+
+LINKEDIN_NOTICE_PREFIX = "linkedin-unreachable:"   # linkedin_connection._waited's notice keys
+
+
+def deliver_linkedin_notice(database, home=None):
+    """E18 A12: hand the LinkedIn notification the Sidedoor process queued (a day without reaching the
+    browser or the LinkedIn service, `linkedin_connection.pending_notice`) to the notification outbox,
+    once: the row's key is the outage's own, so a repeat changes nothing. True when one was handed over."""
+    import linkedin_connection
+    import setup_steps
+    home = home if home is not None else user_profile.home()
+    notice = linkedin_connection.pending_notice(home)
+    if setup_steps.load_state(home)["steps"].get("linkedin", {}).get("status") == "done":
+        # Review round 4: LinkedIn reads connected again, so "has not been able to reconnect" is untrue.
+        # A notice not yet delivered is withdrawn (never sent); a delivered one is left as it is.
+        if notice:
+            linkedin_connection.clear_notice(home, notice["key"])
+        if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_outbox'").fetchone():
+            database.execute("DELETE FROM notification_outbox WHERE substr(event_key,1,?)=? AND state IN ('PENDING','UNCERTAIN')",
+                             (len(LINKEDIN_NOTICE_PREFIX), LINKEDIN_NOTICE_PREFIX))
+            database.commit()
+        return False
+    if not notice:
+        return False
+    applications.notify(database, notice["key"], notice["message"], utcnow())
+    database.commit()
+    linkedin_connection.clear_notice(home, notice["key"])
+    return True
 
 
 def sync_sender(config, home=None):
@@ -270,6 +302,13 @@ def sync_sender(config, home=None):
     home = home if home is not None else user_profile.home()
     try:
         account = linkedin_port_for(config).account()
+        # E18 (owner A5): an account that reads as disconnected holds this round's outreach at once; the
+        # Sidedoor process sends the browser's session again (`linkedin_connection.keep`). Connected: go on.
+        import linkedin_connection
+        if account.valid is False:
+            linkedin_connection.hold(home)
+        elif account.valid is True:
+            linkedin_connection.release(home)
         outcome = setup_steps.save_sender(home, account.account_id, account.own_profile)
     except Exception as error:   # no license, not linked, offline: the steps hold on their own
         outcome = {"state": "UNCHECKED", "error_type": type(error).__name__,
@@ -1118,6 +1157,16 @@ def applications_service(root, config, database, only=None):
     result = {"job": "applications", "started_at": utcnow(),
               "invocation_source": "launchd" if os.environ.get("XPC_SERVICE_NAME", "").startswith(run_locks.LAUNCHD_LABEL_PREFIX) else "manual_or_unattributed"}
     if only is None and research_holds_turn(config, database):
+        # Owner, 2026-11-13 ("E1: A"): an attended submit the user started from its card goes ahead even
+        # while today's research is pending or running: they are present and must not wait. Only those jobs
+        # (`only`); every other job yields exactly as before. Browser sessions still take turns through
+        # state/browser.lock, and the session's compute is reserved and recorded as any other.
+        import attended_submit
+        attended = set(attended_submit.due(database))
+        if attended:
+            only = attended
+            result["attended_during_research"] = sorted(attended)
+    if only is None and research_holds_turn(config, database):
         database.commit()
         # A yielding job still settles what earlier runs finished (owner, 2026-10-22: the compute
         # meter kept finished sessions' full bookings for hours while research held the turn).
@@ -1622,6 +1671,11 @@ def run(root, config, database, pipeline, local_only=False):
                 import outreach
                 if unipile_install(config):
                     config, result["linkedin_sender"] = sync_sender(config)
+                    try:   # A12: never fails the round; a notice not handed over waits for the next one
+                        deliver_linkedin_notice(database)
+                    except Exception as error:
+                        database.rollback()
+                        result["linkedin_notice"] = {"state": "FAILED", "error_type": type(error).__name__}
                 result["engagement"] = worker_step(database, slot, "reply-monitor",
                                                     lambda: engagement_cycle(database, config))
                 # Inactivity review runs inside service_cycle below; running it here as well

@@ -68,7 +68,6 @@ BROWSER_PROFILE = Path.home() / ".config" / "sidedoor" / "browser-profile"
 SINGLETONS = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 RESUME_MAX_BYTES = 10 * 1024 * 1024
 RESUME_EXTENSIONS = {".pdf": "PDF", ".docx": "Word"}  # resume_intake.FORMATS
-LINK_WAIT_SECONDS = 3600
 NOT_BUILT = "not_built"
 LOCKED_LINE = "Locked after your email check passed. To use a different email, contact " + SUPPORT_EMAIL + "."
 BUSY_LINE = "Busy with a scheduled task. Try again in a few minutes."
@@ -88,6 +87,11 @@ REQUIRED = tuple(number for number, _, _ in STEPS if number <= 8)
 NEEDS = {3: (2,), 7: (1,), 10: REQUIRED}
 EMAIL_CHECK_NEEDS = (4, 6)   # the profile's email and the chosen AI
 NUMBER = {key: number for number, key, _ in STEPS}   # step name -> its number on the page
+# E15.T10: setup-state.json's record that the release banner ("New: Sidedoor can sign in to job sites
+# for you.") is over for this install, and why: DISMISSED, SETUP (Setup was finished with the question
+# in it, so this is not an install from before it) or RESET (the file that would say was lost).
+# Never removed once written. A saved choice ends the banner by itself (access_outcomes.release_banner).
+ACCOUNT_BANNER_OVER = "account_banner_over"
 KEY = {number: key for number, key, _ in STEPS}      # its number on the page -> step name
 
 
@@ -250,6 +254,8 @@ def _rederived_steps(home, root, run=subprocess.run):
                 with contextlib.closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as read:
                     if read.execute("SELECT 1 FROM runs LIMIT 1").fetchone():
                         extra["setup_finished_at"] = now_iso()
+                        # Whether the banner was dismissed went with the lost file: it never comes back.
+                        extra[ACCOUNT_BANNER_OVER] = "RESET"
         except sqlite3.Error:
             pass
     email = saved_email(home).strip()
@@ -2084,8 +2090,13 @@ def _relay_error(parsed):
     return parsed.get("error") if isinstance(parsed, dict) and isinstance(parsed.get("error"), str) else None
 
 
-def linkedin_status(home=None, relay_url=RELAY_URL, transport=None):
-    """Read the relay's `/accounts` for this license and save what it shows (E6.T0 step 7)."""
+def linkedin_status(home=None, relay_url=RELAY_URL, transport=None, resend=False, just_sent=False):
+    """Read the relay's `/accounts` for this license and save what it shows (E6.T0 step 7). E18: an
+    account that reads as disconnected holds outreach (`linkedin_connection.disconnected`). Only the
+    hourly check passes `resend` (the browser's current session is then sent again before the user is
+    asked); a page only reads (review B6). `just_sent`: the relay accepted a session a moment ago.
+    Review B5: "connected" is said, and the hold released, only when the account's own status reads OK,
+    whatever link or send came before."""
     key = license_key(home)
     if not key and keys_waiting(home):
         return load_state(home)   # KR7: the saved LinkedIn state stays as it is
@@ -2097,9 +2108,13 @@ def linkedin_status(home=None, relay_url=RELAY_URL, transport=None):
         return record(home, "linkedin", "failed", _linkedin_unreachable(error), offer="retry",
                       **_network_cause(error))
     state = load_state(home)
-    waiting_since = state.get("linkedin_link_started_at")
-    kind = state.get("linkedin_link_kind")
-    within_hour = bool(waiting_since) and _seconds_since(waiting_since) <= LINK_WAIT_SECONDS
+    if "linkedin_link_started_at" in state or "linkedin_link_kind" in state:
+        # Review round 5: a hosted sign-in link an older version left in flight is not waited for any
+        # more (its page, link and buttons are gone): the step reads as whatever the account shows now.
+        def forget(value):
+            value.pop("linkedin_link_started_at", None)
+            value.pop("linkedin_link_kind", None)
+        state = update_state(forget, home)
     items = parsed.get("items") if status == 200 and isinstance(parsed, dict) else None
     if status == 401 or _relay_error(parsed) == "LICENSE_INVALID":
         import license_clock
@@ -2111,44 +2126,82 @@ def linkedin_status(home=None, relay_url=RELAY_URL, transport=None):
         item = items[0] if isinstance(items[0], dict) else {}
         name = item.get("name") if isinstance(item.get("name"), str) else "your LinkedIn account"
         statuses = unipile_port._account_statuses(item)
-        # A first connect succeeds as soon as /accounts lists the account (E6.T0 step 7); only a
-        # reconnect waits for the session status to return to OK (3.3).
-        if (waiting_since and kind != "reconnect") or (
-                statuses and all(value in unipile_port.VALID_STATUSES for value in statuses)):
+        if statuses and all(value in unipile_port.VALID_STATUSES for value in statuses):
             _save_sender_from(home, item)   # RL1: the sending identity, also for an install connected earlier
-            if waiting_since or saved_premium(home) is None:
+            if state.get("linkedin_premium_due") or saved_premium(home) is None:
                 # Premium is read when LinkedIn connects (owner, 2026-10-27), and once for an install
                 # connected before this was read. Never fails the connect (check_premium never raises).
                 account_id = item.get("id") if type(item.get("id")) in (int, str) else None
                 check_premium(unipile_port.UnipilePort(transport or unipile_port.RelayTransport(relay_url, key),
                                                        account_id=account_id), home)
-            update_state(lambda value: value.pop("linkedin_link_started_at", None), home)
+            def settled(value):
+                value.pop("linkedin_hold", None)   # E18: connected again, outreach goes on
+                # "linkedin_notice": a day-long-outage notification not yet handed over is untrue now (round 4).
+                for name in ("linkedin_unreadable_tries", "linkedin_premium_due", "linkedin_unreached_since",
+                             "linkedin_notice"):
+                    value.pop(name, None)
+            update_state(settled, home)
             return record(home, "linkedin", "done", "LinkedIn connected: %s." % name, offer="reconnect")
-        # Reconnect (E6.T0 3.3): the account stays listed throughout, so being listed is not success;
-        # keep waiting for its session to return to OK for about an hour.
-        if waiting_since and kind == "reconnect":
-            if within_hour:
-                return record(home, "linkedin", "checking", "Waiting for LinkedIn... (this link is valid for about "
-                              "an hour)", offer="waiting", kind="reconnect")
-            return record(home, "linkedin", "failed", "LinkedIn still needs you to sign in. Click Reconnect again; if "
-                          "the Unipile page said you were connected, contact %s." % SUPPORT_EMAIL, offer="reconnect")
-        return record(home, "linkedin", "needs_you", "LinkedIn needs you to sign in again.", offer="reconnect")
+        # Listed is not connected (review B5): a disconnect, whatever came before.
+        return _linkedin_disconnected(home, relay_url, transport, resend, just_sent)
     if isinstance(parsed, dict) and parsed.get("type") == "errors/no_client_session":
         # Unipile: the linked account has no live LinkedIn session (signed out, password changed, or
         # LinkedIn ended it). That is a reconnect, not an outage (owner, 2026-10-22: step 7 showed
         # "try again in a few minutes" and no Reconnect button).
-        return record(home, "linkedin", "needs_you", "LinkedIn needs you to sign in again.", offer="reconnect")
+        return _linkedin_disconnected(home, relay_url, transport, resend, just_sent)
     if (status == 403 and _relay_error(parsed) == "LICENSE_NOT_LINKED") or (status == 200 and items == []):
-        if waiting_since and kind != "reconnect":
-            if within_hour:
-                return record(home, "linkedin", "checking", "Waiting for LinkedIn... (this link is valid for about "
-                              "an hour)", offer="waiting", kind="create")
-            return record(home, "linkedin", "failed", "LinkedIn is not linked to your license yet. If you did not "
-                          "finish signing in on the Unipile page, click Connect again. If the Unipile page said "
-                          "you were connected, contact %s." % SUPPORT_EMAIL, offer="connect")
+        # Review rounds 5 (3) and 6 (1): the reason a first connect was refused stays until the user acts
+        # again. A sentence about the browser just then ("is open") is not kept: it stops being true.
+        import linkedin_connection
+        if not _ever_connected(home):
+            # Review rounds 7 and 8: a first connect is not an outage, whatever the listing looks like.
+            return _first_connect_pending(home, state, just_sent, listed=False)
+        if just_sent:
+            # Round 6 (2): the session was accepted a moment ago and the account is not listed. The user's
+            # own press always shows its result. Round 8 (1): this install WAS connected and its account
+            # is gone while the relay may still hold its link, so it is a disconnect: outreach is held.
+            return linkedin_connection.disconnected(home, relay_url, transport, False, True)
+        saved = state["steps"].get("linkedin", {})
+        if saved.get("status") in ("needs_you", "failed") and saved.get("message") in linkedin_connection.kept_messages():
+            return state
         return record(home, "linkedin", "needs_you", "LinkedIn is not connected.", offer="connect")
     return record(home, "linkedin", "failed", "Sidedoor's LinkedIn service answered HTTP %s. Try again in a few "
                   "minutes." % status, offer="retry")
+
+
+def _ever_connected(home):
+    """True once this install's LinkedIn has read connected: its sending identity was saved then
+    (`save_sender`, by the connected branch of `linkedin_status` and the hourly round), for an install
+    connected the old way too."""
+    return saved_sender(home) is not None
+
+
+def _first_connect_pending(home, state, just_sent, listed):
+    """Review rounds 7 and 8: LinkedIn has never read connected here, so nothing is an outage and nothing
+    is "reconnecting". No day clock, unreadable count, queued outage notice or outage hold is kept, the
+    hourly check sends nothing, and the user is never told "for a day". Outreach cannot go out either
+    way: with no sending identity saved every outreach step stops at `orchestrator.unipile_ready`
+    (SenderNotConfigured). The step says what is so: the reason a press was refused (kept until the user
+    presses again); after an accepted press, or while the account is listed but not connected, that it
+    does not show as connected yet, with [Check again]; else that it is not connected."""
+    import linkedin_connection
+    stale = ("linkedin_unreached_since", "linkedin_unreadable_tries", "linkedin_notice", "linkedin_hold")
+    if any(name in state for name in stale):
+        state = update_state(lambda value: [value.pop(name, None) for name in stale], home)
+    saved = state["steps"].get("linkedin", {})
+    if not just_sent and saved.get("status") in ("needs_you", "failed") \
+            and saved.get("message") in linkedin_connection.kept_messages():
+        return state
+    if just_sent or listed:
+        return record(home, "linkedin", "needs_you", linkedin_connection.SENT_NOT_CONNECTED, offer="sent")
+    return record(home, "linkedin", "needs_you", "LinkedIn is not connected.", offer="connect")
+
+
+def _linkedin_disconnected(home, relay_url, transport, resend, just_sent=False):
+    import linkedin_connection
+    if not _ever_connected(home):
+        return _first_connect_pending(home, load_state(home), just_sent, listed=True)
+    return linkedin_connection.disconnected(home, relay_url, transport, resend, just_sent)
 
 
 # --- LinkedIn Premium (owner, 2026-10-27) ------------------------------------------------------
@@ -2259,40 +2312,6 @@ def _save_sender_from(home, item):
         return {"state": "FAILED", "error_type": type(error).__name__}
 
 
-def _seconds_since(stamp):
-    try:
-        started = dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except ValueError:
-        return LINK_WAIT_SECONDS + 1
-    return (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
-
-
-def linkedin_link(kind, home=None, relay_url=RELAY_URL, make_link=None):
-    """A hosted-auth link (`unipile_port.hosted_link`, "create" or "reconnect"). Returns (state, url).
-    The URL is shown to the user once and never stored (it carries Unipile's dsn)."""
-    key = license_key(home)
-    if not key and keys_waiting(home):
-        return load_state(home), None   # KR7
-    if kind not in ("create", "reconnect") or not key:
-        return record(home, "linkedin", "needs_you", "Needs your license first.", offer="none"), None
-    try:
-        url = (make_link or unipile_port.hosted_link)(relay_url, key, kind)
-    except unipile_port.UnipileHTTPError as error:
-        if error.status == 401 or error.detail == "LICENSE_INVALID":
-            import license_clock
-            license_clock.request_check(home)  # E6.T0 section 11 "Refused now"
-            message = "Your subscription isn't active. Check Settings > License."
-        else:
-            message = "The LinkedIn service refused the link: %s." % (error.detail or "HTTP %s" % error.status)
-        return record(home, "linkedin", "failed", message, offer="connect" if kind == "create" else "reconnect"), None
-    except (OSError, TimeoutError, ValueError) as error:
-        return record(home, "linkedin", "failed", _linkedin_unreachable(error), offer="retry",
-                      **_network_cause(error)), None
-    update_state(lambda value: value.update(linkedin_link_started_at=now_iso(), linkedin_link_kind=kind), home)
-    return record(home, "linkedin", "checking", "Waiting for LinkedIn... (this link is valid for about an hour)",
-                  offer="waiting", kind=kind), url
-
-
 # --- Step 8: Sign in to the browser Sidedoor uses --------------------------------------------------
 
 def chrome_path(platform=None, exists=os.path.exists):
@@ -2304,6 +2323,15 @@ def chrome_path(platform=None, exists=os.path.exists):
     elif platform.startswith("win"):
         candidates = [str(Path(os.environ.get(variable, "")) / "Google/Chrome/Application/chrome.exe")
                       for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA") if os.environ.get(variable)]
+        # A session's guard runs with a small environment that may carry none of those variables: also where
+        # Chrome's installer registered it, and the usual folders on the system drive and under the user's.
+        import portable
+        registered = portable.app_path("chrome.exe")
+        drive = (os.environ.get("SYSTEMDRIVE") or (os.environ.get("SYSTEMROOT") or "C:")[:2] or "C:").rstrip("\\/")
+        candidates += ([registered] if registered else []) + [
+            drive + "/Program Files/Google/Chrome/Application/chrome.exe",
+            drive + "/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+            str(Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe")]
     else:
         candidates = [found for found in (shutil.which(name) for name in ("google-chrome", "google-chrome-stable")) if found]
     return next((candidate for candidate in candidates if exists(candidate)), None)
@@ -2807,6 +2835,11 @@ def start_scheduler(home=None):
                   "from its app icon, then click Start Sidedoor.")
 
 
+def end_account_banner(home=None):
+    """[Dismiss] on the release banner: over for good (kept when it is over already)."""
+    return update_state(lambda state: state.setdefault(ACCOUNT_BANNER_OVER, "DISMISSED"), home)
+
+
 # --- Progress ---------------------------------------------------------------------------------------
 
 def step_done(number, state, home=None):
@@ -2845,7 +2878,10 @@ def progress(home=None):
     left = sum(1 for number in REQUIRED if not done[number])
     finished = bool(state.get("setup_finished_at"))
     if not finished and left == 0:
-        update_state(lambda value: value.setdefault("setup_finished_at", now_iso()), home)
+        def finish(value):
+            value.setdefault("setup_finished_at", now_iso())
+            value.setdefault(ACCOUNT_BANNER_OVER, "SETUP")
+        state[ACCOUNT_BANNER_OVER] = update_state(finish, home)[ACCOUNT_BANNER_OVER]
         finished = True
     return {"state": state, "done": done, "locked": locked, "left": left, "finished": finished,
             "total": len(STEPS), "required": len(REQUIRED)}

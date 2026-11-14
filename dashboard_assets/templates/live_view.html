@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>A step for you</h1>
+<div class="card">
+  <p>{{ target.domain }}</p>
+  {% include "live_view_fragment.html" %}
+</div>
+<script src="{{ asset_url('/static/live_view.js') }}" defer></script>
+{% endblock %}

@@ -72,8 +72,6 @@ class LinkedInTest(unittest.TestCase):
         expected = "Sidedoor couldn't verify the LinkedIn service's secure connection on this computer. " + PLAIN
         step = setup_steps.linkedin_status(self.home, transport=raising(CERTIFICATE))["steps"]["linkedin"]
         self.assertEqual((step["message"], step["error_class"]), (expected, "URLError"))
-        state, url = setup_steps.linkedin_link("create", self.home, make_link=raising(CERTIFICATE))
-        self.assertEqual((state["steps"]["linkedin"]["message"], url), (expected, None))
         step = setup_steps.linkedin_status(self.home, transport=raising(FLAKY))["steps"]["linkedin"]
         self.assertIn("Check your internet", step["message"])
         self.assertNotIn("error_class", step)

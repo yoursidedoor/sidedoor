@@ -218,6 +218,94 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         self.run_cycle(Model("ACCEPT"), days=1)
         self.assertEqual(len(self.pending(third)), 1)
 
+    # --- A site waiting on a sign-in never replaces a hold that waits on the owner (E15.T1, round 4) ---
+
+    def site_holder(self, like, name, days=0, deadline_days=None):
+        """Another job on `like`'s site that met a sign-in wall and waits on the user."""
+        import access_outcomes
+        now = (self.clock + dt.timedelta(days=days)).isoformat()
+        holder = self.discover(fixtures.role(name, name.lower().replace(" ", "-")))
+        with self.database:
+            self.database.execute("UPDATE application_jobs SET payload=(SELECT payload FROM application_jobs WHERE job_key=?) "
+                                  "WHERE job_key=?", (like, holder))
+            deadline = (self.clock + dt.timedelta(days=deadline_days)).isoformat() if deadline_days else None
+            self.assertEqual(access_outcomes.record(self.database, dict(self.job(holder)), "AUTHENTICATION_REQUIRED", now,
+                                                    deadline=deadline), "WAITING")
+        self.assertTrue(access_outcomes.host_holder(self.database, access_outcomes.host_of(dict(self.job(like))), now, like))
+        return holder
+
+    def owner_hold_as_seen(self, key, days):
+        import applications_page
+        import overview_page
+        now = self.clock + dt.timedelta(days=days)
+        job, reader = self.job(key), overview_page.Reader(self.database)
+        view = applications_page.detail(reader, key, now, lambda moment: moment.isoformat(), None)
+        return {"job": (job["state"], job["blocker"], job["next_action"]),
+                "blocker": tuple(self.database.execute("SELECT code,owner,required_input FROM application_blockers WHERE job_key=?",
+                                                       (key,)).fetchone()),
+                "cards": [(card["id"], card["payload_hash"]) for card in self.pending(key)],
+                "page": [view[part] for part in ("state", "problem", "todo", "needs_you", "group")],
+                # `sign_ins` counts the other jobs waiting on a sign-in (the site's holder, E15.T2), not this one.
+                "needs_you": {name: count for name, count in overview_page.needs_you(reader, now).items() if name != "sign_ins"},
+                "waits_on_a_sign_in": key in overview_page.waiting_keys(reader),
+                "site_waits": self.database.execute("SELECT COUNT(*) FROM application_access_waits WHERE job_key=?", (key,)).fetchone()[0],
+                "sessions": [call[0] for call in self.adapter.calls if call[1]["job"]["job_key"] == key]}
+
+    def due_cycle(self, key, days):
+        with self.database:   # due again with its hold still on it
+            self.database.execute("UPDATE application_jobs SET next_at=NULL WHERE job_key=?", (key,))
+        self.run_cycle(Model("ACCEPT"), days=days)
+
+    def test_owner_question_hold_is_never_replaced_by_a_site_hold(self):
+        import access_outcomes
+        asi = self.discover(fixtures.role("ASI", "asi-1"))
+        self.form({"asi": [EXPORT]})
+        self.run_cycle(Model("ACCEPT"))
+        seen = self.owner_hold_as_seen(asi, 0)
+        self.assertEqual((seen["job"][1], seen["page"][0], seen["needs_you"]["questions"], len(seen["cards"]), seen["site_waits"]),
+                         ("UNKNOWN_REQUIRED_ANSWERS:" + applications.question_field(EXPORT), "Waiting for your answer", 1, 1, 0))
+        first = self.site_holder(asi, "Holder One")
+        for day in (1, 2):
+            self.due_cycle(asi, day)
+            self.assertEqual(self.owner_hold_as_seen(asi, day), seen)
+        # The user signs in for the holder: only the holder is released.
+        with self.database:
+            self.assertEqual(access_outcomes.resume(self.database, first, (self.clock + dt.timedelta(days=2)).isoformat()), [first])
+        self.assertEqual(self.owner_hold_as_seen(asi, 2), seen)
+        # A second holder is abandoned, a third runs out its days: the question hold never moves.
+        second = self.site_holder(asi, "Holder Two", days=2)
+        self.due_cycle(asi, 3)
+        with self.database:
+            self.assertTrue(access_outcomes.abandon(self.database, second, (self.clock + dt.timedelta(days=3)).isoformat()))
+        self.due_cycle(asi, 3)
+        self.assertEqual(self.owner_hold_as_seen(asi, 3), seen)
+        third = self.site_holder(asi, "Holder Three", days=3, deadline_days=4)
+        self.due_cycle(asi, 3)
+        self.due_cycle(asi, 4)
+        self.assertEqual(self.job(third)["blocker"], "ACCESS_WAITED_7_DAYS")
+        self.due_cycle(asi, 5)
+        self.assertEqual(self.owner_hold_as_seen(asi, 5), seen)
+        self.assertEqual(self.database.execute("SELECT COUNT(*) FROM application_events WHERE job_key=? AND event=?",
+                                               (asi, access_outcomes.RELEASED_EVENT)).fetchone()[0], 0)
+
+    def test_owner_answer_given_while_the_site_is_held(self):
+        import access_outcomes
+        asi = self.discover(fixtures.role("ASI", "asi-1"))
+        self.form({"asi": [EXPORT]})
+        self.run_cycle(Model("ACCEPT"))
+        self.site_holder(asi, "Holder One")
+        [decision] = self.pending(asi)
+        self.answer(decision, EXPORT_CHOICES[1])
+        before = len(self.adapter.calls)
+        self.run_cycle(Model("ACCEPT"), days=1)
+        # What happens (stated, not chosen here): on the tick that reads the answer the job is still on
+        # the owner's route, so it is not held behind the site and goes on with its own sessions. A wall
+        # met there would be its own wait: still one session per job per wall.
+        self.assertEqual([call[0] for call in self.adapter.calls[before:] if call[1]["job"]["job_key"] == asi],
+                         ["inspect", "submit", "verify"])
+        self.assertEqual(self.job(asi)["state"], "SUBMITTED")
+        self.assertEqual(self.database.execute("SELECT COUNT(*) FROM application_access_waits WHERE job_key=?", (asi,)).fetchone()[0], 0)
+
     def test_owner_expired_question_is_asked_again_never_given_up(self):
         asi = self.discover(fixtures.role("ASI", "asi-2"))
         self.form({"asi": [EXPORT]})
@@ -411,7 +499,7 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         page = self.page()
         for question in (GITHUB, TWITTER):
             card = self.card(page, question["label"])
-            self.assertIn('<input type="text" name="answer"', card)   # a short value: one line (owner, 2026-10-24)
+            self.assertIn('<textarea name="answer"', card)   # every free-text answer is a text area (owner, 2026-11-14)
             self.assertNotIn('type="radio"', card)
         by_field = {decision["field"]: decision for decision in self.pending(insforge)}
         self.assertIn("Answer saved.", self.answer(by_field[applications.question_field(GITHUB)], "https://github.com/example-user"))
@@ -455,7 +543,7 @@ class OwnerQuestions(fixtures.ApplicationEndToEndTests):
         choice = self.card(page, EXPORT["label"])
         self.assertEqual(choice.count('type="radio"'), len(EXPORT_CHOICES))
         text = self.card(page, GITHUB["label"])
-        self.assertIn('<input type="text" name="answer"', text)
+        self.assertIn('<textarea name="answer"', text)
         self.assertNotIn("Format:", text)
 
     def test_owner_a_date_question_refuses_na_and_keeps_its_card(self):

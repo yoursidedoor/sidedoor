@@ -9,7 +9,9 @@ Sections (anchors `#profile`, `#resume`, `#mode`, `#connections`, `#license`, `#
 - Résumé: replace the file (`setup_steps.save_resume`: the same background read, states and
   `resume_intake.PROFILE_LOCK` as step 3), [Try again], the résumé in use (raw upload and
   application résumé). Its claims are not shown (owner, 2026-10-22: clutter).
-- Mode: step 5's toggle (`setup_steps.set_mode`).
+- Applying (anchor `#mode`, the section's name until E15.T6): Mode, step 5's toggle
+  (`setup_steps.set_mode`), and the one setting "When a site needs an account"
+  (`access_outcomes.set_install_account_setting`; also asked in Setup's step 5, E15.T10).
 - Connections: LinkedIn (step 7), OpenRouter (step 2), the AI (step 6), Sidedoor's browser and the
   email check (step 8, the same browser-lock rule through the dashboard's BrowserSession).
 - License: what step 1 stores, [Activate] with the stored key and [Change key]
@@ -41,6 +43,7 @@ import resume_intake
 import credentials
 import setup_steps
 import paths
+import desktop_alerts
 import progress_share
 import user_profile
 
@@ -294,7 +297,11 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           claims=current_claims(root),
                           removed=removed_count(root, raw.get("sha256") if raw else None))
         elif name in ("connections",) + BLOCKS:
-            result.update(linkedin=steps.get("linkedin", {}), linkedin_premium=premium_view(state, config), openrouter=steps.get("openrouter", {}),
+            import linkedin_connection
+            shown_step = dict(steps.get("linkedin", {}))
+            if shown_step.get("message"):
+                shown_step["message"] = linkedin_connection.shown(shown_step["message"])
+            result.update(linkedin=shown_step, linkedin_premium=premium_view(state, config), openrouter=steps.get("openrouter", {}),
                           openrouter_key=masked(_openrouter_key(home)), openrouter_box=_openrouter_key(home) or "",
                           openrouter_untested=bool(_openrouter_key(home)) and not setup_steps.openrouter_tested(home),
                           codex=steps.get("codex", {}),
@@ -348,16 +355,31 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
                           portal_line=PORTAL_LINE, no_portal=NO_PORTAL,
                           keychain_wait=setup_steps.keys_waiting(home),
                           offer_file=credentials.offer_file(setup_steps._home(home)),
-                          # E12.T2: opt-in progress counts with the daily license check, off by default
-                          share_progress=progress_share.enabled(home), share_progress_label=progress_share.LABEL)
+                          # E12.T2: opt-in progress counts with the daily license check; the box shows
+                          # what Setup's Start step shows (one rule, progress_share.shown)
+                          share_progress=progress_share.shown(home), share_progress_label=progress_share.LABEL,
+                          share_progress_help=progress_share.HELP)
         elif name == "mode":
             import approvals  # the mode as the send path reads it (E6.T2 review fix P13)
-            result.update(not_recalled=NOT_RECALLED, state=dict(state, mode=approvals.install_mode(root, home)))
+            import access_outcomes  # the account setting as the applications run reads it (E15.T6)
+            saved = access_outcomes.install_account_setting(root)
+            offered = access_outcomes.offered_settings()
+            result.update(not_recalled=NOT_RECALLED, state=dict(state, mode=approvals.install_mode(root, home)),
+                          account={"title": access_outcomes.ACCOUNT_SETTING_TITLE,
+                                   # A stored choice that is not offered now applies, and shows, as Ask.
+                                   "chosen": saved if saved in offered else access_outcomes.ASK if saved in access_outcomes.ACCOUNT_SETTINGS else None,
+                                   "unreadable": access_outcomes.UNREADABLE_WORDS if saved == access_outcomes.UNREADABLE else None,
+                                   "options": [(value, access_outcomes.ACCOUNT_SETTING_LABELS[value]) for value in offered],
+                                   "labels": access_outcomes.ACCOUNT_SETTING_LABELS,
+                                   "not_chosen": access_outcomes.NOT_CHOSEN_WORDS,
+                                   "note": access_outcomes.ACCOUNT_SETTING_NOTE
+                                   if access_outcomes.SIGN_IN_FOR_ME in offered else None})
         elif name == "login":
             login = setup_steps.login_view(steps.get("login"), home)
             if login.get("default"):  # Settings shows the real state; the ticked default is Setup's only
                 login = dict(login, default=False, message=None)
-            result.update(login=login)
+            # E15.T3 (pick 5): the one switch for desktop notifications, on by default
+            result.update(login=login, desktop_alerts=desktop_alerts.enabled(home), desktop_alerts_label=desktop_alerts.LABEL)
         result.update(extra or {})
         return result
 
@@ -497,6 +519,24 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
             return respond(request, "mode", {"mode_error": "Choose Automatic or Review."})
         return respond(request, "mode", {"saved_mode": True})
 
+    @app.post("/settings/account")
+    async def account(request: Request):
+        """Applications > "When a site needs an account" (E15.T6): saved on change, like Mode."""
+        form = await request.form()
+        import access_outcomes
+        if form.get("account") not in access_outcomes.offered_settings():   # nothing written, the choice unchanged
+            return respond(request, "mode", {"account_error": "Choose one of the options shown."})
+        report = {}
+        try:
+            await run_in_threadpool(lambda: access_outcomes.set_install_account_setting(form.get("account"), root=root,
+                                                                                         report=report))
+        except sqlite3.DatabaseError as error:
+            # Busy only when the database is held by a run right now (the test `change` below and the
+            # dashboard's handler use); any other database error says the setting could not be read.
+            held = isinstance(error, sqlite3.OperationalError) and ("locked" in str(error) or "busy" in str(error))
+            return respond(request, "mode", {"account_error": BUSY if held else access_outcomes.UNREADABLE_WORDS})
+        return respond(request, "mode", {"saved_account": True, "account_closed": access_outcomes.skip_saved_words(report)})
+
     def htmx(request):
         return request.headers.get("hx-request") == "true"
 
@@ -623,6 +663,14 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
         form = await request.form()
         await run_in_threadpool(progress_share.set_enabled, form.get("enabled") == "on", home)
         return await run_in_threadpool(respond, request, "license")
+
+    # --- Desktop notifications (E15.T3, `desktop_alerts`) ----------------------------------------------
+
+    @app.post("/settings/notifications")
+    async def desktop_notifications(request: Request):
+        form = await request.form()
+        await run_in_threadpool(desktop_alerts.set_enabled, form.get("enabled") == "on", home)
+        return await run_in_threadpool(respond, request, "login")
 
     # --- Start at login (Setup step 9, E5.T2) --------------------------------------------------------
 
@@ -762,27 +810,27 @@ def register(app, templates, layout, pick_view, *, home, root, config, browser, 
 
     @app.get("/settings/linkedin/status")
     def linkedin_status(request: Request):
-        state = setup_steps.linkedin_status(home, relay_url)
-        saved = state["steps"]["linkedin"]
-        if saved.get("offer") == "waiting" and request.query_params.get("poll") == "1":
-            return HTMLResponse(templates.get_template("linkedin_wait.html").render(message=saved["message"]))
+        if request.query_params.get("after") != "done":   # after Done: what Done recorded, not a new read (dashboard.py)
+            setup_steps.linkedin_status(home, relay_url)
         response = respond(request, "linkedin")
         response.headers["HX-Retarget"] = "#connection-linkedin"
         response.headers["HX-Reswap"] = "outerHTML"
         return response
 
     @app.post("/settings/linkedin/{kind}")
-    def linkedin_link(request: Request, kind: str):
-        if kind not in ("connect", "reconnect"):
+    def linkedin_connect(request: Request, kind: str):
+        # E18: the same actions as Setup's LinkedIn step (dashboard.py).
+        import linkedin_connection
+        if kind == "open":
+            shown = linkedin_connection.sign_in_view()   # the live view, inside the row; else the window as before
+            if shown:
+                return respond(request, "linkedin", {"live_view": shown})
+            linkedin_connection.browser_opened(home, browser.open())
+        elif kind in ("connect", "reconnect"):
+            linkedin_connection.connect(home, relay_url)
+        else:
             return HTMLResponse("No such action.", status_code=404)
-        # The same rule as Setup step 7: Connect only while nothing is linked (a create would add a
-        # second paid Unipile account), Reconnect only while the account is listed.
-        saved = setup_steps.linkedin_status(home, relay_url)["steps"]["linkedin"]
-        wanted = "create" if kind == "connect" else "reconnect"
-        url = None
-        if saved.get("offer") == kind or (saved.get("offer") == "waiting" and saved.get("kind") == wanted):
-            _, url = setup_steps.linkedin_link(wanted, home, relay_url)
-        return respond(request, "linkedin", {"link_url": url})
+        return respond(request, "linkedin")
 
     @app.post("/settings/browser/{action}")
     def browser_action(request: Request, action: str):

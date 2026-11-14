@@ -116,7 +116,17 @@ def bounded_decision(root, config, prompt, artifacts, timeout, *, runtime=None,
         os.environ[text_model.KEY_VARIABLE] = text_model.key(config)
     worker = executor if executor is not None else runtime.run_research_worker
     # The caller's own bounded timeout, not a fixed 30 s: GLM judgments can need longer (2026-09-28).
-    worker(working, command, prompt, log, timeout)
+    try:
+        worker(working, command, prompt, log, timeout)
+    except Exception as error:
+        # The engine route (owner, 2026-11-13, G1): whatever stopped the run (not installed, signed out,
+        # interrupted by a shutdown, its time limit, a non-zero exit), no completed run means no answer
+        # came back. A usage limit or a signed-out engine is also in the error's cause
+        # (`engine.limit`, `provider_limits.wait_of`) and stays the provider wait it was. Only a run
+        # that completed and left an answer that cannot be used (below) is an unreadable answer.
+        if getattr(error, "failure_kind", None) is None:
+            error.failure_kind = UNREACHABLE
+        raise
     if not output.is_file() or output.is_symlink():
         raise ValueError("Research recovery decision output missing")
     with output.open("rb") as stream:
@@ -131,6 +141,25 @@ def bounded_decision(root, config, prompt, artifacts, timeout, *, runtime=None,
 # format, provider routing outreach_agent.DIRECT_PROVIDER. Same prompt, artifacts and validation;
 # a refused call raises the RuntimeError a non-zero codex exit raised, a timeout a TimeoutError.
 DIRECT_ROUTE = "openrouter_chat_completions"
+# What a failed call IS, set on the error as `failure_kind` from its exception type and structured status
+# alone (owner, 2026-11-13, G1/G2), never from message text. UNREACHABLE: no usable exchange happened
+# (timeout, network, a server error, a refused key (401/403), the key missing, locked or unreadable; on
+# the engine route, a run that did not complete: not installed, signed out, interrupted, a non-zero exit).
+# UNREADABLE: an answer came back that will not get better by waiting: the AI's answer cannot be used, or
+# the provider said the REQUEST is wrong (REQUEST_WRONG: a 4xx other than the ones below).
+UNREACHABLE, UNREADABLE = "UNREACHABLE", "UNREADABLE"
+# 4xx statuses that are not "the request is wrong": the key is refused (401, 403), out of credit (402) and
+# too many requests (429) are waits, and 408 is a timeout.
+NOT_THE_REQUEST = frozenset({401, 402, 403, 408, 429})
+
+
+def request_wrong(status):
+    """True for an HTTP status that says the request itself is wrong and will be answered the same again."""
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        return False
+    return 400 <= status < 500 and status not in NOT_THE_REQUEST
 DIRECT_EFFORT = "low"
 DIRECT_MAX_TOKENS = 4000
 DIRECT_PROVIDER = {"sort": "price", "require_parameters": True}  # outreach_agent.DIRECT_PROVIDER
@@ -156,14 +185,22 @@ def _direct_decision(config, prompt, schema, output, log, timeout, calls):
                                          "name": "recovery_decision", "strict": True, "schema": schema}})
     except TimeoutError as error:
         error.executor = record(error="TimeoutError: " + str(error)[:300])
+        error.failure_kind = UNREACHABLE
         raise
     except text_model.TextModelError as error:
         failure = RuntimeError("RECOVERY_DECISION_EXECUTOR_FAILED")
         failure.executor = record(http_status=getattr(error, "status", None), error=error.record())
+        # An answer that came back and cannot be used (no content, over the limit) is the only unreadable
+        # one here; an HTTP status of any kind and a network error mean no answer came back.
+        answered = (isinstance(error, text_model.TextModelResponseError)
+                    and not getattr(error, "transport_error", None))
+        failure.failure_kind = (UNREADABLE if answered or request_wrong(getattr(error, "status", None))
+                                else UNREACHABLE)
         raise failure from error
     except OSError as error:  # the key file could not be read
         failure = RuntimeError("RECOVERY_DECISION_EXECUTOR_UNAVAILABLE")
         failure.executor = record(error=type(error).__name__)
+        failure.failure_kind = UNREACHABLE
         raise failure from None
     with output.open("x", encoding="utf-8") as stream:
         stream.write(answer["content"])

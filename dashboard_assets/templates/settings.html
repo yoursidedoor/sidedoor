@@ -8,7 +8,7 @@
 </div>
 {% endif %}
 <nav class="settings-nav" aria-label="Settings sections">
-  <a href="#profile">Profile and search</a> <a href="#answers">Your saved answers</a> <a href="#resume">Résumé</a> <a href="#mode">Mode</a>
+  <a href="#profile">Profile and search</a> <a href="#answers">Your saved answers</a> <a href="#resume">Résumé</a> <a href="#mode">Applying</a>
   <a href="#connections">Connections</a> <a href="#license">License</a> <a href="#login">Start at login</a>
 </nav>
 {# S2 (owner, 2026-11-08): a "Show me how" guide opens in place, under its own section. #}
@@ -17,4 +17,5 @@
 </div>
 {% include "report_problem.html" %}
 <script src="{{ asset_url('/static/settings.js') }}" defer></script>
+<script src="{{ asset_url('/static/live_view.js') }}" defer></script>
 {% endblock %}

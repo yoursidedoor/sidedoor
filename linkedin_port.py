@@ -455,8 +455,15 @@ class FakePort:
 
     # -- helpers ----------------------------------------------------------------------------
     def _enter(self, method, write=False):
-        self.calls.append(method)
         kinds = self.failures.get(method) or []
+        if write and kinds and kinds[0] == "held":
+            # E18 A9/B8: the write was refused before any request (LinkedIn reads as disconnected), as
+            # UnipilePort._write refuses it. Not a call: nothing was sent.
+            kinds.pop(0)
+            self.held_writes = getattr(self, "held_writes", []) + [method]
+            import unipile_port
+            raise unipile_port.RelayRefusedWrite(unipile_port.LinkedInDisconnected("ACCOUNT_DISCONNECTED"), None)
+        self.calls.append(method)
         kind = kinds.pop(0) if kinds else None
         if kind == "invalid_session":
             self.session_valid = False

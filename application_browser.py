@@ -6,7 +6,6 @@ signature. Only the guarded browser server's private arm tool receives the origi
 (`sidedoor browser-guard`, browser_guard.py; E7.T1).
 """
 
-import resources
 import datetime as dt
 import functools
 import hashlib
@@ -22,6 +21,7 @@ import time
 import unicodedata
 import urllib.parse
 
+import access_outcomes
 import applications
 import application_destination
 import external_history
@@ -29,6 +29,7 @@ import browser_guard
 import browser_runtime
 import desktop_adapter
 import engines
+import form_check_hold
 import outreach_history_browser
 import portable
 import openai_auth
@@ -37,6 +38,7 @@ import provider_pacing
 import reply_worker
 import reply_resume
 import run_locks
+import site_sessions
 import user_profile
 import paths
 
@@ -56,15 +58,20 @@ import paths
 # each on the read model) and timed out before reaching the form it had found. Kept equal to the
 # per-operation reservation in application_connection and below desktop_adapter.LEASE_SECONDS.
 MAX_SECONDS = 900
-# Owner-cleared CAPTCHAs (owner, 2026-09-28): the session waits HUMAN_CHECK_SECONDS for the owner
-# to tick the box himself and re-checks the page once, at the end ("Just recheck the page at the
-# 10th minute"): every re-check is a model turn, the waiting itself costs nothing.
-# The wait is the guarded browser server's own tool (browser_guard.HUMAN_CHECK_TOOL, E7.T1).
-HUMAN_CHECK_TOOL = "wait_for_human_check"
-HUMAN_CHECK_SECONDS = 600
-HUMAN_CHECK_INTERVAL = HUMAN_CHECK_SECONDS
-# After the wait: one re-read of the page, then the rest of the read or the submit.
-HUMAN_CHECK_FINISH = 180
+# Human checks (E16.T1, owner 2026-11-10): a session that meets one stops at once and returns blocked
+# CAPTCHA_REQUIRED; the job then waits on the user (access_outcomes). There is no in-session wait and no
+# window: the guard refuses the retired wait tool by name (browser_guard.HUMAN_CHECK_TOOL).
+# Kept dormant for a later task (owner, 2026-11-12: "task 1 keeps the hold and removes only the 10-minute
+# wait and the window"): a hold may move a running session's deadline through HOLD_FILE in its folder
+# (`execute`), never more than HOLD_LIMIT_SECONDS + HOLD_FINISH_SECONDS past the session's own limit, with
+# the claim extended by desktop_adapter.extend_for_human_check.
+# E16.T2 (owner, 2026-11-12): an ATTENDED submit session is given the hold (form_check_hold.py). Its hold
+# file records the seconds held, and the session's deadline (`execute`) and the arm's deadline
+# (`ArmBinding.arm`) are each their own value plus those seconds and nothing else (Y4: 9 minutes at most).
+# No other application session is given a hold, and nothing writes the file for one.
+HOLD_FILE = "human_check.json"
+HOLD_LIMIT_SECONDS = 600
+HOLD_FINISH_SECONDS = 180
 # No tool-call limit (owner, 2026-10-25: "unlimited actions ... for inspection and application");
 # the session deadline (MAX_SECONDS) still ends a session.
 MAX_TRACE = 32 * 1024 * 1024
@@ -73,7 +80,7 @@ server `browser` (Sidedoor's guarded browser: browser_navigate, browser_snapshot
 browser_click, browser_type, browser_fill_form, browser_select_option, browser_file_upload,
 browser_tabs, browser_wait_for and the rest it lists) and, for submit only, its arm tool. Reuse
 existing authentication. Never use shell, filesystem tools, web search, private endpoints,
-fetch, browser_evaluate, browser_run_code_unsafe, AiApply, outreach, or other apps.
+fetch, browser_evaluate, AiApply, outreach, or other apps.
 How these tools work: browser_snapshot returns the page's accessibility tree with a ref per element
 (e.g. [ref=e12]); every click, type, fill, select or hover takes that ref (target) from the LATEST
 snapshot, and refs change after any navigation or click, so take a fresh snapshot before acting.
@@ -242,15 +249,33 @@ budget before returning an orchestrator-owned blocker and specific next action;
 do not automatically ask the user for facts a bounded investigation may resolve.
 For an incomplete inspection return a partial review with null unknowns, not a
 made-up complete review. For authentication or MFA return blocked with code
-AUTHENTICATION_REQUIRED or MFA_REQUIRED and next_action. Human verification (a CAPTCHA,
+AUTHENTICATION_REQUIRED or MFA_REQUIRED and next_action. When the page offers a way to apply
+without an account (apply as a guest, continue without signing in), that is not such a stop: use
+it, within this operation's own rules, and carry on. When you do stop for authentication or MFA,
+add to blocked a "wall" object with what the page itself shows, never a guess: sign_in_offered,
+sign_up_offered, apply_without_account_offered, account_exists_signal (the page says an account
+already exists for the candidate) (each true, false, or null when not seen); sso_providers (a
+list from google, linkedin, microsoft, apple, other); second_step (NONE, EMAIL_CODE, EMAIL_LINK,
+SMS, AUTHENTICATOR, PASSKEY when the site signs in only with a passkey, or UNKNOWN); signed_in_as
+(the account address the page shows as signed in, or null); profile_required (true when the candidate
+is signed in and the site requires its own candidate profile or onboarding to be completed before this
+application can be reached: that is such a stop too, reported with code AUTHENTICATION_REQUIRED and
+this value, never with a code of your own; else false or null). Human verification (a CAPTCHA,
 hCaptcha, reCAPTCHA or an "I am human" box) is for the owner alone: never click, tick, solve
-or otherwise touch it. When one is in the way, call
-the browser server's wait_for_human_check tool once; it returns after the owner's wait. The call moves this
-request's deadline 13 minutes past the moment you make it, so the deadline in the request no
-longer applies once it is running. Wait for it to return: make no other tool calls while it runs,
-and never end or answer before it has returned. Then re-read the page
-once: if it shows the check cleared, continue normally; if not, return blocked with code
-CAPTCHA_REQUIRED and next_action. Do not call the tool again.
+or otherwise touch it. When one is in the way, do not interact with it in any way and do not
+wait for it to clear: stop at once and return blocked with code CAPTCHA_REQUIRED and next_action.
+Whenever the page shows a human check, say where it is in human_check (inside blocked when you stop
+on it, and in an inspect result's own human_check): place BEFORE_FORM when it stands in front of the
+page so the application form cannot be reached, ON_FORM when it sits on the application form itself;
+for ON_FORM, after_question is the zero-based position in your questions list of the last question
+displayed above the check (-1 when it is above every question), otherwise null; kind is the check's own
+kind (HCAPTCHA, RECAPTCHA, TURNSTILE, or OTHER for anything else); form_readable is true when every
+question of the form is displayed without doing the check, false when questions stay hidden until it is
+done. With no human check shown: place NONE.
+A human check that sits on the application form is not in the way of an inspect, because an inspect never
+submits: when form_readable is true, read the form as you would without the check and return the ordinary
+inspect result with its human_check, not blocked. The user does that check later, when the application is
+submitted. A check with form_readable false, or one in front of the page, is in the way.
 Never work around the browser platform's own controls with another tool, route or
 identity. When the platform will not open or act on something, continue with what you can
 still read; if the read cannot be completed, report it as an ordinary incomplete read,
@@ -785,6 +810,32 @@ modes.""",
 # next inspect returned verified=False with 4 browser calls, against nine consecutive
 # verified=True reads at 5-6 calls before it. Whether or not that single read was caused by it,
 # a read has no use for submit instructions and should not be carrying them.
+# E16.T2 (owner, 2026-11-12): added to the prompt of an attended submit session only (form_check_hold).
+# Facts about the session, not a procedure; the rule that the AI never touches a check stands unchanged.
+ATTENDED_SUPPLEMENT = """ATTENDED SESSION. Goal: this application is submitted with the user doing only the form's human check,
+and waiting as little as possible. Facts:
+- The user is present now, watching this page in Sidedoor, and waiting. They do the human check
+  themselves. The rule above stands: never click, tick, solve or otherwise touch a human check.
+- This session has the tool wait_for_human_check on the same `browser` MCP server. A call to it pauses
+  for the user: it is held until the user says the check is done, or has clicked or typed on the page
+  and then stopped for a few seconds, or until its time limit; its answer says which. Your deadline
+  moves later by the time the call took. It is never available after arm. A human check on the
+  form that the user is about to do through that tool is not a reason to stop.
+- While that call is held the user can click and type on this page, so the page may have changed when
+  the call returns.
+- Sidedoor has already opened the application's address in this browser (the first tab), so the user saw
+  the page before you started. The user may have done the human check, or typed on the page, before your
+  first step: the page in front of you says what is done. A check the page shows as done needs no wait.
+- request.attended.human_check says where the check sits, as an earlier session reported it: place,
+  after_question (the position among the form's questions of the last question above the check) and
+  kind. The page in front of you decides if it differs.
+- A check's pass can expire. request.attended.order says what is known for this kind of check:
+  CHECK_FIRST: its pass lasts through the whole fill. HALF_FIRST: that is not known.
+The owner's lines for this session: "The agent should start from the bottom to the top. so the user
+doesnt have to wait for the whole 8mins. or start from whereever the human check is." And, when the pass
+may not last: "the agent can fill half the answers first. if 8 ans, fill 4, if 16, fill 8, then go to the
+human check, then fill the others after the user clicks im done".
+"""
 SUBMIT_SUPPLEMENT = """EMAILED VERIFICATION CODE. Some ATS forms answer that one Submit by saying they have
 emailed a security/verification code and that the application is NOT yet submitted until
 it is entered - Greenhouse does this for applicants who are not signed in (umbrella,
@@ -954,7 +1005,10 @@ def result_contract(operation):
             "visible_required_questions_enumerated": False,
             "all_required_questions_enumerated": False, "form_revision": None,
             "application_method": "FORM|EMAIL",
-            "email_application": {"address": None, "subject": None}}
+            "email_application": {"address": None, "subject": None},
+            # E16.T2 (owner, 2026-11-12): where a human check sits, read by access_outcomes.clean_check.
+            "human_check": {"place": "NONE|BEFORE_FORM|ON_FORM", "after_question": None,
+                            "kind": "HCAPTCHA|RECAPTCHA|TURNSTILE|OTHER", "form_readable": None}}
 
 
 def context(root, database, payload):
@@ -1180,28 +1234,14 @@ MAIN_MODEL_OPERATIONS = frozenset({"submit", "verify", "reconcile"})
 def command(config, directory):
     """The browser session's codex command (E7.T1, option A): the guarded @playwright/mcp server is its
     one MCP server (`sidedoor browser-guard`, browser_runtime.codex_options). Submit gives that server
-    the private arm claim, so its `arm` tool is the one-shot final guard; every operation gives it the
-    CAPTCHA-wait context, so `wait_for_human_check` is there too. No self-spawned `.py` server, no
+    the private arm claim, so its `arm` tool is the one-shot final guard. There is no CAPTCHA wait
+    (E16.T1): `wait_for_human_check` is not offered and the guard refuses it. No self-spawned `.py` server, no
     computer-use: the native macOS Open-panel fallback is dropped (owner, 2026-10-22)."""
     config = dict(config, _browser_operation=config.get("_application_operation") or "inspect")
     return engines.engine(config).browser_command(
         config, directory, application=True,
         main_model=bool(config.get("_application_operation") in MAIN_MODEL_OPERATIONS
                         or config.get("_application_guard_claim")))
-
-
-UNSUPPORTED_BROWSER_CODE = re.compile(r"\b(?:fetch|XMLHttpRequest|require|import|process|eval)\b|\.evaluate\s*\(")
-UNSUPPORTED_BROWSER_NAMES = {"fetch", "XMLHttpRequest", "require", "import", "process", "eval", "evaluate"}
-# Ways to run text as code, or to reach the page's document or location, that a fill script never
-# needs. Refused as names in the code, and as a literal whose whole text is one of them (bracket
-# access such as globalThis["Function"]).
-BROWSER_CODE_SINKS = ("Function", "constructor", "setTimeout", "setInterval", "setImmediate", "Worker",
-                      "importScripts", "document", "location")
-STRING_CODE_SINKS = re.compile(r"\b(?:" + "|".join(BROWSER_CODE_SINKS) + r")\b")
-# Investigate reads may not act on the page. `.keys(` and `.checkVisibility(` only read.
-INVESTIGATION_WRITE_CODE = re.compile(
-    r"\.(?!keys\s*\(|checkVisibility\s*\()(?:click|dblclick|fill|type|press|key|mouse|selectOption|check|uncheck|setInputFiles"
-    r"|upload|drag|tap|dispatchEvent|evaluate|getApp)\w*\s*\(|\[|\b(?:Reflect|Function)\b")
 
 
 def code_outside_literals(code):
@@ -1211,7 +1251,9 @@ def code_outside_literals(code):
     characters, '...' and "..." strings (escapes inside them allowed) and `...` templates with no
     `${`. Anything else in code - a `/` (so no regex, division or comment is ever interpreted), a
     backslash, `#`, `<!--`, `-->`, a template with `${`, a raw newline inside a quoted string, an
-    unterminated literal - returns None, and the caller checks the whole raw code as before."""
+    unterminated literal - returns None, and the caller checks the whole raw code.
+    (Its first user, the trace check of browser_run_code_unsafe code, went with that tool, 2026-11-12;
+    browser_guard.cookie_refusal reads in-page code with it.)"""
     out, literals, i, n = [], [], 0, len(code)
     while i < n:
         c = code[i]
@@ -1240,52 +1282,48 @@ def code_outside_literals(code):
     return "".join(out), literals
 
 
-def code_forbidden(code, pattern, names=UNSUPPORTED_BROWSER_NAMES, fold=False):
-    """`pattern` or a code sink in the code itself. Words inside string literals are data (typed
-    answer text, labels, search terms), not code: Kramerica Power's answer "...contract tests and a
-    schema registry..." killed two submit sessions (2026-09-30). A literal whose whole text is a
-    banned name or sink is still refused, and code `code_outside_literals` will not lex is checked
-    whole, as before (plus the sinks)."""
-    lexed = code_outside_literals(code)
-    if lexed is None:
-        return bool(pattern.search(code) or STRING_CODE_SINKS.search(code))
-    stripped, literals = lexed
-    banned = set(names) | set(BROWSER_CODE_SINKS)
-    if fold:
-        banned = {name.casefold() for name in banned}
-    return bool(pattern.search(stripped) or STRING_CODE_SINKS.search(stripped)
-                or any((literal.strip().casefold() if fold else literal.strip()) in banned for literal in literals))
-
-
-def unsupported_browser_code(code):
-    return code_forbidden(code, UNSUPPORTED_BROWSER_CODE)
-
-
-def investigation_writes(code):
-    """The investigate read-only check, applied to code only (a selector such as 'a[href]' is data)."""
-    lexed = code_outside_literals(code)
-    return bool(INVESTIGATION_WRITE_CODE.search(code if lexed is None else lexed[0]))
-
-
 # The guarded browser server's tools that act on a page (E7.T1). In an investigate read they are
-# refused as live refused the same actions in cua_repl code (INVESTIGATION_WRITE_CODE: click, fill,
-# type, press/key, selectOption, check/uncheck, setInputFiles/upload, drag, tap, evaluate).
+# refused as live refused the same actions in cua_repl code (click, fill, type, press/key,
+# selectOption, check/uncheck, setInputFiles/upload, drag, tap, evaluate).
 INVESTIGATION_WRITE_TOOLS = frozenset({"browser_click", "browser_type", "browser_press_key", "browser_fill_form",
                                        "browser_select_option", "browser_file_upload", "browser_drag",
                                        "browser_drop", "browser_evaluate"})
-# Tools whose argument is browser code: live checked cua_repl's code with unsupported_browser_code.
-# browser_evaluate is the page's own .evaluate(), which live refused outright.
-CODE_TOOLS = {"browser_run_code_unsafe": "code"}
+# browser_evaluate is the page's own .evaluate(), which live refused outright. browser_run_code_unsafe is
+# no longer a tool of any session (browser_guard.REMOVED_TOOL): in a trace it is an unauthorized tool,
+# unless the call is provably one that never ran (`removed_tool_refused`).
 
 
-def tool_item(item, submit, investigate=False):
+def removed_tool_refused(event):
+    """True when a completed browser_run_code_unsafe step is provably a call that never ran (owner,
+    2026-11-12: "treat a refused call to the removed tool as a non-event, so the session's result stands").
+    The step must be an errored one as its engine records that (ToolCall.is_error: Codex writes status
+    "failed" and no isError key; Claude writes is_error on the tool_result), and one of:
+    - the guard refused it: the answer's first text starts with the guard's own marker,
+      "REFUSED RUN_CODE_REFUSED:" (browser_guard.Proxy.handle writes exactly that and never forwards the call);
+    - the engine rejected it itself, the tool never having been offered: no answer at all (result null)
+      and an error on the step; or, on Claude, its permission_denied event for that call id (status "denied").
+    Any answer that is not an error, or an errored answer with other content, is not this case."""
+    call = event.call
+    if call.is_error is not True:
+        return False
+    if call.status == "denied" or (call.result is None and bool(call.error)):
+        return True
+    result = call.result if isinstance(call.result, dict) else {}
+    blocks = [block.get("text") for block in result.get("content") or []
+              if isinstance(block, dict) and isinstance(block.get("text"), str)]
+    return bool(blocks) and blocks[0].startswith("REFUSED %s:" % browser_guard.REMOVED_CODE)
+
+
+def tool_item(item, submit, investigate=False, live=False, held=False):
     """`tool_event` for one Codex trace item (the `item` of an item.started/item.completed line)."""
-    return tool_event(engines.CODEX.item_event(item), submit, investigate)
+    return tool_event(engines.CODEX.item_event(item), submit, investigate, live, held)
 
 
-def tool_event(event, submit, investigate=False):
+def tool_event(event, submit, investigate=False, live=False, held=False):
     """One step of a browser session's trace (engines.TraceEvent): True when it is a counted browser
-    call, False when it is not a tool call (or the uncounted CAPTCHA wait); raises on a refused one.
+    call, False when it is not a tool call (or a call to the retired CAPTCHA wait, or a refused call to
+    the removed browser_run_code_unsafe, which never ran); raises on a refused one. `live`: the step is
+    read while its session runs (`execute`), not from a finished trace.
     The checks are live's cua_repl checks mapped to the guarded server's tool names (E7.T1 live-parity
     table). A shell command or web search the engine ran itself is refused, and so is a step whose
     item is not an object (it cannot be checked)."""
@@ -1311,25 +1349,41 @@ def tool_event(event, submit, investigate=False):
     if call.server != browser_runtime.SERVER:
         raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
     tool = call.tool
+    if tool == browser_guard.REMOVED_TOOL:
+        # A call the guard refused (or the engine denied) never ran: neither counted nor evidence, and
+        # the session goes on. Shown with any other outcome, it fails the session as before. A started
+        # step is not judged yet, so the live monitor lets the refusal arrive; a finished trace in which
+        # it never did fails (`normalize`: forgiven only once the refusal is seen).
+        if event.phase == "started" or removed_tool_refused(event):
+            return False
+        raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
     if tool == browser_guard.ARM_TOOL and submit:
         return True
-    # The owner-CAPTCHA wait observes nothing and touches no page, so it is neither counted
-    # toward the tool limit nor ever usable as evidence (owner, 2026-09-28).
+    # The retired CAPTCHA wait (E16.T1). The guard refuses it by name, and a refused call observes
+    # nothing and touches no page: on Codex it is never counted, never evidence, and the session's result
+    # stands. On Claude and Antigravity the tool is not in the run's allowed list, so the engine's reader
+    # stops the run first, as on any tool it was not offered (FORBIDDEN_TOOL, handled above). A
+    # running session whose trace shows the wait as having run (answered without an error) was not
+    # answered by the guard: stopped as any tool outside the list. A finished trace is read as it always
+    # was, so a session recorded while the wait existed keeps its verdict.
+    # E16.T2: an attended submit session holds the tool (`held`, form_check_hold.attended): its call ran
+    # in the guard, touched no page, and is neither counted nor evidence.
     if tool == browser_guard.HUMAN_CHECK_TOOL:
+        if live and not held and event.phase == "completed" and call.is_error is False:
+            raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
         return False
     if tool == browser_guard.CONTINUE_TOOL:   # Claude only: the next piece of a cut answer (a page read)
+        return True
+    # E15.T9: the guard's own click on a site's sign-in button for the mailbox's provider, in the access
+    # step. A session that does not hold the tool is refused by the guard (NOT_OFFERED): the call ran nothing.
+    # The same for the step's other tools (E15.T7, T8): the saved sign-in, the new password, the emailed link.
+    if tool in browser_guard.STEP_TOOLS and not investigate:
         return True
     if tool not in browser_guard.TOOLS:
         raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
     arguments = call.args
     if tool == "browser_evaluate":
         raise ValueError("APPLICATION_UNSUPPORTED_BROWSER_CODE")
-    if tool in CODE_TOOLS:
-        code = arguments.get(CODE_TOOLS[tool], "")
-        if not isinstance(code, str) or unsupported_browser_code(code):
-            raise ValueError("APPLICATION_UNSUPPORTED_BROWSER_CODE")
-        if investigate and investigation_writes(code):
-            raise ValueError("APPLICATION_INVESTIGATION_READ_ONLY")
     if investigate and tool in INVESTIGATION_WRITE_TOOLS:
         raise ValueError("APPLICATION_INVESTIGATION_READ_ONLY")
     if investigate:
@@ -1348,15 +1402,14 @@ def result_text(result):
 # Answer sections @playwright/mcp writes ("### <title>"). What the model itself chose never becomes page
 # evidence (live AGENTS 2026-09-19 "Quotes must still come from what the browser returned, never from
 # the model's own commands"; live kept nodeRepl.write output and the page URL, _meta, out of it):
-ECHO_RESULT_TOOLS = {"browser_run_code_unsafe",   # its Result is the model's own code's return value
-                     "browser_wait_for",          # "Waited for <the model's text>"
+ECHO_RESULT_TOOLS = {"browser_wait_for",          # "Waited for <the model's text>"
                      "browser_take_screenshot"}   # "[...](<the model's filename>)"
 FIND_HEADER = re.compile(r"^(?:Found \d+ match(?:es)? for .*|No matches found for .*)$")
 
 
 def observed_text(result, tool=None):
     """The page text a browser tool returned, as quotable evidence (E7.T1 review fix 1). Removed: the
-    "Ran Playwright code" echo of the call; the Result of run_code, wait_for and screenshots; the
+    "Ran Playwright code" echo of the call; the Result of wait_for and screenshots; the
     "Found N matches for <query>" line of browser_find (its matched page lines stay); every
     "- Page URL:" line and the tab list's URLs (the model can choose a URL's query)."""
     sections, title = [], None
@@ -1383,6 +1436,11 @@ def observed_text(result, tool=None):
 
 
 PAGE_URL = re.compile(r"^- Page URL: (\S+)", re.M)
+# For `observed_origin` (E15.T6) only: the address line directly under an answer's own "### Page"
+# header, first one in the answer, and only in answers of the tools that report the page and echo
+# nothing the model wrote into their body (never run_code, evaluate, console or network output).
+PAGE_HEADER_URL = re.compile(r"^### Page\n- Page URL: (\S+)", re.M)
+OBSERVED_ORIGIN_TOOLS = frozenset({"browser_navigate", "browser_navigate_back", "browser_snapshot"})
 
 
 # Every browser worker this process has started and not yet reaped, by pid. `execute` starts the
@@ -1455,20 +1513,29 @@ def execute(config, prompt, directory, timeout):
             _LIVE_WORKER_GROUPS.add(worker.pid)
             portable.contain(worker)
             pending = engine.prompt_input(prompt)
-            ceiling = deadline + HUMAN_CHECK_SECONDS + HUMAN_CHECK_FINISH
-            extension = directory / "human_check.json"
+            ceiling = deadline + HOLD_LIMIT_SECONDS + HOLD_FINISH_SECONDS
+            own_deadline = deadline   # the session's own limit; an attended hold adds exactly the time held
+            extension = directory / HOLD_FILE
             while True:
                 if extension.exists():
-                    try:
-                        until = dt.datetime.fromisoformat(json.loads(extension.read_text())["until"])
-                        waited = (until - dt.datetime.now(dt.timezone.utc)).total_seconds()
-                        deadline = min(ceiling, max(deadline, time.monotonic() + waited))
-                    except (OSError, ValueError, KeyError, TypeError):
-                        pass
+                    record = form_check_hold.read(extension)
+                    if record is not None:   # E16.T2: an attended submit's hold
+                        deadline = min(ceiling, own_deadline + form_check_hold.held(record))
+                    else:
+                        try:
+                            until = dt.datetime.fromisoformat(json.loads(extension.read_text())["until"])
+                            waited = (until - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                            deadline = min(ceiling, max(deadline, time.monotonic() + waited))
+                        except (OSError, ValueError, KeyError, TypeError):
+                            pass
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
                     raise TimeoutError("APPLICATION_BROWSER_TIMEOUT")
+                if browser_runtime.guard_stopped(directory):
+                    # The guard stopped its own session (browser_guard.Proxy.stop_session; the reason is
+                    # in its audit): an ordinary failed session, ended now.
+                    raise RuntimeError(browser_runtime.SETUP_STOPPED_CODE)
                 try:
                     worker.communicate(pending, timeout=min(0.1, remaining))
                     finished = True
@@ -1489,7 +1556,8 @@ def execute(config, prompt, directory, timeout):
                         if event.phase is None and event.kind != "error":   # Claude's failures: review C2
                             continue
                         tool_event(event, bool(config.get("_application_guard_claim")),
-                                   config.get("_application_operation") == "investigate")
+                                   config.get("_application_operation") == "investigate", live=True,
+                                   held=form_check_hold.attended(config))
                 if finished:
                     if claude:
                         # A Claude run can fail with exit 0 (U1 3d): judged from its stream whatever the
@@ -1514,8 +1582,22 @@ def execute(config, prompt, directory, timeout):
                 engine.run_ended(arguments)   # U1 4: Antigravity's per-run MCP config goes (N3e: Popen failed too)
             if worker is not None:
                 _LIVE_WORKER_GROUPS.discard(worker.pid)
+                # The session is over and its outcome decided (the engine exited and was judged, or an error
+                # is already on its way up); the time limit no longer runs. Chrome is asked to close itself
+                # and given a moment to write its cookies, so a sign-in or an account made in the session's
+                # last seconds is in the profile for the next one. Never raises; what is left is stopped
+                # below exactly as before.
+                # The wait comes out of the time the session did not use (close_wait), so the result is handed
+                # in under its lease no later than before.
+                browser_runtime.close_cleanly(config, directory, browser_runtime.close_wait(deadline))
                 portable.kill_tree(worker.pid)
-                worker.wait(timeout=5)
+                try:
+                    worker.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # The engine did not exit in time after being stopped. Nothing raised here may replace the
+                    # session's own outcome (a finished submit must never become a failure that is retried):
+                    # what is left of Chrome is still stopped below, and the outcome already decided stands.
+                    pass
                 browser_runtime.end_session(config)
                 if claude and not judged:   # stopped live or timed out: its model_calls row all the same
                     try:
@@ -2197,6 +2279,41 @@ def normalize_stop(result, operation):
     result["blocked"] = stop
 
 
+def form_check_read(result, raw):
+    """A read that stopped on a human check ON THE FORM although the form could be read (owner, 2026-11-13:
+    such a read "is NOT a blocked job: it is a completed read with the fact stored for the submit"). When
+    `result` is blocked CAPTCHA_REQUIRED, or states no stop and no questions of its own, its human_check
+    says ON_FORM with the form readable (structured values, `access_outcomes.form_check`), and its partial
+    review lists the form's questions, the partial review is the read: returned as the result, with its human_check, and with the evidence pointers moved
+    to match. Every value stays as the session reported it; nothing is raised or filled in. Otherwise
+    (`result`, `raw`) unchanged."""
+    stop, partial = result.get("blocked"), result.get("partial_review")
+    # Either shape a real session gave (2026-11-13): stopped on CAPTCHA_REQUIRED, or no stop at all and the
+    # whole read under partial_review (the second: an application with no questions was approved and sent
+    # to an attended submit with no answers). Any other stop stays the stop it is.
+    stopped = isinstance(stop, dict) and stop.get("code") == "CAPTCHA_REQUIRED"
+    if not isinstance(partial, dict) or not (stopped or not stop) or result.get("questions"):
+        return result, raw
+    stated = stop.get("human_check") if stopped else None
+    check = access_outcomes.form_check(stated) or access_outcomes.form_check(partial.get("human_check"))
+    questions = partial.get("questions")
+    if not check or not isinstance(questions, list) or not any(isinstance(item, dict) for item in questions):
+        return result, raw
+    read = dict({key: value for key, value in result.items() if key not in {"blocked", "partial_review"}}, **partial)
+    read["human_check"] = dict(stated if access_outcomes.form_check(stated) else partial["human_check"])
+    evidence = []
+    for entry in raw.get("evidence") or []:
+        pointer = entry.get("pointer") if isinstance(entry, dict) else None
+        if isinstance(pointer, str) and pointer.startswith("/partial_review/"):
+            entry = dict(entry, pointer=pointer[len("/partial_review"):])
+        elif isinstance(pointer, str) and pointer.startswith("/blocked/human_check/"):
+            entry = dict(entry, pointer=pointer[len("/blocked"):])
+        elif isinstance(pointer, str) and pointer.startswith("/blocked"):
+            continue
+        evidence.append(entry)
+    return read, dict(raw, evidence=evidence)
+
+
 def normalize(request, raw, trace, observed_at, trace_path):
     if (set(raw) != set(schema()["required"]) or raw["request_id"] != request["request_id"]
             or raw["binding"] != request["binding"]):
@@ -2230,6 +2347,15 @@ def normalize(request, raw, trace, observed_at, trace_path):
             merged["partial_review"] = {key: value for key, value in inner.items() if key != "blocked"}
         result = merged
         normalize_stop(result, operation)
+    if operation == "inspect":   # E16.T2: a readable form with a human check on it is a read, not a stop
+        result, raw = form_check_read(result, raw)
+        if (isinstance(result.get("partial_review"), dict) and not result.get("blocked")
+                and not result.get("questions") and "facts" not in result):
+            # A read that put everything under partial_review and stated no stop is an incomplete read, never
+            # a complete one with no questions (2026-11-13: such a read was approved as an empty application
+            # and submitted with no answers). Structural keys only; the session's own next_action is kept.
+            result["status"] = "BLOCKED"
+            normalize_stop(result, operation)
     for field, expected in (("job_key", request["payload"]["job"]["job_key"]),
                             ("attempt_id", request["payload"].get("attempt_id"))):
         if field in result and result[field] not in {None, expected}:
@@ -2239,11 +2365,16 @@ def normalize(request, raw, trace, observed_at, trace_path):
     quotable = quotable_request(request)
     observations, failed_observations, calls, sequence = {}, {}, set(), []
     pages = {}  # tool call id -> the page URL its answer showed (host-observed, never model text)
+    last_page = None   # the page a navigation or snapshot answer showed last (see OBSERVED_ORIGIN_TOOLS)
     reader = engines.for_run(Path(trace_path).parent).trace_reader()   # the session's engine (none recorded: Codex)
+    unsettled = set()   # removed-tool steps that started and have not been seen refused (owner, 2026-11-12)
     for event in (event for line in trace.splitlines() for event in reader.feed(line)):
         if event.phase is None:
             continue
         if not tool_event(event, operation == "submit", operation == "investigate"):
+            if event.kind == "tool" and event.call.tool == browser_guard.REMOVED_TOOL:
+                (unsettled.add if event.phase == "started" else unsettled.discard)(
+                    event.call.id if isinstance(event.call.id, str) else None)
             continue
         call = event.call
         if not call.has_id:
@@ -2254,8 +2385,8 @@ def normalize(request, raw, trace, observed_at, trace_path):
             continue
         sequence.append(call)
         response = call.result
-        # Only the browser's own tools observe a page (E7.T1): the arm answer and the CAPTCHA wait are
-        # never evidence, as live (they were other servers there).
+        # Only the browser's own tools observe a page (E7.T1): the arm answer is never evidence, as live
+        # (it was another server there).
         if (call.tool not in browser_guard.TOOLS and call.tool != browser_guard.CONTINUE_TOOL
                 or not isinstance(response, dict)):   # CONTINUE_TOOL: a piece of a cut page read (Claude)
             continue
@@ -2266,10 +2397,28 @@ def normalize(request, raw, trace, observed_at, trace_path):
             shown = [page for page in [browser_guard.continuation_page(result_text(response))] if page]
         if shown:
             pages[identifier] = shown[-1]
+        if call.tool in OBSERVED_ORIGIN_TOOLS and call.is_error is False and PAGE_HEADER_URL.search(result_text(response)):
+            last_page = PAGE_HEADER_URL.search(result_text(response)).group(1)
         if call.is_error:
             failed_observations[identifier] = observed_text(response, call.tool)
         elif call.is_error is False:
             observations[identifier] = observed_text(response, call.tool)
+    if unsettled:   # the removed tool's step started and no refusal followed: not provably a call that never ran
+        raise ValueError("APPLICATION_UNAUTHORIZED_TOOL")
+    # An account wall's description (E15.T6): the model's values are fitted to their contract, never
+    # a reason to refuse the result. `observed_origin` is written here: the origin of the last page a
+    # navigation or snapshot answer showed. Whatever the model put under that name is removed first.
+    # It is an observation for the record, NOT trustworthy for any security decision: the model
+    # decides where the session goes last (`access_outcomes.description_of`).
+    result.pop("observed_origin", None)
+    if isinstance(result.get("blocked"), dict):
+        result["blocked"].pop("observed_origin", None)
+        if access_outcomes.WALL_REASONS.get(result["blocked"].get("code")) == "SIGN_IN":
+            described = access_outcomes.clean_description(result["blocked"].pop("wall", None))
+            if described is not None:
+                result["blocked"]["wall"] = described
+            if access_outcomes.origin_of(last_page):
+                result["observed_origin"] = access_outcomes.origin_of(last_page)
     evidence = raw["evidence"]
     if not isinstance(evidence, list):
         raise ValueError("APPLICATION_EVIDENCE_LIMIT")
@@ -2882,6 +3031,7 @@ def consume(root, database, config, request_id, executor=None):
             # never-armed reconciliation still recover the job; only the reaping is lost.
             shutdown_handlers.clear()
             break
+    site = None   # E15.T4: the site whose saved session this session restores and may save
     try:
         remaining = (dt.datetime.fromisoformat(envelope["lease_until"]) - dt.datetime.now(dt.timezone.utc)).total_seconds()
         budget = timeout - int(time.monotonic() - started) - 5
@@ -2915,6 +3065,10 @@ def consume(root, database, config, request_id, executor=None):
         request = {key: value for key, value in envelope.items() if key != "token"}
         request.update(deadline=deadline, context=request_context,
                        result_contract=result_contract(operation))
+        # E16.T2: an attended submit is told where the check sits and the order for its kind (attended_submit.claim).
+        attended = config.get(form_check_hold.ATTENDED_KEY) if operation == "submit" else None
+        if isinstance(attended, dict):
+            request["attended"] = attended
         if operation == "submit":
             request["payload"], staged = staged_uploads(envelope["payload"], directory)
         else:
@@ -2929,34 +3083,92 @@ def consume(root, database, config, request_id, executor=None):
             prompt += "\n\n" + OPERATION_PROMPTS[section]
         if operation == "submit":
             prompt += "\n" + SUBMIT_SUPPLEMENT
+        worker_config = form_check_hold.prepare(dict(config, _application_operation=operation), directory, root,
+                                                request_id, operation)
+        if form_check_hold.attended(worker_config):
+            prompt += "\n" + ATTENDED_SUPPLEMENT
+            # The guard opens the application's own address itself before the engine's first step (the same
+            # address this request tells the session to open), so the user sees the page at once.
+            import attended_submit
+            start = attended.get("start_url") if isinstance(attended, dict) else None
+            # Either address passes the official-destination rule a submit's own address passes, or none is opened.
+            start = attended_submit.official(start) or attended_submit.official(envelope["payload"].get("url"))
+            if isinstance(start, str):
+                worker_config[browser_runtime.START_URL_CONFIG_KEY] = start
         prompt += "\nUNTRUSTED_REQUEST_JSON:\n" + encoded(request)
         (directory / "prompt.txt").write_text(prompt)
-        worker_config = dict(config, _application_operation=operation)
-        with tempfile.TemporaryDirectory(prefix="private-claim-", dir=directory) as private:
-            job = envelope["payload"]["job"]
-            try:
-                role = json.loads(job.get("payload") or "{}").get("role")
-            except ValueError:
-                role = None
-            human_check = Path(private) / "human-check.json"
-            human_check.write_text(encoded({
-                "root": str(root), "request_id": request_id, "directory": str(directory),
-                "job_key": job["job_key"], "employer": job.get("employer"), "role": role,
-                "url": envelope["payload"].get("url"), "operation": operation}))
-            worker_config["_application_human_check"] = str(human_check)
-            if operation == "submit":
-                private_claim = Path(private) / "claim.json"
-                with os.fdopen(os.open(private_claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
-                    json.dump({"root": str(root), "envelope": envelope, "deadline": deadline, "staged": staged}, stream)
-                worker_config["_application_guard_claim"] = str(private_claim)
-            (executor or execute)(worker_config, prompt, directory, timeout)
-        raw = json.loads(outreach_history_browser.read(directory / "output.json", 128 * 1024),
-                         object_pairs_hook=reply_worker._unique_object)
-        trace = outreach_history_browser.read(directory / "trace.jsonl", MAX_TRACE)
+        # Site sessions (E15.T4, site_sessions.py): the read and the submit restore the cookies saved for
+        # the site (in the guard, before any page work) and may save them again below. A saved session
+        # from a cleared wall that has since expired is the wall again, known without a model session:
+        # the request ends with that wall code and nothing is started.
+        if operation in site_sessions.OPERATIONS:
+            site = site_sessions.site_key(envelope["payload"].get("url"))
+        wall = site_sessions.before_session(site) if site else None
+        if operation in site_sessions.ALWAYS_OPEN:
+            wall = None   # a confirming read is never answered without opening the site (an expired entry is still dropped)
+        # E15.T8 (access_step.py): under "Sign in and create accounts for me", a job that met its site's
+        # account wall spends its next request on Sidedoor's own step, which ends as the wall it is about.
+        import access_step
+        step = None
+        # Only a READ is ever spent on a step (the job's own or the one its site is owed): a submit, a verify
+        # or a reconcile request is never replaced by one and runs exactly as it always has.
+        if operation == "inspect" and site and not wall \
+                and access_outcomes.effective_setting(database) == access_outcomes.SIGN_IN_FOR_ME:
+            # The job's own step, else the finishing profile step its SITE is owed (the user's answers are in).
+            # A step the site is owed rides only on a read (`access_step.lendable`); never on a submit, a
+            # verify or a reconcile, which run exactly as before.
+            step = (access_step.due(database, envelope["payload"]["job"]["job_key"], site, applications.stamp())
+                    or access_step.site_due(database, envelope["payload"]["job"]["job_key"], site, applications.stamp(),
+                                            operation=operation))
+        if wall:
+            (directory / "trace.jsonl").write_text("")
+            raw = {"request_id": request["request_id"], "binding": request["binding"], "evidence": [],
+                   "result_json": encoded({"blocked": {"code": wall, "next_action": site_sessions.EXPIRED_ACTION}})}
+            trace = b""
+        elif step:
+            settled, site = site, None       # the step settles the site session itself, whatever happens
+            code = access_step.run(database, worker_config, request, directory, timeout, executor, step, settled,
+                                   applications.stamp(), root=root)
+            (directory / "trace.jsonl").write_text("")
+            raw, trace = access_step.stop_result(request, code), b""
+        else:
+            if site:
+                worker_config[site_sessions.CONFIG_KEY] = site
+            with tempfile.TemporaryDirectory(prefix="private-claim-", dir=directory) as private:
+                if operation == "submit":
+                    private_claim = Path(private) / "claim.json"
+                    with os.fdopen(os.open(private_claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+                        json.dump({"root": str(root), "envelope": envelope, "deadline": deadline, "staged": staged,
+                                   # E16.T2: an attended session's hold file; the arm's deadline moves by the time held.
+                                   "hold": (str(form_check_hold.hold_file(directory))
+                                            if form_check_hold.attended(worker_config) else None)}, stream)
+                    worker_config["_application_guard_claim"] = str(private_claim)
+                try:
+                    (executor or execute)(worker_config, prompt, directory, timeout)
+                    if browser_runtime.guard_stopped(directory):   # whatever the session answered: a failed one
+                        raise RuntimeError(browser_runtime.SETUP_STOPPED_CODE)
+                finally:
+                    # E15.T7: whatever the page tools wrote after a saved sign-in was typed holds no value.
+                    import saved_sign_ins
+                    saved_sign_ins.clean_output(directory / browser_runtime.OUTPUT_FOLDER,
+                                                worker_config.get(saved_sign_ins.CONFIG_KEY),
+                                                directory / browser_runtime.GUARD_AUDIT)
+            raw = json.loads(outreach_history_browser.read(directory / "output.json", 128 * 1024),
+                             object_pairs_hook=reply_worker._unique_object)
+            trace = outreach_history_browser.read(directory / "trace.jsonl", MAX_TRACE)
         result = normalize(request, raw, trace, applications.stamp(), directory / "trace.jsonl")
         (directory / "result.json").write_text(encoded(result))
         completion = desktop_adapter.complete(database, dict(envelope, result=result))
         summary.update(state="COMPLETE", accepted=completion["accepted"])
+        if site:
+            # Signed in = an accepted result that is not an access wall (structured code only; the wall
+            # codes are access_outcomes'). Only the sign-in wall forgets the saved session: a human check
+            # or a second-step code leaves it for the next session (owner, 2026-11-12).
+            blocked = result.get("blocked") if isinstance(result.get("blocked"), dict) else {}
+            walled = blocked.get("code") in access_outcomes.WALL_REASONS
+            site_sessions.settle(site, signed_in=completion["accepted"] is True and not walled and not result.get("error"),
+                                 sign_in_again=blocked.get("code") == site_sessions.SIGN_IN_AGAIN)
+            site = None
         if result["observed_browser_calls"]:
             execution_context = ("mock" if executor is not None else "launchd" if os.environ.get(
                 "XPC_SERVICE_NAME", "").startswith(run_locks.LAUNCHD_LABEL_PREFIX) else "foreground")
@@ -2969,6 +3181,8 @@ def consume(root, database, config, request_id, executor=None):
                     "result_state": result.get("status", result.get("outcome", "BLOCKED" if result.get("blocked") else "OBSERVED")),
                     "receipt_verified": result.get("status") == "SUBMITTED"})
     except Exception as error:
+        if site:
+            site_sessions.settle(site, signed_in=False)   # a failed session saves nothing
         summary["error_type"] = type(error).__name__
         summary["code"] = "APPLICATION_BROWSER_FAILED"
         if re.fullmatch(r"APPLICATION_[A-Z_]+", str(error)):
@@ -2981,7 +3195,13 @@ def consume(root, database, config, request_id, executor=None):
         if limit:
             summary.update(code=provider_limits.CODE, resume_at=limit.next_at)
         try:
-            if operation in desktop_adapter.READ_OPERATIONS and str(error) in {
+            import session_yield
+            if session_yield.yielded(directory) and session_yield.hand_back(
+                    database, envelope, request_id, operation, applications.stamp()):
+                # E16 Y1 c: its guard stopped it for an attended submit the user is waiting on. The request is
+                # handed back as one that never ran; `applications.process` leaves the job as it was, due now.
+                summary.update(failure_committed=False, yielded=True, code=browser_guard.YIELD_REASON)
+            elif operation in desktop_adapter.READ_OPERATIONS and str(error) in {
                     "APPLICATION_LEASE_TOO_SHORT", "APPLICATION_REQUEST_LIFE_TOO_SHORT_FOR_A_FULL_READ"}:
                 # Refused before any browser session started: this claim read nothing, so it is
                 # handed back (claims - 1, expired now). When no earlier claim ran either, the next
@@ -3038,7 +3258,7 @@ def consume(root, database, config, request_id, executor=None):
                 summary["failure_committed"] = True
         except (ValueError, sqlite3.Error):
             summary["failure_committed"] = False
-        if operation == "submit":
+        if operation == "submit" and not summary.get("yielded"):
             summary.update(state="UNKNOWN", requires_reconciliation=True)
     finally:
         # The staged résumé and cover-letter copies go with the session (review fix 10).
@@ -3061,6 +3281,7 @@ class ArmBinding:
         self.envelope = private["envelope"]
         self.deadline = private["deadline"]
         self.staged = private.get("staged") or {}
+        self.hold = private.get("hold")   # E16.T2: an attended session's hold file, else None
         self.attempted = False
 
     def arm(self, arguments):
@@ -3090,7 +3311,12 @@ class ArmBinding:
                     and (isinstance(arguments.get("observed_email_to", []), list)
                          and len(arguments.get("observed_email_to", [])) <= 20
                          and all(isinstance(item, str) for item in arguments.get("observed_email_to", []))))
-        if not (legacy or observed) or dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(self.deadline):
+        # E16.T2: the deadline moves by exactly the time an attended session was held (form_check_hold.held),
+        # and by nothing else; a session without a hold file is judged against its own deadline as ever.
+        now = dt.datetime.now(dt.timezone.utc)
+        deadline = dt.datetime.fromisoformat(self.deadline) + dt.timedelta(
+            seconds=form_check_hold.held_in(self.hold, now))
+        if not (legacy or observed) or now >= deadline:
             raise ValueError("APPLICATION_ARM_INVALID_OR_EXPIRED")
         # The copies the browser uploads from must still be their originals byte for byte (E7.T1
         # review fix 4); the originals themselves are checked by desktop_adapter.arm below.
@@ -3125,67 +3351,3 @@ class ArmBinding:
                                        applications.stamp(), detail)
         except Exception:
             return
-
-
-class HumanCheckWait:
-    """The owner-CAPTCHA wait (owner, 2026-09-28: "escalate to me if captcha comes up on telegram").
-
-    The browser AI never touches a human-verification box. It calls this tool once instead: the
-    call sends the owner one Telegram message, keeps the same claim alive, waits the full
-    HUMAN_CHECK_SECONDS and returns so the AI re-reads the page once. A second call answers
-    WAIT_EXPIRED, so the read ends CAPTCHA_REQUIRED as before.
-    """
-
-    def __init__(self, path, sleep=time.sleep, clock=None):
-        self.context = json.loads(Path(path).read_text())
-        self.sleep = sleep
-        self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
-        self.started = None
-        self.waited = False
-        self.extended = False
-        # Called once when the wait has begun (the owner notified, the claim extended): a headless
-        # session's guard reopens its Chrome headed for the tick (browser_guard.Proxy.show_headed).
-        self.on_begun = None
-
-    def call(self):
-        now = self.clock()
-        if self.started is None:
-            self.started = now
-            self.extended = self.begin(now)
-            if self.extended and self.on_begun is not None:
-                self.on_begun()
-        left = HUMAN_CHECK_SECONDS - (now - self.started).total_seconds()
-        if left <= 0 or self.waited or not self.extended:
-            return ("WAIT_EXPIRED: the owner did not clear the human check in time. Do not touch it; "
-                    "stop and return blocked with code CAPTCHA_REQUIRED.")
-        self.sleep(min(HUMAN_CHECK_INTERVAL, left))
-        self.waited = True
-        return ("Waited for the owner. Re-read the page once: if the human check is cleared, continue; "
-                "if it is still there, return blocked with code CAPTCHA_REQUIRED. Never touch it yourself "
-                "and do not call wait_for_human_check again.")
-
-    def begin(self, now):
-        root = Path(self.context["root"])
-        until = now + dt.timedelta(seconds=HUMAN_CHECK_SECONDS + HUMAN_CHECK_FINISH)
-        database = sqlite3.connect(paths.database(root), timeout=run_locks.SESSION_TOOL_BUSY_TIMEOUT_SECONDS)
-        database.row_factory = sqlite3.Row
-        try:
-            # The claim is extended first. If it cannot be (armed, lapsed or no longer claimed), the
-            # session is not kept alive past a lease it no longer holds and the owner is not asked.
-            if not desktop_adapter.extend_for_human_check(database, self.context["request_id"], until.isoformat(), now.isoformat()):
-                return False
-            (Path(self.context["directory"]) / "human_check.json").write_text(encoded({"until": until.isoformat()}))
-            what = " / ".join(item for item in (self.context.get("employer"), self.context.get("role")) if item)
-            with database:
-                applications.notify(database, self.context["job_key"] + ":HUMAN_CHECK:" + self.context["request_id"],
-                    f"Job search: the {what} application is waiting on a CAPTCHA in Chrome. Tick \"I am human\" "
-                    f"yourself in the last 2 minutes before the {HUMAN_CHECK_SECONDS // 60}-minute mark (a tick expires "
-                    f"after about 2 minutes); it checks once at {HUMAN_CHECK_SECONDS // 60} minutes and carries on. "
-                    f"If you don't see the window, click Chrome in the Dock. "
-                    f"{self.context.get('url') or ''}".strip(), now.isoformat())
-            import notifications
-            notifications.dispatch(database, resources.read_json("config.json"),
-                                   lock_wait_seconds=run_locks.SESSION_TOOL_BUSY_TIMEOUT_SECONDS)
-        finally:
-            database.close()
-        return True

@@ -169,7 +169,13 @@ def headless_first(config, provider):
     """True when the draft is made headless first: macOS's background launch (Sidedoor's own profile) and
     a webmail whose saved draft reopens at its address."""
     import browser_runtime
-    return provider in REOPEN_PROVIDERS and bool(browser_runtime.background_launch(config))
+    if provider not in REOPEN_PROVIDERS:
+        return False
+    if browser_runtime.background_launch(config):
+        return True
+    # Windows (owner, 2026-11-12, V7): the same first phase, when that session can be hidden there.
+    return bool(browser_runtime.hidden_launch(config) and browser_runtime.headless_user_agent(
+        dict(config or {}, **{browser_runtime.HEADLESS_PHASE: True}), OPERATION))
 
 
 def reopenable(url, provider):
@@ -195,6 +201,13 @@ def reopen(profile, url):
     No AI: the webmail opens its saved draft at that address. Raises OSError when it cannot start."""
     import browser_runtime
     import setup_steps
+    if browser_runtime.windows_host():
+        # Windows: the window Sidedoor starts itself, in a Job Object of its own (launch_windows), at `url`.
+        binary = setup_steps.chrome_path()
+        if not binary:
+            raise OSError("Google Chrome not found")
+        browser_runtime.launch_windows(binary, profile, url=url)
+        return
     app = browser_runtime.chrome_app(setup_steps.chrome_path() or "")
     if app is None:
         raise OSError("Google Chrome.app not found")
@@ -203,8 +216,8 @@ def reopen(profile, url):
 
 class SignInWait:
     """The guard's wait_for_human_check for support_email (browser_guard.Proxy): the user signs in to
-    their webmail in the draft window. Unlike application_browser.HumanCheckWait it has no application
-    claim, database, notification or owner message. The first call writes SIGNIN_FILE (the session's
+    their webmail in the draft window. It has no application
+    claim, database, notification or owner message (the application CAPTCHA wait is retired, E16.T1). The first call writes SIGNIN_FILE (the session's
     deadline moves past the wait; the dashboard shows "signin"); each call returns after
     SIGNIN_INTERVAL seconds so the AI re-reads the page, until SIGNIN_SECONDS have passed."""
 
@@ -376,7 +389,7 @@ def open_pages(profile):
     try:
         import browser_runtime
         lines = (Path(profile) / browser_runtime.DEVTOOLS_PORT_FILE).read_text().split("\n")
-        with urllib.request.urlopen("http://127.0.0.1:%d/json/list" % int(lines[0]), timeout=5) as answer:
+        with browser_runtime.local_open("http://127.0.0.1:%d/json/list" % int(lines[0]), timeout=5) as answer:
             return sum(1 for target in json.loads(answer.read()) if target.get("type") == "page")
     except (OSError, ValueError, TypeError):
         return None

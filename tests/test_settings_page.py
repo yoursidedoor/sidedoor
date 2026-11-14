@@ -20,10 +20,10 @@ from pathlib import Path
 from unittest import mock
 
 import license_fixtures
+import setup_steps
 import linkedin_contacts
 import research_workflow
 import resume_intake
-import setup_steps
 import user_profile
 import version
 
@@ -487,24 +487,44 @@ class SettingsPageTest(unittest.TestCase):
         (self.home / "license.key").write_text(LICENSE_KEY + "\n")
         entitlement_file(self.home)
         transport = mock.Mock(return_value=(200, {"items": [{"type": "LINKEDIN", "name": "Alex", "status": "OK"}]}))
-        with mock.patch.object(setup_steps.unipile_port, "RelayTransport", return_value=transport), \
-                mock.patch.object(setup_steps.unipile_port, "hosted_link", return_value="https://unipile.test/r") as link:
+        import linkedin_session
+        self.addCleanup(linkedin_session.set_reader, linkedin_session.set_reader(lambda home: None))
+        with mock.patch.object(setup_steps.unipile_port, "RelayTransport", return_value=transport):
             status = self.client.get("/settings/linkedin/status", headers={"hx-request": "true"})
             self.assertEqual("#connection-linkedin", status.headers["hx-retarget"])
             self.assertNotIn('id="connection-openrouter"', status.text)  # typing there is kept
             self.assertIn("LinkedIn connected: Alex.", status.text)
-            self.assertIn('hx-post="/settings/linkedin/reconnect"', status.text)
+            # E18: one LinkedIn row; [Reconnect LinkedIn] sends the browser's sign-in, no other page.
+            self.assertEqual(1, status.text.count("<h3>LinkedIn</h3>"))
+            self.assertIn("Reconnect LinkedIn</button>", status.text)
+            self.assertIn('hx-post="/settings/linkedin/connect"', status.text)
             response = self.client.post("/settings/linkedin/reconnect", headers=HTMX).text
-            self.assertEqual("reconnect", link.call_args[0][2])
-            self.assertIn('href="https://unipile.test/r"', response)
-            link.reset_mock()
-            self.client.post("/settings/linkedin/connect", headers=HTMX)  # listed: never a second paid account
-            link.assert_not_called()
+            self.assertIn("is not signed in to LinkedIn", response)
+            self.assertIn("I'm signed in</button>", response)
+            self.assertNotIn("POST", [call.args[0] for call in transport.call_args_list])   # nothing was sent
 
     def test_linkedin_without_a_license_points_to_the_license_section(self):
         self.assertIn('Needs your license first (<a href="#license">', self.client.get("/settings").text)
 
     # --- License ----------------------------------------------------------------------------------
+
+    def test_share_progress_box_agrees_with_setup_while_start_is_pending_and_after(self):
+        import progress_share
+        self.assertNotIn(progress_share.SETTING, setup_steps.load_state(self.home))
+        page = self.client.get("/settings").text
+        self.assertIn('id="s-share-progress" checked', page)                                # Setup unfinished: on
+        form = page.split('action="/settings/progress"')[1].split("</form>")[0]             # M3 line, M4 Enter mark
+        self.assertIn('aria-describedby="s-share-progress-help" data-enter-inert id="s-share-progress"', form)
+        self.assertIn('<p class="muted choice-help" id="s-share-progress-help">%s</p>' % progress_share.HELP, form)
+        self.assertIn("<noscript><button", form)
+        self.assertIn("data-enter-inert", self.client.get("/static/settings.js").text)
+        self.assertIn("milestones", progress_share.heartbeat_fields(self.home))             # sent as shown: on
+        self.client.post("/settings/progress", data={}, headers=HTMX)                       # unticked: a saved choice
+        self.assertIn('id="s-share-progress">', self.client.get("/settings").text)
+        self.assertEqual(progress_share.heartbeat_fields(self.home), {"milestones_opt_out": True})
+        setup_steps.update_state(lambda state: state.pop(progress_share.SETTING), self.home)
+        setup_steps.record(self.home, "start", "done", "Sidedoor is running.")              # Start done, no choice: off
+        self.assertIn('id="s-share-progress">', self.client.get("/settings").text)
 
     def test_license_shows_the_key_masked_and_reactivates_with_the_stored_key(self):
         (self.home / "license.key").write_text(LICENSE_KEY + "\n")
@@ -674,7 +694,7 @@ class SettingsPageTest(unittest.TestCase):
                 mock.patch.object(setup_steps.unipile_port, "RelayTransport", return_value=transport):
             response = self.client.post("/settings/license/change", data={"key": LICENSE_KEY}, headers=HTMX).text
         linkedin = response.split('id="connection-linkedin" hx-swap-oob="true"')[1]
-        self.assertIn("Connect LinkedIn</button>", linkedin)
+        self.assertIn("I'm signed in</button>", linkedin)
         self.assertNotIn("Needs your license first", linkedin)
         self.assertIn("LinkedIn Premium lets you add a note to invitations.", linkedin)  # owner, 2026-10-27
 

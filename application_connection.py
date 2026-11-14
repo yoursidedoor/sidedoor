@@ -1,6 +1,7 @@
 import contextlib
 import datetime as dt
 import json
+import sqlite3
 import uuid
 
 import applications
@@ -43,6 +44,16 @@ def paced_until_done(paced):
         yield paced
     finally:
         paced.release()
+
+
+class SessionYielded(applications.AdapterPending):
+    """The session was stopped for an attended submit the user is waiting on and its request handed back
+    (E16 Y1 c, session_yield.py). `applications.process` leaves the job as it was before the session, due now;
+    anywhere else it is an ordinary wait for the browser."""
+
+    def __init__(self, request_id, next_at):
+        super().__init__(request_id, next_at)
+        self.code = "DESKTOP_BROWSER_PENDING"
 
 
 class CapacityWait(applications.AdapterPending):
@@ -99,6 +110,19 @@ def inspect_scope_start(database, job_key, now):
         for (at,) in database.execute("SELECT at FROM application_events WHERE job_key=? AND event=?",
                                       (job_key, "APPLICATION_INSPECT_SCOPE_RESET")):
             starts.append(moment(at))
+        # The user's own action on the job's Needs you card (I've signed in, the live view's Done, I've
+        # confirmed it, Resend) or the setting they chose released its wait (E15): the user asked for
+        # another try, as an owner reopen does. Try again on Applications already writes a reopen grant.
+        # Never a release nobody asked for (a site that became free again).
+        import access_outcomes
+        for at, detail in database.execute("SELECT at,detail FROM application_events WHERE job_key=? AND event=?",
+                                           (job_key, access_outcomes.RELEASED_EVENT)):
+            try:
+                outcome = json.loads(detail).get("outcome")
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if outcome in ("released", access_outcomes.SETTING_RELEASED):
+                starts.append(moment(at))
     starts = [value for value in starts if value is not None]
     return max(starts) if starts else None
 
@@ -182,6 +206,7 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
         if self.limit is not None and self.allocated + operations > self.limit:
             raise CapacityWait("APPLICATION_BROWSER_CYCLE_CAPACITY", desktop_adapter.later(now, 60))
         reservation = "application-browser:" + str(uuid.uuid4())
+        self.last_reservation = reservation   # `recovery_decision` credits it back when no answer came
         with self.database:
             reserved = workflow_tasks.reserve_application_compute(self.database, reservation, job_key,
                 now, operations * seconds_per_operation, self.config.get("timezone", "America/Los_Angeles"),
@@ -223,7 +248,10 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
         refused = sum(in_scope(row[0], since) for row in self.database.execute("""SELECT at FROM application_events
             WHERE job_key=? AND event=? AND json_extract(detail,'$.purpose')='orchestrator_recovery'""",
             (job_key, provider_limits.EVENT)))
-        refused += sum(in_scope(row[0], since) and provider_limits.decision_limited(json.loads(row[1]))
+        # Nor is a call that got no answer back (owner, 2026-11-13: network, timeout, server error, key):
+        # it used an admission and made no decision, so an outage never spends the scope's admissions.
+        refused += sum(in_scope(row[0], since) and (provider_limits.decision_limited(json.loads(row[1]))
+                                                    or application_recovery.unreachable_record(json.loads(row[1])))
                        for row in self.database.execute(
             "SELECT at,detail FROM application_events WHERE job_key=? AND event IN (?,?)",
             (job_key, "APPLICATION_RECOVERY_DECISION_FAILED", application_recovery.HOLD_REVIEW_FAILED_EVENT)))
@@ -237,6 +265,7 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
         job_key = packet["job"]["job_key"]
         if self.coordinator_cap_reached(job_key):
             raise RuntimeError(COORDINATOR_CAP_CODE)
+        self.last_reservation = None
         self.reserve(1, job_key, seconds_per_operation=30, purpose="orchestrator_recovery")
         try:
             # The coordinator sees the whole raw résumé text saved at upload (owner, 2026-10-21, E4.T2).
@@ -249,6 +278,17 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
         except Exception as error:
             limit = provider_limits.wait_of(error)
             if not limit:
+                # A call that got no answer back spends none of the day's compute (owner, 2026-11-13): its
+                # 30-second booking is credited back whole, so an outage cannot starve the browser work.
+                import application_recovery
+                booked = getattr(self, "last_reservation", None)
+                if booked and application_recovery.failure_kind(error) == application_recovery.UNREACHABLE:
+                    at = self.clock()
+                    try:
+                        with self.database:
+                            workflow_tasks.refund_compute(self.database, booked, at, at, at, "coordinator call got no answer")
+                    except (ValueError, sqlite3.Error):
+                        pass   # a credit that cannot be recorded never changes what the failure is
                 raise
             with self.database:
                 self.provider_waited(job_key, limit.detail(), self.clock(), purpose="orchestrator_recovery",
@@ -285,13 +325,30 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
             # (owner, 2026-10-02): the cap bounds repeated inconclusive reads, and a good read
             # that a compute wait kept from its submit is not one (Cyberdyne, 2026-10-02).
             complete = complete_read_sources(self.database, job_key)
-            reviewed = sum(row[1] for row in self.database.execute("""SELECT created_at,claims,result FROM desktop_requests
+            # Nor is the access step's own request a read of the posting, nor a read that ended at an
+            # account wall the product answered with a step (E15, access_step.not_reads): wall, step and
+            # the read after it used to be the whole three, so no second step could ever run.
+            import access_step
+            spared = access_step.not_reads(self.database, job_key)
+            # Nor is the one read that timed out right after the user's step on a human check (E16.T3).
+            import access_outcomes
+            spared = set(spared) | access_outcomes.free_reads(self.database, job_key)
+            reviewed = sum(row[1] for row in self.database.execute("""SELECT created_at,claims,result,request_id FROM desktop_requests
                 WHERE job_key=? AND operation='inspect'
                 AND json_extract(payload,'$.job.payload')=? AND json_extract(payload,'$.url')=?""",
                 (job_key, body["job"]["payload"], body["url"]))
                 if in_scope(row[0], since) and not provider_limits.stored_result_limited(row[2])
-                and result_source(row[2]) not in complete)
+                and result_source(row[2]) not in complete and row[3] not in spared)
             if reviewed >= 3:
+                # A step still to run is never left behind an exhausted job with no card: it is settled
+                # as unknown and the wall goes to the user (the sign-in or unknown-outcome card).
+                if self.database.in_transaction:
+                    wall = access_step.settle_unrun(self.database, job_key, self.clock())
+                else:
+                    with self.database:
+                        wall = access_step.settle_unrun(self.database, job_key, self.clock())
+                if wall:
+                    return {"blocked": {"code": wall, "next_action": access_step.NEXT_ACTION}}
                 return {"blocked": {"code": "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED",
                     "next_action": "Orchestrator must review the saved browser findings and provide new verified evidence or an alternative official route; no repeated unchanged investigation"}}
         # One Chrome session at a time (state/browser.lock, owner 2026-10-02). Taken before any
@@ -336,7 +393,24 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
                 if (not request or request["state"] != "PENDING" or request["operation"] != operation
                         or request["job_key"] != job_key or request["attempt_id"] != body["attempt_id"]):
                     raise
-                self.consumer(self.root, self.database, self.config, pending.request_id)
+                # E16.T2: a job whose attended submit the user asked for from its card gets an attended
+                # session (attended_submit.claim: a submit only, once); every other session is as ever.
+                import attended_submit
+                if operation == "submit" and attended_submit.unwatched(self.database, job_key, self.clock()):
+                    # Its card stopped being watched since the round checked: no session, attended or not
+                    # (the check is on the form). The request is answered as stopped on the check and the
+                    # job waits for its card again, with no try spent (attended_submit.hand_back).
+                    attended_submit.hand_back(self.database, self.root, job_key, pending.request_id, self.clock())
+                    return super().call(operation, payload)
+                session_config = attended_submit.claim(self.database, self.config, job_key, operation,
+                                                       pending.request_id, self.clock())
+                try:
+                    summary = self.consumer(self.root, self.database, session_config, pending.request_id)
+                finally:
+                    if session_config is not self.config:
+                        attended_submit.ended(self.database, job_key, pending.request_id, self.clock())
+                if isinstance(summary, dict) and summary.get("yielded") is True:
+                    raise SessionYielded(pending.request_id, self.clock())
                 self.provider_refusal(pending.request_id, job_key)
                 return super().call(operation, payload)
 

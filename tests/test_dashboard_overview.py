@@ -241,7 +241,7 @@ class GatherTest(unittest.TestCase):
         view = self.gather()
         self.assertEqual(view["right_now"], {"confirming": 1, "blocked": 2, "retrying": 2})
         # The one needs-you rule: the asked job is a question only, the answered one needs nothing.
-        self.assertEqual(view["needs"], {"questions": 1, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
+        self.assertEqual(view["needs"], {"questions": 1, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0, "sign_ins": 0})
 
     def test_o19_spent_reconcile_reads_need_the_owner(self):
         db = self.database
@@ -252,7 +252,7 @@ class GatherTest(unittest.TestCase):
         db.commit()
         view = self.gather()
         self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 1, "retrying": 1})
-        self.assertEqual(view["needs"], {"questions": 0, "applications": 1, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
+        self.assertEqual(view["needs"], {"questions": 0, "applications": 1, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0, "sign_ins": 0})
 
     def scheduler(self, scheduler, pause=None):
         if pause:
@@ -409,7 +409,7 @@ class GatherTest(unittest.TestCase):
             view = overview_page.gather(database, CONFIG, self.home, setup_steps.progress(self.home), False, now=self.now)
             self.assertEqual(view["outreach"], {"invitations": 0, "cap": 20, "waiting": 0, "messages": 0, "replies": 0})
             self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 0, "retrying": 0})
-            self.assertEqual(view["needs"], {"questions": 0, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0})
+            self.assertEqual(view["needs"], {"questions": 0, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0, "sign_ins": 0})
             self.assertEqual(view["compute"]["used"], 0)
             self.assertIsNone(view["research"]["last"])
             self.assertEqual(view["research"]["next"], {"label": "As soon as Sidedoor runs"})
@@ -563,7 +563,7 @@ class OverviewPageTest(unittest.TestCase):
         response = self.page()
         self.assertEqual(response.status_code, 200)
         page = response.text
-        for text in ("Sidedoor is not running", "Not run yet", "As soon as Sidedoor runs", "Key works", 'action="/start"',
+        for text in ("Sidedoor is not running", "Not run yet, starts when Sidedoor is running.", "Key works", 'action="/start"',
                      "0 min</strong> <span class=\"muted\">of 5 h 50 min used today", "Right now"):
             self.assertIn(text, page)
         self.assertNotIn('href="/setup"', page)
@@ -982,9 +982,8 @@ class JobRunsTest(unittest.TestCase):
         outreach_card = page.split("<h3>Outreach</h3>")[1].split("<h3>Applications</h3>")[0]
         applications_card = page.split("<h3>Applications</h3>")[1].split("</section>")[0]
         self.assertIn('<span class="muted">(finished)</span>', outreach_card)
-        self.assertIn("next: Not running", outreach_card)      # this test process has no scheduler
-        self.assertIn("Not run yet", applications_card)
-        self.assertIn("next: Not running", applications_card)
+        self.assertIn(", and Sidedoor is not running.", outreach_card)      # this test process has no scheduler
+        self.assertIn("Not run yet, and Sidedoor is not running.", applications_card)
 
     @unittest.skipUnless(DEPENDENCIES, "dashboard packages (fastapi, httpx) are not installed")
     def test_no_row_is_empty_with_an_applications_record_and_no_loop(self):
@@ -1008,12 +1007,10 @@ class JobRunsTest(unittest.TestCase):
         self.database = sqlite3.connect(":memory:")
         outreach_card = page.split("<h3>Outreach</h3>")[1].split("<h3>Applications</h3>")[0]
         applications_card = page.split("<h3>Applications</h3>")[1].split("</section>")[0]
-        # One line each (owner, 2026-10-24): "Last run 10:12 (finished) · next: Not running".
+        # One sentence each (owner, 2026-11-14, E15.T14 L8): "Last run 10:12 (finished), and Sidedoor is not running."
         line = lambda card: " ".join(re.search(r'<p class="overview-run">(.*?)</p>', card, re.S).group(1).split())
-        self.assertEqual(line(outreach_card), 'Last run 10:12 <span class="muted">(finished)</span> '
-                                              '<span class="muted" aria-hidden="true">·</span> next: Not running')
-        self.assertEqual(line(applications_card), 'Last run 09:50 <span class="muted">(finished)</span> '
-                                                  '<span class="muted" aria-hidden="true">·</span> next: Not running')
+        self.assertEqual(line(outreach_card), 'Last run 10:12 <span class="muted">(finished)</span>, and Sidedoor is not running.')
+        self.assertEqual(line(applications_card), 'Last run 09:50 <span class="muted">(finished)</span>, and Sidedoor is not running.')
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+{# "Send these N ..." under a message label (E14.T3): every waiting message under the label, not just this
+   page. The box is always in the Messages waiting section (empty under All) so a card's htmx answer can
+   swap it with `oob` and the list follows the action. With htmx the page's content is swapped in place and
+   the address stays the Approvals page; a plain post is redirected back to it. #}
+{% set v = view %}
+<div class="approvals-release-box" id="approvals-release"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if v.release and v.send_words %}{% set n = v.release|length %}
+  <form method="post" action="/approvals/messages/release?{{ v.query }}" hx-post="/approvals/messages/release?{{ v.query }}" hx-target=".approvals-page" hx-select=".approvals-page" hx-swap="outerHTML" hx-push-url="false" class="actions approvals-release">
+    {% for item in v.release %}<input type="hidden" name="action_id" value="{{ item.action_id }}"><input type="hidden" name="payload_hash" value="{{ item.payload_hash }}">{% endfor %}
+    <button class="button button-highlight" type="submit">{{ "Send this " + v.send_words[0] if n == 1 else "Send these %d %s"|format(n, v.send_words[1]) }}</button>
+  </form>
+  {% endif %}
+</div>

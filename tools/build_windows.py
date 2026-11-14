@@ -704,6 +704,7 @@ def main(argv=None):
         raise SystemExit("Nuitka %s is pinned; this venv has %s" % (NUITKA_VERSION, importlib.metadata.version("nuitka")))
     if not sys.flags.utf8_mode:
         raise SystemExit("run the build with -X utf8 (Nuitka compiles in the mode it runs in)")
+    build_macos.check_build_packages()   # before an hour of compiling: websockets, for the guard and the live view
     arch = host_arch()
     if arch not in ASSETS:
         raise SystemExit("the build interpreter is %s; use an x64 (or arm64) python.org Python" % arch)

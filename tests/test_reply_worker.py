@@ -33,7 +33,7 @@ def model_answer(owner, prompt):
     request = json.loads(prompt.split("UNTRUSTED_SOURCE_JSON:\n", 1)[1])
     actual = json.loads(request["source_snapshot"]["payload"])["inbox"]["text"]
     span = {"start": 0, "end": len(actual), "text": actual}
-    return {"output_version": reply_worker.VERSION, "source_sha256": request["source_sha256"],
+    return {"output_version": reply_worker.VERSION, "asks_to_stop_contact": False, "source_sha256": request["source_sha256"],
             "label": "QUESTION", "literal_quote": actual, "quote_span": span,
             "role_reference": request["job_scope"][0]["job_key"] if request["job_scope"] else None,
             "reason": "The speaker is asking a question; this is an inference.",

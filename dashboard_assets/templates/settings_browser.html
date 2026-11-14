@@ -7,7 +7,7 @@
   <form method="post" action="/settings/browser/check" hx-post="/settings/browser/check" hx-target="#connection-browser" hx-swap="outerHTML"><button class="button" type="submit">Check again</button></form>
   {% with guide_name = "chrome" %}{% include "guide_inline.html" %}{% endwith %}
   {% else %}
-  <p class="muted">Sign in there to LinkedIn and to the mailbox of your application email{% if x.application_email %} (<strong>{{ x.application_email }}</strong>){% endif %}.</p>
+  <p class="muted">Sign in there to the mailbox of your application email{% if x.application_email %} (<strong>{{ x.application_email }}</strong>){% endif %}.</p>
   {% set closed = x.browser.status == "done" and not x.browser_open %}
   {% set waiting = x.email_needs or (closed and x.webmail and not x.email_locked and x.email_waiting) %}
   {% if x.browser.message and not (closed and (x.email.message or waiting)) %}<p class="note note-{{ 'error' if x.browser.status == 'failed' else 'info' }}" role="status">{{ x.say(x.browser.message) }}</p>{% endif %}

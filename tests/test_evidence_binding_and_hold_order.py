@@ -81,37 +81,13 @@ class InspectEvidenceBinding(unittest.TestCase):
                 inspect({"evidence_kind": "employer_confirmation_email", "status": status}, [], "verify")
             self.assertEqual(getattr(refused.exception, "pointer", None), pointer)
 
-    def test_words_inside_string_literals_are_not_browser_code(self):
-        guard = application_browser.unsupported_browser_code
-        # Kramerica Power's real fill (2026-09-30) and typical fill code: prose and URLs in strings.
-        for code in ('await tab.click(71); await tab.typeText(71,"I rebuilt the nightly inventory reconciliation job as a streaming service and '
-                     'introduced contract tests and a schema registry for the producer teams.\\n\\n2. Next");',
-                     'await tab.typeText(52,"https://www.linkedin.com/in/someone/"); await tab.typeText(63,"10/28/2026");',
-                     "await tab.typeText(3, 'We import, fetch and require data in a process'); await tab.click(4);"):
-            self.assertFalse(guard(code), code)
-        for code in (
-                # round 1
-                'const token = process.env.KEY', 'x = a++ / process.env.X / 2', 'x = {} / 1; process.exit() / 2',
-                'y = a-- / 2; fetch(u) / 1', 'new Function("return process.env.KEY")()',
-                '[].constructor.constructor("return fetch(1)")()', 'setTimeout("fetch(1)", 0)',
-                '<!-- x\nprocess.env', 'x = 1 --> process.env', "#!`\nprocess.exit(); `'${`'`}`",
-                # round 2: regex, comment and template tricks
-                'x = /\\"/; process.exit(); //"', "x = /\\'/; process.exit(); //'", 'x = /\\`/; process.exit(); //`',
-                'x = /\\//; process.exit()', 'x = /\\/*/; process.exit(); /*/ */', '`${/}/.test(process.exit())}`',
-                's = `${"a".replace(/}/, fetch("u"))}`', '`${ "}" + process.exit() }`', 'a = b / c; // "\nprocess.exit()',
-                'x = /[\\/]/; process.exit()',
-                # round 2: running text as code
-                'const s = "process.exit()"; setTimeout(s, 0)', 'setTimeout(("fetch(\'u\')"), 0)',
-                'setTimeout("" + "fetch(1)", 0)', 'globalThis["Function"]("return process.env")()',
-                'globalThis["setTimeout"]("fetch(1)")',
-                'const e = document.createElement("script"); e.textContent = "fetch(1)"; document.body.append(e)',
-                'location.href = "javascript:fetch(1)"', 'new Worker(URL.createObjectURL(new Blob(["fetch(1)"])))',
-                'document.body.setAttribute("onclick", "fetch(1)"); document.body.click()', 'Function`return process`',
-                # round 2: any `/` in code means the whole code is checked
-                's.replace(/\\//g, 1); fetch(u)', 'r = /[/*]/; fetch(1); q = /a*/'):
-            self.assertTrue(guard(code), code)
+    def test_the_small_lexer_blanks_literals_and_gives_up_on_anything_else(self):
+        # The checks of browser_run_code_unsafe code this lexer was written for went with that tool (owner,
+        # 2026-11-12); browser_guard.cookie_refusal still reads in-page code with it.
+        stripped, literals = application_browser.code_outside_literals("() => document.title + 'Accept cookies'")
+        self.assertNotIn("cookies", stripped)
+        self.assertEqual(literals, ["Accept cookies"])
         self.assertIsNone(application_browser.code_outside_literals('u.split(/\\//)'))
-        self.assertTrue(application_browser.investigation_writes('p = u.split(/\\//); await tab.fill(1)'))
 
     def test_all_null_compensation_is_recorded_as_not_published(self):
         review = {"compensation": {"currency": None, "minimum": None, "maximum": None, "period": None, "verified": None}}

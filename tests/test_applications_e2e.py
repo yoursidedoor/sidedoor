@@ -326,7 +326,9 @@ class ApplicationEndToEndTests(unittest.TestCase):
         self.adapter.unknown_reconcile = True
         self.adapter.access_blocked_reconcile = True
         config = {"application_recovery": {"enabled": True}}
-        for day in range(0, 60):
+        # Each blocked read waits 7 days for the user's step (confirm_read, 2026-11-13), then the next
+        # read runs by itself. Every blocked read counts.
+        for day in range(0, 120):
             self.adapter.now = (dt.datetime.fromisoformat(NOW) + dt.timedelta(days=day)).isoformat()
             applications.cycle(self.database, config, self.root, self.adapter, self.adapter.now)
         self.assertEqual(self.job()["reconcile_attempts"], 10)

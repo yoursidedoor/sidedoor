@@ -183,6 +183,13 @@ class LinkedInNotConnected(LicenseHold):
     next_action = "Connect LinkedIn in Setup or Settings."
 
 
+class LinkedInDisconnected(SetupHold):
+    """E18 (owner A5): the linked account reads as disconnected (`linkedin_connection.held`). Outreach
+    waits, spending no try and dropping nothing, until the session is sent again or the user signs in."""
+    code = "LINKEDIN_DISCONNECTED"
+    next_action = "Sign in to LinkedIn again in Settings > Connections."
+
+
 class RelayRefusedWrite(UncertainWrite):
     """RB6: a write the relay itself refused before forwarding (its own 401 LICENSE_INVALID or 403
     LICENSE_NOT_LINKED body): the request never reached Unipile. Still an UncertainWrite for every
@@ -230,15 +237,21 @@ def for_install(config, home=None, relay_url=None, timeout=DEFAULT_TIMEOUT, **na
     """The LinkedIn port for this install's jobs (RL1): the relay with the home's license key;
     unipile.json only under `"linkedin_transport": "local-dev"`. Raises LicenseRequired without a
     usable license key."""
+    import linkedin_connection
+
+    def guarded(port):
+        # E18 A9: every write asks, at the write itself, whether LinkedIn reads as disconnected.
+        port.held = lambda: linkedin_connection.held(home)
+        return port
     if local_dev(config):
         values = settings(Path(home) / "unipile.json" if home is not None else None)
-        return UnipilePort(HttpTransport(values["base"], values["token"], timeout), **named)
+        return guarded(UnipilePort(HttpTransport(values["base"], values["token"], timeout), **named))
     import setup_steps
     key = setup_steps.license_key(home)
     if not key:
         raise LicenseRequired("LICENSE_KEY_MISSING")
     try:
-        return UnipilePort.from_relay(relay_url or setup_steps.RELAY_URL, key, timeout=timeout, home=home, **named)
+        return guarded(UnipilePort.from_relay(relay_url or setup_steps.RELAY_URL, key, timeout=timeout, home=home, **named))
     except ValueError:   # RelayTransport's LICENSE_KEY_INVALID: an unusable key file
         raise LicenseRequired("LICENSE_KEY_INVALID") from None
 
@@ -475,6 +488,8 @@ class UnipilePort:
         self.page_size = page_size
         self.limit_pages = limit_pages
         self._session_valid = None
+        # E18 A9: `held()` True while LinkedIn reads as disconnected (set by `for_install`); None: no check.
+        self.held = None
 
     @classmethod
     def from_settings(cls, account_id=None, timeout=DEFAULT_TIMEOUT, **named):
@@ -523,6 +538,12 @@ class UnipilePort:
         """Exactly one request; any outcome but a 2xx dict answer is UncertainWrite."""
         if self._session_valid is False:
             raise SessionInvalid("ACCOUNT_SESSION_INVALID")
+        if self.held is not None and self.held():
+            # E18 A9 (owner A5): LinkedIn was found disconnected after this pass's readiness check. No
+            # request is made: the write is refused here as the relay refuses one it never forwards, so
+            # an invitation is recorded as not sent with no try spent, and every caller reads before it
+            # sends again.
+            raise RelayRefusedWrite(LinkedInDisconnected("ACCOUNT_DISCONNECTED"), None)
         try:
             status, parsed = self.transport("POST", path, body=body, multipart=multipart)
         except Exception as error:   # the request may have reached the provider

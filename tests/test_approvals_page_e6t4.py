@@ -327,7 +327,7 @@ class MessagesWaiting(PageBase):
             self.db.execute("INSERT INTO notification_outbox(event_key,message,state,delivery,updated_at) VALUES (?,?,?,?,?)",
                             ("other", "Sent by Telegram.", "DELIVERED", json.dumps({"provider": "telegram"}), NOW.isoformat()))
         page = self.page()
-        self.assertIn("Sidedoor's browser asked for a human check (a CAPTCHA) and waited for you to tick it.", page)
+        self.assertIn("A site asked for a human check (a CAPTCHA) while Sidedoor was applying.", page)
         self.assertNotIn("Sent by Telegram.", page)
 
     def test_a1_notices_read_in_plain_words_with_a_link(self):
@@ -359,7 +359,7 @@ class MessagesWaiting(PageBase):
         notices = page.split('id="notices"')[1].split("</section>")[0]
         self.assertIn("Nimbus Labs (Platform Engineer): The application site asked for a sign-in.", notices)
         self.assertIn("Nimbus Labs (Platform Engineer): Application submitted and confirmed.", notices)
-        self.assertIn("Nimbus Labs (Platform Engineer): Sidedoor's browser asked for a human check", notices)
+        self.assertIn("Nimbus Labs (Platform Engineer): A site asked for a human check (a CAPTCHA) while Sidedoor was applying.", notices)
         self.assertIn("Daily summary for Oct 21: 1 application submitted, 16 new jobs found, 0 invitations sent, "
                       "0 messages received.", notices)
         self.assertIn('<a href="/">See Overview</a>', notices)
@@ -883,8 +883,9 @@ if DEPENDENCIES:
             other = self.ask(self.job(), dict(WHY, id=applications.question_field(WHY)))
             page = self.answer(other, "Because of the mission.", shown="not-the-shown-one")
             self.assertIn("This question changed since it was shown", page)
-            self.assertIn('name="answer" maxlength="4000" aria-labelledby="label-', page)
-            self.assertIn('value="Because of the mission." required>', page)   # a short question: one line
+            # Owner, 2026-11-14 (E15.T14 L10): every free-text answer is a text area; what was typed is kept in it.
+            self.assertIn('<textarea name="answer" rows="3" maxlength="4000" aria-labelledby="label-', page)
+            self.assertIn('required>Because of the mission.</textarea>', page)
             self.assertEqual(self.row(other)["state"], "PENDING")
             self.assertEqual(setup_steps.owner_answers(self.home), [])
 

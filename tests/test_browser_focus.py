@@ -152,8 +152,8 @@ class NothingBringsChromeToFront(unittest.TestCase):
             # CK1: back to the application tab after an emailed code, sign-in popups, one-time Apply links.
             self.assertFalse(guard.client.call("browser_tabs", {"action": "select", "index": 1})[0], operation)
             if operation != "webmail":                         # the code tools are not offered there
-                error, text = guard.client.call("browser_run_code_unsafe",
-                                                {"code": "async (page) => { await page.bringToFront(); }"})
+                error, text = guard.client.call("browser_evaluate",
+                                                {"function": "async () => { await page.bringToFront(); }"})
                 self.assertTrue(error)
                 self.assertIn(browser_guard.FOCUS_CODE, text)
             self.assertFalse(guard.client.call("browser_tabs", {"action": "new", "url": "https://example.com"})[0])

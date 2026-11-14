@@ -139,6 +139,18 @@
   </form>
   {% if step.mode_error %}<p class="field-error" role="alert">{{ step.mode_error }}</p>{% endif %}
   <p class="muted">You can change this any time in Settings.</p>
+  {# E15.T10: the same question as Settings > Applying, preselected; the step is done without it. #}
+  <h3 id="account-question">{{ step.account.title }}</h3>
+  <form class="mode" method="post" action="/setup/account" hx-post="/setup/account" hx-trigger="change" hx-target="#step-{{ step.number }}" hx-swap="outerHTML">
+    {% for value, label in step.account.options %}
+    <label class="choice"><input type="radio" name="account" value="{{ value }}"{% if step.account.chosen == value %} checked{% endif %}>
+      <span><strong>{{ label }}</strong></span></label>
+    {% endfor %}
+    <noscript><button class="button" type="submit">Save</button></noscript>
+  </form>
+  {% if step.account.note %}<p class="muted" id="account-question-note">{{ step.account.note }}</p>{% endif %}
+  {% if step.account.unreadable %}<p class="note note-warning" role="status">{{ step.account.unreadable }}</p>{% endif %}
+  {% if step.account_error %}<p class="field-error" role="alert">{{ step.account_error }}</p>{% endif %}
 
   {% elif step.key == "license" %}
   {% if not step.license_paused %}<p class="why">Paste your license key.</p>{% endif %}
@@ -219,31 +231,28 @@
   {% endif %}
 
   {% elif step.key == "linkedin" %}
-  <p class="why">Connect the LinkedIn account Sidedoor sends from.</p>
+  {# E18 (one LinkedIn sign-in, owner 2026-11-12): the user signs in once, in Sidedoor's browser, and
+     [I'm signed in] connects outreach with that sign-in. #}
+  <p class="why">Sign in to LinkedIn once, in Sidedoor's browser.</p>
   <p class="note note-info">LinkedIn Premium lets you add a note to invitations.</p>
   {% if not s.offer %}
   <div hx-get="/setup/linkedin/status" hx-trigger="load" hx-target="#step-{{ step.number }}" hx-swap="outerHTML"><span class="muted">Checking LinkedIn...</span></div>
-  {% elif s.offer == "waiting" %}
-  {% if step.link_url %}<p><a class="button" href="{{ step.link_url }}" target="_blank" rel="noopener noreferrer">Open the LinkedIn sign-in page</a></p>{% endif %}
-  {% set again = "reconnect" if s.kind == "reconnect" else "connect" %}
-  <form method="post" action="/setup/linkedin/{{ again }}" hx-post="/setup/linkedin/{{ again }}" hx-target="#step-{{ step.number }}" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button{% if step.link_url %} button-quiet{% endif %}" type="submit">{% if step.link_url %}Get a new link{% else %}{{ "Reconnect" if again == "reconnect" else "Connect" }} again{% endif %}</button></form>
-  <div id="linkedin-wait" hx-get="/setup/linkedin/status?poll=1" hx-trigger="every 5s" hx-target="#linkedin-wait" hx-swap="innerHTML"></div>
-  {% elif s.offer == "connect" %}
-  <form method="post" action="/setup/linkedin/connect" hx-post="/setup/linkedin/connect" hx-target="#step-{{ step.number }}" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button" type="submit">Connect LinkedIn</button></form>
-  {% elif s.offer == "reconnect" and step.status != "done" %}
-  <form method="post" action="/setup/linkedin/reconnect" hx-post="/setup/linkedin/reconnect" hx-target="#step-{{ step.number }}" hx-swap="outerHTML" hx-disabled-elt="find button">
-    <button class="button" type="submit">Reconnect LinkedIn</button></form>
   {% elif s.offer == "retry" %}
   {# Re-read once when the Setup page loads (never from a re-rendered step, so it cannot loop). #}
   <button class="button" type="button" hx-get="/setup/linkedin/status" hx-target="#step-{{ step.number }}" hx-swap="outerHTML"{% if step.page_load %} hx-trigger="click, load"{% endif %}>Check again</button>
+  {% elif s.offer != "none" and step.status != "done" %}
+  <div class="actions">
+    {% if s.offer == "sent" %}<button class="button" type="button" hx-get="/setup/linkedin/status" hx-target="#step-{{ step.number }}" hx-swap="outerHTML">Check again</button>{% endif %}
+    <form method="post" action="/setup/linkedin/open" hx-post="/setup/linkedin/open" hx-target="#step-{{ step.number }}" hx-swap="outerHTML"><button class="button" type="submit">Open Sidedoor's browser</button></form>
+    <form method="post" action="/setup/linkedin/connect" hx-post="/setup/linkedin/connect" hx-target="#step-{{ step.number }}" hx-swap="outerHTML" hx-disabled-elt="find button"><button class="button button-highlight" type="submit">I'm signed in</button> <span class="htmx-indicator muted">Connecting...</span></form>
+  </div>
+  {# The join with E15: LinkedIn's sign-in page in the live view, inside this step. Done there connects
+     LinkedIn (linkedin_connection._signed_in); the step is then read again. The block names its own
+     hx-target (user_step.FRAGMENT), so it never inherits this one. #}
+  {% if step.live_view %}<div class="access-step" hx-get="/setup/linkedin/status?after=done" hx-trigger="live-view-done" hx-target="#step-{{ step.number }}" hx-swap="outerHTML">{{ step.live_view|safe }}</div>{% endif %}
   {% endif %}
   {# Round 2 (10): the guide names only the button showing now. #}
-  {% if s.offer == "connect" %}{% set button = "Connect LinkedIn" %}{% elif s.offer == "reconnect" and step.status != "done" %}{% set button = "Reconnect LinkedIn" %}
-  {% elif s.offer == "waiting" and not step.link_url %}{% set button = ("Reconnect" if s.kind == "reconnect" else "Connect") ~ " again" %}
-  {% elif s.offer == "retry" %}{% set button = "Check again" %}{% else %}{% set button = None %}{% endif %}
-  {% with guide_name = "linkedin", guide_button = button, guide_connected = step.status == "done" and not button %}{% include "guide_inline.html" %}{% endwith %}
+  {% with guide_name = "linkedin", guide_button = ("Check again" if s.offer == "retry" else None), guide_connected = step.status == "done" %}{% include "guide_inline.html" %}{% endwith %}
 
   {% elif step.key == "browser" %}
   {% if not step.chrome %}
@@ -253,7 +262,6 @@
   {% else %}
   <p>In Sidedoor's browser, sign in to:</p>
   <ul>
-    <li>LinkedIn</li>
     <li>The mailbox of your application email{% if step.application_email %}: <strong>{{ step.application_email }}</strong>{% else %} (enter it in Profile and search){% endif %}</li>
   </ul>
   {# B4 (owner, 2026-11-08): the webmail saves when picked; [I'm done] closes the browser and checks the email. #}
@@ -298,6 +306,11 @@
   <p class="muted">Optional. Leaving it off never blocks Start. You can change it later in <a href="/settings#login">Settings</a>.</p>
 
   {% elif step.key == "start" %}
+  <form method="post" action="/setup/progress" hx-post="/setup/progress" hx-trigger="change" hx-target="#step-{{ step.number }}" hx-swap="outerHTML">
+    <label class="choice"><input type="checkbox" name="share_progress" aria-describedby="setup-share-progress-help" data-enter-inert id="setup-share-progress"{% if step.share_progress %} checked{% endif %}> <span>{{ step.share_progress_label }}</span></label>
+    <p class="muted choice-help" id="setup-share-progress-help">{{ step.share_progress_help }}</p>
+    <noscript><button class="button button-quiet" type="submit">Save</button></noscript>
+  </form>
   <form method="post" action="/setup/start" hx-post="/setup/start" hx-target="#step-{{ step.number }}" hx-swap="outerHTML">
     <button class="button button-highlight" type="submit">Start Sidedoor</button>
   </form>

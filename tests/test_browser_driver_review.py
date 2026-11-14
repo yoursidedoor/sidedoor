@@ -119,10 +119,11 @@ class Item1EchoedArgumentsAreNeverEvidence(unittest.TestCase):
         self.assertNotEqual(control.get("code"), "APPLICATION_UNOBSERVED_QUOTE", control)
 
     def test_run_code_literals_wait_for_text_and_page_urls_are_not_page_text(self):
+        # A run-code call in a trace is an unauthorized tool (owner, 2026-11-12): the read fails closed.
         literal = event("c", "### Result\n\"%s\"" % self.ABSENT, tool="browser_run_code_unsafe",
                         arguments={"code": "async (page) => %r" % self.ABSENT})
         summary = reconcile(self, [literal], self.RESULT, self.evidence("c", self.ABSENT))
-        self.assertEqual(summary.get("code"), "APPLICATION_UNOBSERVED_QUOTE", summary)
+        self.assertEqual(summary.get("code"), "APPLICATION_UNAUTHORIZED_TOOL", summary)
         waited = {"content": [{"type": "text", "text": "### Result\nWaited for %s" % self.ABSENT}]}
         self.assertNotIn(self.ABSENT, application_browser.observed_text(waited, "browser_wait_for"))
         page = {"content": [{"type": "text", "text": "### Page\n- Page URL: https://x.test/?q=No+application+found\n"
@@ -266,13 +267,13 @@ class Item3Rule1MatchesLiveExactly(unittest.TestCase):
         guard = InProcessGuard(self, "linkedin", LINKEDIN)
         refused = [("browser_click", {"target": "e4"}),
                    ("browser_click", {"target": "e3", "doubleClick": True}),
-                   ("browser_type", {"target": "e4", "text": "hi", "submit": True}),             # .press(N, "Enter")
-                   ("browser_run_code_unsafe", {"code": "async (page) => page.locator('aria-ref=e4').click()"}),
-                   ("browser_run_code_unsafe", {"code": "async (page) => page.locator('aria-ref=e3').dblclick()"}),
-                   ("browser_run_code_unsafe", {"code": "async (page) => page.locator(\"aria-ref=e3\").press('Enter')"})]
+                   ("browser_type", {"target": "e4", "text": "hi", "submit": True})]             # .press(N, "Enter")
         for name, arguments in refused:
             error, text = guard.client.call(name, arguments)
             self.assertTrue(error and text.startswith("REFUSED " + browser_guard.CONTACT_CONTROL_CODE), (name, text))
+        # Code that clicked a contact control is refused with the tool itself now (owner, 2026-11-12).
+        error, text = guard.client.call("browser_run_code_unsafe", {"code": "async (page) => page.locator('aria-ref=e4').click()"})
+        self.assertTrue(error and text.startswith("REFUSED " + browser_guard.REMOVED_CODE), text)
         self.assertEqual(guard.forwarded(), [])
 
     def test_what_live_never_judged_is_forwarded_unjudged(self):
@@ -280,10 +281,7 @@ class Item3Rule1MatchesLiveExactly(unittest.TestCase):
         forwarded = [("browser_press_key", {"key": "Enter"}),                                   # focus on Connect: as live
                      ("browser_drag", {"startTarget": "e3", "startElement": "x", "endTarget": "e3", "endElement": "x"}),
                      ("browser_type", {"target": "e4", "text": "x"}),                          # typing presses nothing
-                     ("browser_type", {"target": "e9", "text": "cto", "submit": True}),        # not a contact control
-                     ("browser_run_code_unsafe", {"code": "async (page) => page.locator('aria-ref=e3').first().tap()"}),
-                     ("browser_run_code_unsafe", {"code": "async (page) => page.getByRole('button').click()"}),
-                     ("browser_run_code_unsafe", {"code": "async (page) => page.locator('aria-ref=e8').click()"})]
+                     ("browser_type", {"target": "e9", "text": "cto", "submit": True})]        # not a contact control
         for name, arguments in forwarded:
             self.assertFalse(guard.client.call(name, arguments)[0], name)
         self.assertEqual([call["tool"] for call in guard.forwarded()], [name for name, _ in forwarded])
@@ -543,7 +541,7 @@ class Item8WebmailIsReadOnly(unittest.TestCase):
         self.assertEqual(found, "alex@example.com")
         self.assertEqual(check["clicks"], [{"target": "e1", "element": "Account"}])
         for bad, code in ((event("t", "ok", tool="browser_type", arguments={"target": "e2", "text": "x"}), "EMAIL_CHECK_NOT_READ_ONLY"),
-                          (event("c", "ok", tool="browser_run_code_unsafe", arguments={"code": "async (p) => 1"}), "EMAIL_CHECK_NOT_READ_ONLY"),
+                          (event("c", "ok", tool="browser_run_code_unsafe", arguments={"code": "async (p) => 1"}), "APPLICATION_UNAUTHORIZED_TOOL"),
                           (event("s", "ok", server="cua_repl", tool="js"), "APPLICATION_UNAUTHORIZED_TOOL")):
             found, check = run([click, bad])
             self.assertIsNone(found)

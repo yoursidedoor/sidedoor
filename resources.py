@@ -41,7 +41,7 @@ PROMPTS = (
 )
 SCHEMAS = (
     "agent-worker-schema.json", "answering-judge-schema.json", "answering-schema.json",
-    "discovery-schema.json", "followup-schema.json", "outreach-agent-schema.json",
+    "discovery-schema.json", "followup-judge-schema.json", "followup-schema.json", "outreach-agent-schema.json",
     "outreach-compose-schema.json", "reply-schema.json", "research-schema.json",
 )
 DEFAULTS = ("config.json", "settings.json", "profile.example.json")

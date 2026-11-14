@@ -1,0 +1,7 @@
+{# The label chips with their counts (E14.T1): `view` from approvals_page.gather. approvals.html includes it;
+   a card's htmx answer appends it with `oob` so the counts follow the action. #}
+{% set v = view %}
+<nav class="app-filters approvals-labels" id="approvals-labels" aria-label="Filter by label"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% for c in v.chips %}<a class="chip {{ 'chip-info app-filter-active' if c.current else 'chip-muted' }}" href="{{ c.href }}"{% if c.current %} aria-current="true"{% endif %}>{{ c.words }} <span class="app-count">{{ c.count }}</span></a>
+  {% endfor %}
+</nav>

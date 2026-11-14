@@ -102,7 +102,7 @@ class ChampionFixture(Fixture):
         resume_quotes = decision.get("resume_quotes", RESUME_QUOTES)
         role_quotes = decision.get("role_quotes", ROLE_QUOTES)
         return json.dumps({
-            "output_version": reply_worker.VERSION, "source_sha256": packet["source_sha256"],
+            "output_version": reply_worker.VERSION, "asks_to_stop_contact": False, "source_sha256": packet["source_sha256"],
             "label": decision["label"], "literal_quote": body, "quote_span": quote,
             "role_reference": role_reference, "reason": "Offline source-bound advocate interpretation.",
             "unknown_factual_requirements": self.unknowns.get(source_id, []),

@@ -105,12 +105,7 @@ def REFERENCE_tool_item(item, submit, investigate=False):
     arguments = arguments if isinstance(arguments, dict) else {}
     if tool == "browser_evaluate":
         raise ValueError("APPLICATION_UNSUPPORTED_BROWSER_CODE")
-    if tool in application_browser.CODE_TOOLS:
-        code = arguments.get(application_browser.CODE_TOOLS[tool], "")
-        if not isinstance(code, str) or application_browser.unsupported_browser_code(code):
-            raise ValueError("APPLICATION_UNSUPPORTED_BROWSER_CODE")
-        if investigate and application_browser.investigation_writes(code):
-            raise ValueError("APPLICATION_INVESTIGATION_READ_ONLY")
+    # (2026-11-12: the browser_run_code_unsafe code checks went with that tool, here as in tool_event.)
     if investigate and tool in application_browser.INVESTIGATION_WRITE_TOOLS:
         raise ValueError("APPLICATION_INVESTIGATION_READ_ONLY")
     if investigate:

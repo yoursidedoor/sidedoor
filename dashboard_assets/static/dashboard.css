@@ -60,6 +60,8 @@ a { color: var(--primary); }
 .banner-notes { font-weight: 400; }
 .banner-notes p { margin: 4px 0 0; white-space: pre-line; }
 .banner-dismiss { margin: 0; }
+.banner-dismissable > span { flex: 1 1 auto; }   /* E15.T10: the text takes the room; the link and [Dismiss] sit together */
+.step h3 { font-size: 1rem; margin: 16px 0 6px; }
 .banner-dismiss button { background: none; border: 0; padding: 0; font: inherit; text-decoration: none; cursor: pointer; }
 .banner-dismiss button:hover { text-decoration: underline; }
 /* The update banner (owner, 2026-10-24): text left, one right-aligned cluster; notes below, full width. */
@@ -144,7 +146,10 @@ legend { float: left; width: 100%; padding: 0; margin: 0 0 12px; font-size: 1.05
 legend + * { clear: both; }
 .has-error input, .has-error select, .has-error .chosen { border-color: var(--error); outline: 1px solid var(--error); }
 .field-error { color: var(--error); font-weight: 600; margin: 4px 0 0; }
+.access-warning { color: var(--error); font-weight: 700; margin: 8px 0; }
+.access-warning.flash { background: var(--error-tint); }
 .choice { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; }
+.choice-help { margin: 0 0 12px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .guide-link { font-weight: 600; }
 /* S2 (owner, 2026-11-08): "Show me how" opens in place, under its own step or section. */
@@ -288,6 +293,10 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 .app-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
 .app-filters .chip { white-space: nowrap; }
 .app-filter-active { outline: 2px solid var(--info); }
+/* Approvals labels (E14): keyboard focus is its own offset ring, so it never reads as the current chip;
+   the current chip keeps its outline (drawn as a shadow while it has the focus ring too). */
+.approvals-labels .chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.approvals-labels .app-filter-active:focus-visible { box-shadow: 0 0 0 2px var(--info); }
 .app-count { font-weight: 800; margin-left: 4px; }
 .app-search { margin: 0 0 16px; max-width: 520px; }
 .app-search-row { display: flex; gap: 8px; }
@@ -597,3 +606,37 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 .approval-app.approval-a-changed .when-view { display: none; }
 .approval-app.approval-a-changed .when-edit { display: inline; }
 .approval-app:has(.approval-a-editing:checked) .approval-a-body { border-left: 3px solid var(--primary); padding-left: 10px; }
+
+/* Sign-ins and human checks (E15.T2): the Needs you cards on Overview and Approvals. */
+.access-card p { margin: 0 0 4px; }
+.access-others-list { margin: 0 0 6px; padding-left: 20px; }
+.access-inline { display: inline; margin: 0 0 0 8px; }
+.access-step:not(:empty) { margin-top: 12px; }
+/* After Done an attended card shows only its green line: nothing is under it, so no space is kept. */
+.access-step.access-step-quiet { margin-top: 0; }
+.access-card .access-need.note { margin-bottom: 0; }
+/* L7: the count tile stays in the row of three; the cards are their own block below it, full width. */
+.overview-needs-wrap { display: contents; }
+.overview-sign-ins { grid-column: 1 / -1; order: 1; }
+.overview-health { order: 2; }
+.overview-sign-ins .access-flash { margin: 0 0 12px; }
+.app-try { margin: 4px 0 12px; }
+.app-try-row { margin: 0; }
+.app-try-row .button { padding: 4px 14px; font-size: 0.875rem; }
+
+/* The live view (E15.T5): the page in Sidedoor's browser, for a step only the user can do. */
+.live-view-actions { display: flex; gap: 8px; margin: 8px 0; }
+.live-view-canvas { display: block; width: 100%; max-width: 1280px; height: auto; background: var(--white); border: 1px solid var(--muted); border-radius: var(--radius); cursor: default; }
+.live-view-canvas:focus { outline: 2px solid var(--primary); }
+.live-view-canvas[hidden], .live-view [hidden] { display: none; }
+.live-view-site { margin: 8px 0 4px; font-weight: 600; overflow-wrap: anywhere; min-height: 1.5em; }
+/* Metrics (E15.T11): plain tables of counts; desktop widths. */
+.metrics-page .card { margin: 0 0 24px; overflow-x: auto; }
+.metrics-page h2 { font-size: 1.125rem; margin: 0 0 12px; }
+.metrics-table { border-collapse: collapse; width: 100%; font-size: 0.9375rem; }
+.metrics-table th, .metrics-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: right; vertical-align: bottom; }
+.metrics-table th:first-child, .metrics-table td:first-child { text-align: left; }
+.metrics-table thead th { color: var(--muted); font-weight: 600; }
+.metrics-table tbody th { font-weight: 600; overflow-wrap: anywhere; }
+.metrics-table tbody tr:last-child > * { border-bottom: 0; }
+.metrics-table .metrics-chosen > * { background: #FFF7ED; }

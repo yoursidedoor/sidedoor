@@ -1,0 +1,10 @@
+<section class="live-view" data-live-view data-target="{{ target.id }}"{% if autostart %} data-autostart{% endif %} data-opening="{{ ready_words }}" data-reconnecting="{{ reconnecting_words }}" data-not-shown="{{ not_shown_words }}" data-over="{{ over_words }}" data-done="{{ done_words }}" data-paste-long="{{ paste_long_words }}" data-paste-max="{{ paste_max }}">
+  <p class="live-view-status muted" data-live-status role="status" aria-live="polite"></p>
+  <div class="live-view-actions">
+    {% if not card %}<button class="button" type="button" data-live-start>{{ target.start_label }}</button>{% endif %}
+    <button class="button" type="button" data-live-done hidden>Done</button>
+    <button class="button button-quiet" type="button" data-live-cancel hidden>Cancel</button>
+  </div>
+  <p class="live-view-site" data-live-site aria-live="polite"></p>
+  <canvas class="live-view-canvas" data-live-canvas width="1280" height="900" tabindex="0" aria-label="The page in Sidedoor's browser" hidden></canvas>
+</section>

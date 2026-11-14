@@ -49,6 +49,7 @@ import socket
 import sqlite3
 import sys
 import threading
+import urllib.parse
 import webbrowser
 from pathlib import Path
 
@@ -59,8 +60,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
+import desktop_alerts
 import login_item
 import log
+import notifications
 import overview_page as overview_data  # the module; `overview_page` is the route below
 import run_locks
 import scheduler_control
@@ -71,6 +74,7 @@ import tray as tray_icon
 import user_profile
 import version
 import paths
+import progress_share
 
 LOG = log.get(__name__)
 
@@ -111,6 +115,7 @@ TABS = (("overview", "Overview", "/"),
         ("sent", "Networking & Referrals", "/sent"),
         ("applications", "Applications", "/applications"),
         ("failures", "Failures and logs", "/failures"),
+        ("metrics", "Metrics", "/metrics"),
         ("settings", "Settings", "/settings"))
 SETUP_TAB = ("setup", "Setup", "/setup")
 
@@ -132,6 +137,17 @@ def token(home=None):
     with os.fdopen(descriptor, "w") as handle:
         handle.write(value + "\n")
     return value
+
+
+# Two of the layout's banners, here so the desktop notification (E15.T3, desktop_alerts) says the same words.
+SETUP_FILE_BANNER = {"tone": "error", "text": "Sidedoor couldn't read its setup file, so it can't save setup changes.",
+                     "action_label": "Reset setup file", "action_href": "/setup-file"}
+
+
+def setup_banner(progress):
+    left = progress["left"]
+    return {"tone": "warning", "text": "Setup is not finished: %d step%s left." % (left, "" if left == 1 else "s"),
+            "action_label": "Continue setup", "action_href": "/setup"}
 
 
 def read_connection(root=None):
@@ -219,6 +235,41 @@ GUIDES = ("openrouter", "codex", "claude", "antigravity", "linkedin", "browser",
 GUIDE_PLATFORM = "windows" if sys.platform.startswith("win") else "mac"
 
 
+LINKEDIN_NOTICE_PREFIX = "linkedin-unreachable:"
+
+
+def linkedin_notify(home, root, config=None):
+    """E18 (A12, review rounds 2 and 3): hand the LinkedIn notification the hourly check queued to the
+    notification outbox (`orchestrator.deliver_linkedin_notice`) and deliver it now, from the Sidedoor
+    process, so it reaches the user while the rounds are paused. Only LinkedIn's own notices are
+    dispatched (`notifications.dispatch(key_prefix=...)`): no other notice is sent, reconciled or
+    touched, and no job starts. A notice a round already delivered is left as it is (delivered once)."""
+    import linkedin_connection
+    import notifications
+    import orchestrator
+    database = orchestrator.connect(root)
+    try:
+        import applications
+        applications.initialize(database)   # the outbox table, on an install whose rounds never ran
+        database.commit()
+        orchestrator.deliver_linkedin_notice(database, home)   # hands over, or withdraws once connected again
+        waiting = database.execute("SELECT 1 FROM notification_outbox WHERE substr(event_key,1,?)=? AND state IN "
+                                   "('PENDING','SENDING','UNCERTAIN') LIMIT 1",
+                                   (len(LINKEDIN_NOTICE_PREFIX), LINKEDIN_NOTICE_PREFIX)).fetchone()
+        if waiting:
+            return notifications.dispatch(database, load_config(root) if config is None else config,
+                                          key_prefix=LINKEDIN_NOTICE_PREFIX)
+        return None
+    finally:
+        database.close()
+
+
+def linkedin_keep_soon(home=None, root=None):
+    """E18: the scheduler's hourly LinkedIn check (`linkedin_connection.keep`), then `linkedin_notify`."""
+    import linkedin_connection
+    return linkedin_connection.keep_soon(home, after=(lambda: linkedin_notify(home, root)) if root is not None else None)
+
+
 def create_app(secret, port, home=None, root=None, config=None, browser=None, relay_url=setup_steps.RELAY_URL):
     root = paths.data(root, home)  # the Sidedoor home unless a test gives its own folder (E9.T1)
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
@@ -265,14 +316,24 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                         else _refuse(400, "Bad nonce."))
         elif "t" in request.query_params:
             if hmac.compare_digest(request.query_params["t"].encode(), secret.encode()):
-                response = RedirectResponse(request.url.path, status_code=303)
+                # The rest of the link is kept (E15.T3: a notification opens /applications?show=needs_you);
+                # only the token is dropped.
+                kept = urllib.parse.urlencode([(name, value) for name, value in request.query_params.multi_items()
+                                               if name != "t"])
+                response = RedirectResponse(request.url.path + ("?" + kept if kept else ""), status_code=303)
                 response.set_cookie(COOKIE, secret, max_age=COOKIE_MAX_AGE, httponly=True, samesite="strict", path="/")
             else:
                 response = _refuse(403, "This link is not valid. Open the dashboard from the link Sidedoor printed.")
         elif not hmac.compare_digest(request.cookies.get(COOKIE, "").encode(), secret.encode()):
             response = _refuse(403, "Open the dashboard from the link Sidedoor printed.")
         else:
+            if request.method not in SAFE_METHODS:
+                desktop_alerts.user_acted(request.url.path)   # E15.T3: the line the user just changed is not notified
             response = await call_next(request)
+            if request.method not in SAFE_METHODS and request.url.path.startswith(("/access/", "/settings/account")):
+                # L4: a step offered for a job that no longer waits (abandoned, released, skipped) is withdrawn.
+                import user_step
+                await run_in_threadpool(user_step.sync)
         response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -339,8 +400,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         mode = {"label": "Review" if approvals.install_mode(root, home) == approvals.REVIEW else "Automatic", "tone": "info"}
         banners = []
         if setup_steps.state_unreadable(home):
-            banners.append({"tone": "error", "text": "Sidedoor couldn't read its setup file, so it can't save setup changes.",
-                            "action_label": "Reset setup file", "action_href": "/setup-file"})
+            banners.append(dict(SETUP_FILE_BANNER))
         email = state["steps"].get("email", {})
         if email.get("mismatch"):
             banners.append({"tone": "error", "text": "Sidedoor's browser is signed in to a different mailbox. Sign in to %s "
@@ -364,9 +424,7 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
                 banners.append({"tone": "error", "text": "%s stopped working." % name,
                                 "action_label": "Fix", "action_href": "/settings#connections"})
         elif active != "setup":   # round 1 (6): not on Setup itself
-            left = progress["left"]
-            banners.append({"tone": "warning", "text": "Setup is not finished: %d step%s left." % (left, "" if left == 1 else "s"),
-                            "action_label": "Continue setup", "action_href": "/setup"})
+            banners.append(setup_banner(progress))
         misplaced = login_item.app_location_problem()
         if misplaced:  # E9.T1 AP4: start at login is never registered or refreshed from this copy
             banners.append({"tone": "warning", "text": misplaced})
@@ -397,6 +455,11 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         if hold:
             banners.insert(0, {"tone": "error", "text": hold, "action_label": "Check again",
                                 "action_href": {key: href for key, _, href in TABS + (SETUP_TAB,)}.get(active, "/")})
+        import access_outcomes  # E15.T10: the one release banner, after every problem and before the update
+        account_banner = access_outcomes.release_banner(root, progress["finished"],
+                                                        state.get(setup_steps.ACCOUNT_BANNER_OVER))
+        if account_banner:
+            banners.append(account_banner)
         import update_check  # E9.T3: a newer Sidedoor, last of all (license problems come first)
         update_banner = update_check.banner(home)
         if update_banner:
@@ -423,40 +486,194 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         return handler
 
     for key, _, path in TABS[1:]:
-        if key not in ("applications", "failures"):
+        if key not in ("applications", "failures", "metrics"):
             app.add_api_route(path, page(key), methods=["GET"], name=key)
 
     # Failures and logs (E6.T7; E6.T0 section 9): read-only, like Overview (failures_page).
     import failures_page
     failures_page.register(app, templates, layout, home=home, root=root, config=config, token=secret,
                            database=paths.database(root), connect_read_only=lambda: read_connection(root))
+    import metrics_page  # Metrics (E15.T11, R11): read-only counts of sign-ins and checks, on this computer only
+    metrics_page.register(app, templates, layout, home=home, root=root, config=config)
+    import saved_sign_ins_page  # Saved sign-ins (E15.T7, R8): the list behind the link under the account setting
+    saved_sign_ins_page.register(app, templates, layout, home=home)
     import report_problem  # Report a problem (owner pick F3 a): POST /report-problem, behind `guard`
     report_problem.register(app, home=home, root=root, config=config, token=secret)
     import support_email  # Email support (owner, 2026-10-24): POST/GET /report-problem/email, behind `guard`
     support_email.register(app, home=home, root=root, config=config, token=secret)
     import doctor  # Failures and logs > Run checks (E4.T4): the `sidedoor doctor` report
     doctor.register(app, templates, layout, home=home, root=root, config=config)
+    # The live view (E15.T5): a person's sign-in or human check in Sidedoor's hidden Chrome. Its pages and
+    # POSTs are behind `guard`; its websocket checks the same Host, Origin and cookie itself (live_view).
+    import live_view
+    live_view.register(app, templates, layout, home=home, root=root, config=config, secret=secret, port=port,
+                       cookie=COOKIE)
+    # E15 join: the cards' "Sign in" / "Do the human check" open that live view (user_step), and a step
+    # the user finished there saves the site's session and releases the wait.
+    import user_step
+    user_step.connect(app.state.live_view, database=lambda: write_connection(root), home=home)
+    # E18 on the live view: the LinkedIn step's [Open Sidedoor's browser] and its Needs you card open
+    # LinkedIn's sign-in page there, and Done connects outreach (linkedin_connection.sign_in_view).
+    import linkedin_connection
+    linkedin_connection.attach(app.state.live_view, home=home, relay_url=relay_url)
 
     # Applications (E6.T6; E6.T0 section 8): read-only, from stored records like Overview, and
     # nothing written, not even SQLite's side files (overview_page.snapshot).
-    @app.get("/applications", name="applications")
-    def applications_list(request: Request, show: str = "all", page: str = "1", company: str = "", q: str = "",
-                          job: str = ""):
+    def applications_view(request, show="all", page="1", company="", q="", job="", tried=None):
         import applications_page
         context = layout("applications", "Applications")
+        context["tried"] = tried   # what a Try again said (E15.T2), for a post without htmx
         context["view"] = overview_data.snapshot(
             paths.database(root),
             lambda database: applications_page.gather(database, config, home, show, page, company, q, job or None),
             lambda: read_connection(root))
         return templates.TemplateResponse(request, "applications.html", context)
 
+    @app.get("/applications", name="applications")
+    def applications_list(request: Request, show: str = "all", page: str = "1", company: str = "", q: str = "",
+                          job: str = ""):
+        return applications_view(request, show, page, company, q, job)
+
+    # --- Sign-ins and human checks (E15.T2): the buttons on the Needs you cards and Try again -------
+    # Each is a POST behind `guard` (the token cookie and the Origin check, as every other action).
+    # The job key a client sends is acted on only if that job has a card (`access_cards`); the change
+    # is one saved transaction; a second click finds nothing to do and says so. With htmx the answer
+    # is the section the card is in, drawn again (on Overview with its Needs you counts); without,
+    # the page.
+
+    def access_write(change):
+        """`change(database)` on a write connection; None when the database stayed locked."""
+        paths.state(root).mkdir(exist_ok=True, mode=0o700)
+        try:
+            database = write_connection(root)
+            try:
+                return change(database)
+            finally:
+                database.close()
+        except sqlite3.OperationalError as error:
+            if "locked" in str(error) or "busy" in str(error):
+                return None
+            raise
+
+    def access_section(at, flash, request=None):
+        """The section an action redraws: Overview's Needs you or Approvals' sign-ins, as it now stands
+        (on Approvals with the page's own query on its forms, and the chip row with its new counts)."""
+        import datetime as dt
+        from zoneinfo import ZoneInfo
+        import access_cards
+        now = dt.datetime.now(dt.timezone.utc)
+        zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+        fmt = lambda moment: overview_data.when(moment, now, zone) if moment else None
+
+        def read(database):
+            reader = overview_data.Reader(database)
+            cards = overview_data.section(reader, access_cards.view, config, fmt,
+                                          access_cards.OVERVIEW_LIMIT if at == "overview" else None, now)
+            return cards, (overview_data.section(reader, overview_data.needs_you, now) if at == "overview" else None)
+        cards, needs = overview_data.snapshot(paths.database(root), read, lambda: read_connection(root))
+        if at == "overview":
+            return templates.get_template("overview_needs.html").render(
+                needs=needs, rows=overview_data.NEEDS_ROWS, sign_ins=cards, na=overview_data.UNAVAILABLE, f=flash)
+        import approvals_page
+        query = approvals_page.query_of(approvals_page.pages_of(request.query_params),
+                                        approvals_page.label_of(request.query_params)) if request is not None else ""
+        return (templates.get_template("access_section.html").render(s=cards, f=flash, query=query)
+                + (app.state.approvals_filters(request) if request is not None else ""))
+
+    async def access_action(request, act):
+        import access_cards
+        import applications
+        import approvals_page
+        form = await request.form()
+        job_key = form.get("job_key") if isinstance(form.get("job_key"), str) else ""
+        at = "overview" if form.get("at") == "overview" else "approvals"
+        try:
+            flash = await run_in_threadpool(access_write, lambda database: act(access_cards, database, job_key, applications.stamp()))
+        except Exception as error:   # a press never ends with nothing on the card (owner, 2026-11-14)
+            LOG.warning("A card's button failed (%s).", type(error).__name__)
+            flash = {"tone": "error", "text": access_cards.PRESS_FAILED}
+        if flash is None:
+            flash = {"tone": "error", "text": approvals_page.BUSY}
+        if request.headers.get("hx-request") == "true":
+            return HTMLResponse(await run_in_threadpool(access_section, at, flash, request if at == "approvals" else None))
+        if at == "overview":
+            return await run_in_threadpool(overview, request, None, "health", flash)
+        # As the neighbouring Approvals card actions: the page again, with what happened on its section.
+        # Under a label that hides the section the answer shows at the top of the page instead.
+        shown = approvals_page.shows(approvals_page.label_of(request.query_params), access_cards.SECTION)
+        return await run_in_threadpool(app.state.approvals_view, request, {"access": flash} if shown else {"top": flash})
+
+    @app.get("/access/section")
+    async def access_redraw(request: Request, at: str = "", ended: str = "", what: str = ""):
+        """The cards' section as it now stands, after the user pressed Done in the live view (L1), with
+        what the view said then (`ended=done`: the server's own sentence, never text from the request;
+        `what=contacts`: the contact finder's card, which has its own sentence)."""
+        import access_cards
+        import live_view
+        at = "overview" if at == "overview" else "approvals"
+        # Owner, 2026-11-13: every card says the same after Done (`what` is accepted and ignored: a page drawn
+        # before this still sends it).
+        flash = {"tone": "success", "text": live_view.ENDED_WORDS[live_view.DONE]} if ended == live_view.DONE else None
+        if flash:
+            # An attended session's card says that sentence itself until the session ends: once, not twice.
+            import applications
+            import attended_submit
+            if await run_in_threadpool(access_write, lambda database: attended_submit.any_done(database, applications.stamp())):
+                flash = None
+        return HTMLResponse(await run_in_threadpool(access_section, at, flash, request if at == "approvals" else None))
+
+    @app.post("/access/abandon")
+    async def access_abandon(request: Request):
+        return await access_action(request, lambda cards, database, job_key, now: cards.abandon(database, job_key, now))
+
+    @app.post("/access/done")
+    async def access_done(request: Request):
+        """"I've signed in" / the check is done: the job, and every job waiting on that site's sign-in, is due again."""
+        return await access_action(request, lambda cards, database, job_key, now: cards.done(database, job_key, now))
+
+    @app.post("/access/resend")
+    async def access_resend(request: Request):
+        """Resend on a missing-confirmation-email card (E15.T8): Sidedoor asks the site again and looks."""
+        return await access_action(request, lambda cards, database, job_key, now: cards.resend(database, job_key, now))
+
+    @app.post("/access/step")
+    async def access_step(request: Request):
+        """"Sign in" / "Do the human check": the user's step (`user_step`, E15.T5) inside the card."""
+        import access_cards
+        form = await request.form()
+        job_key = form.get("job_key") if isinstance(form.get("job_key"), str) else ""
+        at = "overview" if form.get("at") == "overview" else "approvals"
+        poll = form.get("poll") == "1"   # the card asking by itself (attended_submit), never a press
+        fragment = await run_in_threadpool(access_write, lambda database: access_cards.step(database, job_key, at=at, poll=poll))
+        if fragment:
+            return HTMLResponse(fragment)
+        # No card any more (the step was finished, or the job abandoned, on a page drawn before): say so.
+        words = await run_in_threadpool(access_write, lambda database: access_cards.step_refusal(database, job_key))
+        return HTMLResponse(templates.get_template("access_note.html").render(
+            f={"tone": "warning", "text": words or access_cards.STEP_UNAVAILABLE}))
+
+    @app.post("/access/try-again")
+    async def access_try_again(request: Request):
+        import access_cards
+        import applications
+        import approvals_page
+        form = await request.form()
+        job_key = form.get("job_key") if isinstance(form.get("job_key"), str) else ""
+        flash = await run_in_threadpool(access_write, lambda database: access_cards.try_again(database, job_key, applications.stamp()))
+        if flash is None:
+            flash = {"tone": "error", "text": approvals_page.BUSY}
+        if request.headers.get("hx-request") == "true":
+            return HTMLResponse(templates.get_template("access_note.html").render(f=flash))
+        return await run_in_threadpool(applications_view, request, job=job_key, tried=flash)
+
     # --- Overview (E6.T3; E6.T0 section 5): "not running" with [Start], then the day's numbers ------
 
-    def overview(request, message=None, message_at="health"):
+    def overview(request, message=None, message_at="health", needs_flash=None):
         progress = setup_steps.progress(home)
         context = layout("overview", "Overview", progress)
         running = setup_steps.scheduler_running(home)
-        context.update(finished=progress["finished"], running=running, message=message, message_at=message_at, view=None)
+        context.update(finished=progress["finished"], running=running, message=message, message_at=message_at, view=None,
+                       needs_flash=needs_flash)
         import version  # owner, 2026-10-23: "the overview page should show what version of code is installed."
         context["sidedoor_version"] = version.current()
         import update_check  # owner, 2026-10-24: the chip says "· X available" while one is offered
@@ -565,6 +782,14 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         back = form.get("next") if isinstance(form.get("next"), str) else "/"
         return RedirectResponse(back if _known_page(back) else "/", status_code=303)
 
+    # [Dismiss] on the release banner (E15.T10): gone for good.
+    @app.post("/account-banner/dismiss")
+    async def account_banner_dismiss(request: Request):
+        form = await request.form()
+        await run_in_threadpool(setup_steps.end_account_banner, home)
+        back = form.get("next") if isinstance(form.get("next"), str) else "/"
+        return RedirectResponse(back if _known_page(back) else "/", status_code=303)
+
     # [Update now] on the update banner (owner, 2026-10-23, B; the built Mac app only): downloads,
     # checks and, after the user clicks Replace in a native dialog, swaps the app (mac_update).
     @app.post("/update/install")
@@ -606,6 +831,9 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         saved = state["steps"].get(engine if number == 6 and engine in ("claude", "antigravity") else key, {})
         status = saved.get("status", "not_started")
         message = setup_steps.current_words(saved.get("message"))   # S1a: a 0.3.0 message's old step number
+        if key == "linkedin":
+            import linkedin_connection
+            message = linkedin_connection.shown(message)   # Done where the live view is used, [I'm signed in] elsewhere
         if key == "mode":
             status, message = "done", None
             import approvals  # the mode as the send path reads it (E6.T2 P13)
@@ -644,6 +872,9 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             extra = dict(extra or {}, login_on=login["on"] or login.get("default", False),
                          login_supported=login["supported"], login_retry=login.get("retry"),
                          login_retry_label=login.get("retry_label"))
+        elif key == "start":  # owner, 2026-11-10: the Settings > License box, ticked until a choice is saved
+            extra = dict(extra or {}, share_progress_label=progress_share.LABEL, share_progress_help=progress_share.HELP,
+                         share_progress=progress_share.shown(home))
         label, tone = STATUS.get(status, STATUS["not_started"])
         if key == "login" and status not in ("done", "failed"):   # round 1 (7): optional, never "Needs you"
             label, tone = "Optional", "muted"
@@ -702,6 +933,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         view.update(extra or {})
         if key == "mode":
             view["open"] = True
+            import access_outcomes  # E15.T10: "When a site needs an account", asked here too
+            view["account"] = access_outcomes.setup_question(root)
         return view
 
     def step_title(number, engine):
@@ -939,6 +1172,22 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             return setup_response(request, STEP["mode"], {"mode_error": MODE_ERROR})
         return setup_response(request, STEP["mode"])
 
+    @app.post("/setup/account")
+    async def account_question(request: Request):
+        """Step 5's "When a site needs an account" (E15.T10): Settings' save, on change."""
+        form = await form_of(request)
+        import access_outcomes
+        import settings_page
+        if form.get("account") not in access_outcomes.offered_settings():   # nothing written
+            return setup_response(request, STEP["mode"], {"account_error": access_outcomes.CHOICE_ERROR})
+        try:
+            await run_in_threadpool(lambda: access_outcomes.set_install_account_setting(form.get("account"), root=root))
+        except sqlite3.DatabaseError as error:
+            held = isinstance(error, sqlite3.OperationalError) and ("locked" in str(error) or "busy" in str(error))
+            return setup_response(request, STEP["mode"], {
+                "account_error": settings_page.BUSY if held else access_outcomes.UNREADABLE_WORDS})
+        return setup_response(request, STEP["mode"])
+
     @app.post("/setup/license")
     async def license_(request: Request):
         form = await form_of(request)
@@ -1045,32 +1294,36 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
     def linkedin_status(request: Request):
         if setup_steps.progress(home)["locked"].get(7):
             return setup_response(request, 7)
-        state = setup_steps.linkedin_status(home, relay_url)
-        saved = state["steps"]["linkedin"]
-        if saved.get("offer") == "waiting" and request.query_params.get("poll") == "1":
-            return HTMLResponse(templates.get_template("linkedin_wait.html").render(message=saved["message"]))
+        if request.query_params.get("after") != "done":
+            # `after=done`: the redraw after Done in the live view shows what Done itself recorded
+            # (connected, or the true reason); a read here would replace the reason with the bare line.
+            setup_steps.linkedin_status(home, relay_url)
         response = setup_response(request, 7)
         response.headers["HX-Retarget"] = "#step-7"
         response.headers["HX-Reswap"] = "outerHTML"
         return response
 
     @app.post("/setup/linkedin/{kind}")
-    def linkedin_link(request: Request, kind: str):
+    def linkedin_connect(request: Request, kind: str):
+        # E18 (one LinkedIn sign-in): the user signs in to LinkedIn in Sidedoor's browser ([Open
+        # Sidedoor's browser]) and [I'm signed in] connects outreach with that sign-in. The relay decides
+        # between a first connect and a reconnect of the license's own account, so both names do the same.
         refused = locked_refusal(request, 7)
         if refused:
             return refused
-        if kind not in ("connect", "reconnect"):
+        import linkedin_connection
+        if kind == "open":
+            # The live view on LinkedIn's sign-in page, inside the step (the join with E15). Where this
+            # computer cannot show it, Sidedoor's browser window opens as before.
+            shown = linkedin_connection.sign_in_view()
+            if shown:
+                return setup_response(request, 7, {"live_view": shown})
+            linkedin_connection.browser_opened(home, browser.open())
+        elif kind in ("connect", "reconnect"):
+            linkedin_connection.connect(home, relay_url)
+        else:
             return _refuse(404, "No such action.")
-        # Connect only when the relay's /accounts shows nothing linked (a create would add a second paid
-        # Unipile account otherwise); Reconnect only while the account is listed (E6.T0 step 7, 3.3).
-        # While waiting, a fresh link of the same kind may be asked for again (the link is never stored,
-        # so this is the way back to it after the step was re-rendered).
-        saved = setup_steps.linkedin_status(home, relay_url)["steps"]["linkedin"]
-        wanted = "create" if kind == "connect" else "reconnect"
-        url = None
-        if saved.get("offer") == kind or (saved.get("offer") == "waiting" and saved.get("kind") == wanted):
-            _, url = setup_steps.linkedin_link("create" if kind == "connect" else "reconnect", home, relay_url)
-        return setup_response(request, 7, {"link_url": url})
+        return setup_response(request, 7)
 
     @app.post("/setup/browser/{action}")
     def browser_action(request: Request, action: str):
@@ -1131,11 +1384,24 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         await run_in_threadpool(setup_steps.start_at_login, form.get("enabled") == "on", home)
         return await run_in_threadpool(setup_response, request, STEP["login"])  # status may ask the OS (L8)
 
+    @app.post("/setup/progress")
+    async def setup_share_progress(request: Request):   # the Start step's box saves on change, as step 9's does
+        form = await form_of(request)
+        refused = locked_refusal(request, STEP["start"])   # locked like Start itself: nothing saved
+        if refused:
+            return refused
+        await run_in_threadpool(progress_share.set_enabled, form.get("share_progress") == "on", home)
+        return await run_in_threadpool(setup_response, request, STEP["start"])
+
     @app.post("/setup/start")
-    def setup_start(request: Request):
+    async def setup_start(request: Request):
+        return await run_in_threadpool(start_setup, request)
+
+    def start_setup(request):
         refused = locked_refusal(request, STEP["start"])
         if refused:
             return refused
+        progress_share.save_shown_if_unchosen(home)   # an untouched box saves what it showed (one write, in the lock)
         setup_steps.login_on_continue(home)  # step 9 ticked by default: registered when continuing past it
         setup_steps.start_scheduler(home)
         # L1 (owner, 2026-11-08): one license check now, as [Check again] does, so the trial end the
@@ -1521,17 +1787,28 @@ def _serve(open_browser, home, path, start, scheduler, tray=False, resume=False)
     loop = scheduler_loop.install(scheduler if scheduler is not None else scheduler_loop.Loop(
         root, license_sync=lambda: scheduler_loop.sync_license_pause(root, home),
         before_start=lambda: paths.migrate(root, serving=True),
+        linkedin_keep=lambda: linkedin_keep_soon(home, root),
         license_reason=lambda: scheduler_loop.license_pause_reason(home),
         credentials_hold=lambda: credentials.hold_reason(home_path)))
     try:
         # The loop starts only once the app exists and inside this try, so whatever stops the
         # dashboard also stops and uninstalls the loop.
-        config = uvicorn.Config(create_app(secret, PORT, home=home), log_level="warning", access_log=False,
+        import live_view   # its socket takes small messages only (keys, clicks, a paste): a small frame limit
+        app = create_app(secret, PORT, home=home)
+        # E18: the real reader of Sidedoor's browser (the LinkedIn session, in memory only). Installed here,
+        # where the app really starts, never by create_app: a test's app must never start a browser.
+        import linkedin_reader
+        linkedin_reader.install(home, root, app.state.live_view.config, app.state.live_view)
+        config = uvicorn.Config(app, log_level="warning", access_log=False,
+                                ws_max_size=live_view.SOCKET_MAX_BYTES,
                                 server_header=False)
         server = uvicorn.Server(config)
         scheduler_loop.start_license_heartbeat(root, home=home)  # E8.T2: checks once now, then daily
         import update_check
         update_check.start(home=home)  # E9.T3: checks once now, then every 30 minutes; never blocks a page
+        # E15.T3: desktop notifications and the tray count, from what Overview shows; reads only
+        if not paths.RELEASE_CHECK:   # a release check's second copy never posts on the user's desktop
+            desktop_alerts.start(home=home, root=root, read=lambda: read_connection(root))
         # Wait for Start (owner, 2026-10-22): nothing runs until Setup's own Start (step 10) has
         # succeeded. After that, every app open (`resume`, `sidedoor serve`) starts the loop (owner,
         # 2026-10-25: after an update, a crash or a reopen it keeps running); Pause, which is saved,
@@ -1554,11 +1831,13 @@ def _serve(open_browser, home, path, start, scheduler, tray=False, resume=False)
         scheduler_loop.stop_license_heartbeat()
         import update_check
         update_check.stop()
+        desktop_alerts.stop()
         if rotation is not None:
             rotation.set()
         if scheduler_loop.current() is loop:
             scheduler_loop.install(None)  # nothing in this process can start it again
         listener.close()
+        # Quit: a live view was ended by the server's own shutdown (live_view.LiveView.quit, P3).
         # Quit: a session still running keeps its Chrome (it holds the browser lock and its guard
         # closes that Chrome when it ends); a Chrome no session owns any more is closed now.
         close_orphaned_browser(root)
@@ -1579,6 +1858,14 @@ def close_orphaned_browser(root):
 STOP_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGINT") if hasattr(signal, name))
 
 
+def page_url(secret, href=None):
+    """The tokened link to a dashboard page: `href` is a path of this dashboard, with its own query and
+    fragment ("/settings#connections"); anything else is Overview."""
+    href = href if isinstance(href, str) and href.startswith("/") and not href.startswith("//") else "/"
+    path, mark, fragment = href.partition("#")
+    return "http://127.0.0.1:%d%s%st=%s%s" % (PORT, path, "&" if "?" in path else "?", secret, mark + fragment)
+
+
 class TrayActions:
     """What the tray's menu does: the same functions as `sidedoor serve` reopening a running
     dashboard (`announce`) and Overview's Pause and Resume (`set_user_pause`); `quit` is set by
@@ -1586,11 +1873,19 @@ class TrayActions:
 
     def __init__(self, secret, root):
         self.url = f"http://127.0.0.1:{PORT}/?t={secret}"
+        self.secret = secret
         self.root = root
         self.quit = lambda: None
 
     def open_dashboard(self):
         announce(self.url, True)
+
+    def open_page(self, href=None):
+        """A notification was clicked (E15.T3): the page that fixes it, opened like Open dashboard."""
+        announce(page_url(self.secret, href), True)
+
+    def waiting(self):
+        return desktop_alerts.waiting()
 
     def pause(self):
         set_user_pause(self.root, True, "tray")
@@ -1644,6 +1939,7 @@ def run_with_tray(server, listener, icon, home):
 
     def ready():
         tray_icon.write_state(home, "shown")
+        notifications.set_desktop_post(icon.notify)   # E15.T3: desktop notifications go through the tray
         icon.call_on_main(lambda: tray_icon.mac_signals(request_stop, STOP_SIGNALS))
     try:
         try:
@@ -1655,6 +1951,7 @@ def run_with_tray(server, listener, icon, home):
         finally:
             for number in previous:  # Python's own signal handling again (macOS: after the Mach hooks)
                 signal.signal(number, request_stop)
+        notifications.set_desktop_post(None)
         while worker.is_alive():  # the tray ended (Quit, a signal) or never started: wait for the server
             worker.join(0.5)
     finally:

@@ -64,7 +64,11 @@ from pathlib import Path
 
 
 NAMES = {"openrouter": "openrouter.key", "license": "license.key", "openai": "openai.key",   # openai: E0.T8
-         "anthropic": "anthropic.key"}   # anthropic: U1 3c, Claude's API-key mode (no UI before 3g)
+         "anthropic": "anthropic.key",   # anthropic: U1 3c, Claude's API-key mode (no UI before 3g)
+         # vault (E15.T4): the one random key that unlocks Sidedoor's encrypted files in the home
+         # (site_sessions.py now; E15.T7's password vault is meant to share it). Made by Sidedoor,
+         # never typed by the user.
+         "vault": "vault.key"}
 SERVICE = "Sidedoor"
 ID_FILE = "credentials-id"
 LOCK_FILE = "credentials.lock"
@@ -702,7 +706,8 @@ def put(name, value, home=None):
 
 def delete(name, home=None):
     """Remove the credential: the store item first, then the file. A refused store delete raises
-    Locked / Unavailable and leaves the file too, so nothing half-removed reappears (A5)."""
+    Locked / Unavailable and leaves the file too, so nothing half-removed reappears (A5). The vault key
+    takes the files sealed under it with it (site_sessions.key_removed)."""
     home = _home(home)
     chosen = backend()
     account = _account(name, home) if chosen is not None else None
@@ -713,6 +718,11 @@ def delete(name, home=None):
     _path(name, home).unlink(missing_ok=True)
     _set_choice(home, name, None)
     _forget(home, name)
+    if name == "vault":
+        # E15.T4 Q3: what the vault key sealed cannot be opened again: the files go with it, so the next
+        # session start makes a fresh key and store (a key that only cannot be READ never reaches here).
+        import site_sessions
+        site_sessions.key_removed(home)
 
 
 def remove_all(home=None):
@@ -769,6 +779,8 @@ def _wanted(name, home):
     chose it (setup-state codex_auth "api_key") or one was saved (its file or `openai.key.tested`).
     Otherwise a locked store would hold every Sign-in-with-ChatGPT user on a key they never had.
     The other keys always count."""
+    if name == "vault":   # E15.T4: Sidedoor's own key; while it cannot be read, saved site sessions are
+        return False      # simply not used (site_sessions.py). It never holds the scheduler or a page.
     if name == "anthropic":   # U1 3c: the same for the Anthropic API key (Claude's API-key mode)
         home = _home(home)
         if (home / NAMES[name]).exists():

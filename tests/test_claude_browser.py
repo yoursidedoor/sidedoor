@@ -93,7 +93,7 @@ class BrowserCommand(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], "sonnet")
         allowed = self.allowed(command)
         self.assertIn("mcp__browser__browser_click", allowed)
-        self.assertIn("mcp__browser__browser_run_code_unsafe", allowed)
+        self.assertNotIn("mcp__browser__browser_run_code_unsafe", allowed)   # no session's tool (owner, 2026-11-12)
         self.assertIn("mcp__browser__wait_for_human_check", allowed)
         self.assertNotIn("mcp__browser__arm", allowed)
         # The same list Codex approves (browser_runtime.codex_options), name for name.

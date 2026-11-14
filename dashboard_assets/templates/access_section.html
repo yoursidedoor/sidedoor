@@ -1,0 +1,6 @@
+{# Approvals > Sign-ins and human checks (E15.T2): the section an action on one of its cards redraws. #}
+<section class="card approvals-section{{ ' approvals-empty' if not s.cards and not (f and f.text) }}" id="sign-ins" aria-labelledby="sign-ins-title">
+  <h2 id="sign-ins-title">Sign-ins and human checks</h2>
+  {% if not s.cards %}<p class="muted">No application is waiting for you to sign in or do a human check.</p>{% endif %}
+  {% with at = "approvals", target = "sign-ins" %}{% include "access_cards.html" %}{% endwith %}
+</section>

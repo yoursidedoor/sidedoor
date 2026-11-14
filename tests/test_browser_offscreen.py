@@ -159,46 +159,31 @@ class GuardKeepsTheWindowOffscreen(unittest.TestCase):
         self.call(proxy, "browser_navigate", 1)
         self.assertEqual(windows.calls, [])
 
-    def test_the_captcha_wait_shows_the_window_in_front_then_hides_it_again(self):
-        windows, seen = FakeWindows(), []
+    def test_a_held_call_never_puts_the_window_on_screen(self):
+        """E16.T1: the CAPTCHA wait that showed the window is retired; the guard's dormant hold of one call
+        (no application session has one) makes no placement of its own, whether it answers or fails."""
+        for hold_fails in (False, True):
+            windows = FakeWindows()
 
-        class Wait:
-            def call(self_inner):
-                seen.append(([code for _, code in windows.calls], proxy.showing))
-                return "RECHECK_NOW"
-        proxy = self.proxy(windows, human_check_wait=Wait())
-        threads = []
-        with mock.patch.object(browser_guard.threading, "Thread",
-                               side_effect=lambda target, daemon: threads.append(target) or mock.Mock()):
-            proxy.call_human_check({"jsonrpc": "2.0", "id": 9})
-        threads[0]()
-        during, showing = seen[0]
-        self.assertTrue(showing)
-        self.assertEqual(len(during), 1)
-        self.assertIn("left: 80, top: 60", during[0])
-        self.assertIn("page.bringToFront()", during[0])   # the owner has to tick the box
-        self.assertEqual(len(windows.calls), 2)
-        self.assertIn("windowState: 'minimized'", windows.calls[1][1])
-        self.assertFalse(proxy.showing)
-        # While the window is on-screen for the owner, a call (none is expected) does not hide it.
-        proxy.showing = True
-        self.call(proxy, "browser_snapshot", 10)
-        self.assertEqual(len(windows.calls), 2)
-
-    def test_the_window_goes_back_off_screen_even_when_the_wait_fails(self):
-        windows = FakeWindows()
-
-        class Broken:
-            def call(self_inner):
-                raise RuntimeError("no context")
-        proxy = self.proxy(windows, human_check_wait=Broken())
-        threads = []
-        with mock.patch.object(browser_guard.threading, "Thread",
-                               side_effect=lambda target, daemon: threads.append(target) or mock.Mock()):
-            proxy.call_human_check({"jsonrpc": "2.0", "id": 9})
-        threads[0]()
-        self.assertIn("windowState: 'minimized'", windows.calls[-1][1])
-        self.assertFalse(proxy.showing)
+            class Hold:
+                def call(self_inner):
+                    if hold_fails:
+                        raise RuntimeError("no context")
+                    return "RELEASED"
+            proxy = self.proxy(windows, human_check_wait=Hold())
+            threads = []
+            with mock.patch.object(browser_guard.threading, "Thread",
+                                   side_effect=lambda target, daemon: threads.append(target) or mock.Mock()):
+                proxy.call_human_check({"jsonrpc": "2.0", "id": 9})
+            threads[0]()
+            self.assertEqual(windows.calls, [])
+            self.assertFalse(hasattr(proxy, "showing"))
+            # A call during or after a hold is hidden as any other (minimized, never on-screen).
+            self.call(proxy, "browser_snapshot", 10)
+            self.assertTrue(windows.calls)
+            for _, code in windows.calls:
+                self.assertIn("windowState: 'minimized'", code)
+                self.assertNotIn("bringToFront", code)
 
     def test_the_model_still_cannot_bring_chrome_forward(self):
         windows = FakeWindows()
@@ -207,7 +192,10 @@ class GuardKeepsTheWindowOffscreen(unittest.TestCase):
         proxy.to_client = sent.append
         proxy.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "browser_run_code_unsafe", "arguments": {"code": "async (page) => page.bringToFront()"}}})
-        self.assertIn(browser_guard.FOCUS_CODE, sent[0]["result"]["content"][0]["text"])
+        self.assertIn(browser_guard.REMOVED_CODE, sent[0]["result"]["content"][0]["text"])   # the tool itself is refused
+        proxy.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "browser_evaluate", "arguments": {"function": "() => page.bringToFront()"}}})
+        self.assertIn(browser_guard.FOCUS_CODE, sent[1]["result"]["content"][0]["text"])
         self.assertEqual(windows.calls, [])
 
     def test_placed_windows_reads_the_run_code_answer(self):
@@ -376,7 +364,8 @@ class ProfileOwnedBySidedoor(unittest.TestCase):
             line = doctor.check_browser_runtime(self.config, ps(["/usr/bin/vim"]), self.root)
         self.assertIn(browser_runtime.OFFSCREEN_WORDS, line["line"])  # version unreadable: it runs minimized
         self.assertEqual(browser_runtime.OFFSCREEN_WORDS,
-                         "Sidedoor's browser runs minimized in the Dock; it appears when it needs you.")
+                         "Sidedoor's browser runs minimized in the Dock. When a site asks for a human check "
+                         "before an application is sent, the job waits for you under Needs you.")
         with mock.patch.object(browser_runtime, "offscreen", lambda config=None, platform=None: True):
             line = doctor.check_browser_runtime(dict(self.config, browser_driver=dict(
                 self.config.get("browser_driver") or {}, headless_operations=[])), ps(["/usr/bin/vim"]), self.root)

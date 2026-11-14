@@ -40,6 +40,53 @@ def write_retry_at(failures, now):
     return (engagement.timestamp(now) + dt.timedelta(minutes=minutes)).isoformat()
 
 
+# E18 review round 2 (B8, owner): a write the port refused before any request (`never_forwarded`: LinkedIn
+# read as disconnected after the readiness check, or the relay refused the license) sent nothing. It is
+# not one of the 3 tries and never ends the item: the row goes back to "nothing written", exactly as an
+# invitation does (sequence._attempt, RB6), and the existing first-send or retry path sends it once.
+HELD_WRITES_KEPT = 5
+
+
+def never_forwarded(error):
+    return getattr(error, "never_forwarded", False) is True
+
+
+def held_write_note(result, error, operation=None):
+    """Record on `result` that a write was held (the last HELD_WRITES_KEPT are kept)."""
+    hold = getattr(error, "hold", None)
+    note = {"at": dt.datetime.now(dt.timezone.utc).isoformat(), "hold": getattr(hold, "code", None), "operation": operation}
+    result["held_writes"] = (result.get("held_writes") or [])[-(HELD_WRITES_KEPT - 1):] + [note]
+    return result
+
+
+def request_made(request):
+    """True for a saved provider request whose write was really made (not one held before any request)."""
+    return isinstance(request, dict) and request.get("never_forwarded") is not True
+
+
+def unwrite_held_request(database, action_id, error, keep=False):
+    """A first send's request was committed and its one write then held: take the request back, so the
+    row reads as never written (`unipile_message_unwritten`, `followup_execution._first_send`: sent as
+    a first try, after every first-send check). With `keep` (a REPLY, whose receipt read is bound to the
+    request) the request stays, marked `never_forwarded`, and is not counted as a try
+    (`reply_execution.retry_reply`, `request_made`). True when done."""
+    with database:
+        row = database.execute("SELECT result FROM outreach_actions WHERE action_id=? AND state='REQUEST_STARTED'",
+                               (action_id,)).fetchone()
+        try:
+            result = json.loads(row[0]) if row and row[0] else None
+        except ValueError:
+            result = None
+        if not isinstance(result, dict) or not isinstance(result.get("provider_request"), dict):
+            return False
+        request = result["provider_request"] if keep else result.pop("provider_request")
+        if keep:
+            request["never_forwarded"] = True
+        held_write_note(result, error, request.get("operation"))
+        return database.execute("UPDATE outreach_actions SET result=? WHERE action_id=? AND state='REQUEST_STARTED' AND result IS ?",
+                                (json.dumps(result, sort_keys=True), action_id, row[0])).rowcount == 1
+
+
 def checking_before_resend(action, state, result):
     """True while Sidedoor checks whether an unclear send landed before it may send it again (check
     before resend, owner 2026-11-06): an invitation waiting on its read after an attempt
@@ -812,20 +859,25 @@ def _read_status(database, action_id, phase):
     return dict(row) if row else None
 
 
-def resume_read(database, action_id, phase, now=None):
+def resume_read(database, action_id, phase, now=None, *, new_text=False):
     """Explicit recovery after an adapter/proof fix; never restores spent budget.
 
     A terminal exhaustion requires a reviewed replacement workflow, not an
     automatic budget reset. This operation cannot reset send claims or retries.
+
+    `new_text` (followup_execution.promote, only after enqueue_action answered REPLACED): the parked
+    read belonged to a text that is gone, so the new text's read starts from no tries, whatever the
+    old one spent (three transient failures before the parking left a rewrite unjudged for good).
+    It cannot loop: a writer task has three writings, and a text the judge blocked is not read again.
     """
     if phase not in {"INSPECTION", "RECONCILIATION"}:
         raise ValueError("Unsupported read phase")
     now = engagement.timestamp(now or dt.datetime.now(dt.timezone.utc)).isoformat()
     with engagement.transaction(database):
         changed = database.execute("""UPDATE outreach_read_retries
-            SET state='READY',next_at=NULL,last_error=NULL,updated_at=?
-            WHERE action_id=? AND phase=? AND state IN ('ADAPTER_UNAVAILABLE','INVALID_PROOF') AND attempts<3""",
-            (now, action_id, phase))
+            SET state='READY',next_at=NULL,last_error=NULL,updated_at=?,attempts=CASE WHEN ? THEN 0 ELSE attempts END
+            WHERE action_id=? AND phase=? AND state IN ('ADAPTER_UNAVAILABLE','INVALID_PROOF') AND (? OR attempts<3)""",
+            (now, int(new_text), action_id, phase, int(new_text)))
     return changed.rowcount == 1
 
 
@@ -871,6 +923,20 @@ READ_BACKOFF_MINUTES = (15, 60, 240)
 READ_BACKOFF_CEILING_MINUTES = 720
 
 
+# A follow-up its send judge blocked for the situation, not the text (owner, 2026-11-12): the same
+# text is judged again on this read backoff, never sooner than an hour after the last verdict
+# (60, 60, 240, then 720 minutes apart). SITUATION_BLOCK_LIMIT such verdicts on one follow-up, the
+# first included, end it closed before sending (owner, 2026-11-12: "6 checks over about 30 hours":
+# hours 0, 1, 2, 6, 18 and 30). A real situation, such as an earlier send not confirmed yet, clears
+# within hours; fewer re-asks cost less and bound a judge that calls a "do not contact" a situation.
+# The count is the judge's own saved SITUATION verdicts for the action (outreach_agent.situation_blocks),
+# so it is per follow-up and survives a restart.
+SITUATION_WAIT = "JUDGE_BLOCKED_ON_SITUATION"
+SITUATION_NOT_CLEARED = "FOLLOWUP_SITUATION_NOT_CLEARED"
+SITUATION_RECHECK_MINUTES = 60
+SITUATION_BLOCK_LIMIT = 6
+
+
 def _read_backoff(attempts, now):
     index = min(max(int(attempts or 1), 1), len(READ_BACKOFF_MINUTES)) - 1
     minutes = READ_BACKOFF_MINUTES[index] if attempts <= len(READ_BACKOFF_MINUTES) else READ_BACKOFF_CEILING_MINUTES
@@ -906,6 +972,14 @@ def _claim_read(database, action_id, phase, now):
         return token
 
 
+def _renew_read(database, action_id, phase, token, now):
+    """A fresh lease for a read this cycle still holds (its token, still READING); False otherwise."""
+    with engagement.transaction(database):
+        return database.execute("""UPDATE outreach_read_retries SET lease_until=? WHERE action_id=? AND phase=?
+            AND token=? AND state='READING'""", ((now + dt.timedelta(seconds=600 if phase == "INSPECTION" else 300)).isoformat(),
+                                                 action_id, phase, token)).rowcount == 1
+
+
 # Owner, 2026-10-23: "unknown should never block". A send judge's UNKNOWN (a fact it could not settle)
 # goes ahead like READY; only BLOCKED holds a send. Every Python guard still applies (prior contact
 # from our records, opt-out, stops, closure, exclusions, duplicate claims). Reconciliation's UNKNOWN
@@ -930,6 +1004,8 @@ def _finish_read(database, action_id, phase, token, now, outcome, error=None, re
         elif outcome == "RETRY_WAIT":
             # No exhaustion: a read that could not reconcile gets a later date, never a grave.
             next_at = _read_backoff(attempts, now)
+            if error == SITUATION_WAIT:
+                next_at = max(engagement.timestamp(next_at), now + dt.timedelta(minutes=SITUATION_RECHECK_MINUTES)).isoformat()
             if (error == "OUTREACH_AI_SHARED_BUDGET_EXHAUSTED" and isinstance(retry_at, dt.datetime)
                     and retry_at.utcoffset() is not None and now < retry_at <= now + dt.timedelta(hours=26)):
                 next_at = max(engagement.timestamp(next_at), retry_at).astimezone(dt.timezone.utc).isoformat()
@@ -951,7 +1027,8 @@ INPUT_BOUND_READ_ERRORS = frozenset({"OUTREACH_AGENT_INPUT_OR_TIME_BOUND",
 def _setup_hold_codes():
     import unipile_port
     return {cls.code for cls in (unipile_port.LicenseRequired, unipile_port.LicenseRefused,
-                                 unipile_port.LinkedInNotConnected, unipile_port.SenderNotConfigured)}
+                                 unipile_port.LinkedInNotConnected, unipile_port.SenderNotConfigured,
+                                 unipile_port.LinkedInDisconnected)}
 
 
 def _transient_status(status):
@@ -2057,6 +2134,26 @@ def _reconcile_action(database, row, action, config, client, now, read_token=Non
     return resolved_state
 
 
+def _close_situation(database, row, now, item):
+    """The cap on SITUATION verdicts: the follow-up ends closed before sending, quietly, not a failure."""
+    with database:
+        database.execute("""UPDATE outreach_actions SET state='CLOSED',result=? WHERE action_id=?
+            AND state IN ('PENDING','BLOCKED') AND claimed_at IS NULL""",
+            (json.dumps({"closed_before_send": {"reason": SITUATION_NOT_CLEARED, "closed_at": now.isoformat()}}), row["action_id"]))
+    item.update(state="CLOSED", blocker=SITUATION_NOT_CLEARED)
+
+
+def _followup_too_late(database, action, now):
+    """True when the plan says this queued follow-up is past its send window (engagement.next_action)."""
+    if action.get("purpose") != "FOLLOWUP":
+        return False
+    try:
+        planned = engagement.next_action(database, action["profile"], now, action.get("recipient", ""), action.get("campaign_id"))
+    except (ValueError, TypeError, KeyError):
+        return False
+    return planned.get("blocker") == engagement.FOLLOWUP_TOO_LATE and planned.get("ordinal") == action.get("ordinal")
+
+
 def _repair_in_run(database, row, action, proof, now, repair, repaired):
     """Let the producer rewrite a judge-rejected FOLLOWUP or REPLY inside this same run.
 
@@ -2079,12 +2176,13 @@ def _repair_in_run(database, row, action, proof, now, repair, repaired):
         return None
     if identity in repaired:
         return None
-    # A reply is checked against its OWN claim (owner, 2026-09-30): everyone we reply to after
-    # inviting them has the invitation's claim on file, so the identity-wide test made a
-    # judge-rejected reply unrepairable for exactly the people the harness manages.
-    claimed = (database.execute("SELECT 1 FROM outreach_action_claims WHERE action_id=?", (row["action_id"],)).fetchone()
-               if action.get("purpose") == "REPLY" else
-               database.execute("SELECT 1 FROM outreach_action_claims WHERE identity=?", (identity,)).fetchone())
+    # A message is checked against its OWN claim (replies: owner, 2026-09-30): everyone we reply to
+    # after inviting them has the invitation's claim on file, so the identity-wide test made a
+    # judge-rejected reply unrepairable for exactly the people the harness manages. Follow-ups too
+    # (FU1): a follow-up is only ever written to someone whose first message, and for a second
+    # follow-up the first one, already has its claim, so that test left none of them repairable.
+    # The rewrite itself stays a compare-and-swap on this action's unclaimed row (enqueue_action).
+    claimed = database.execute("SELECT 1 FROM outreach_action_claims WHERE action_id=?", (row["action_id"],)).fetchone()
     if row["claimed_at"] is not None or claimed:
         return None
     repaired.add(identity)
@@ -2100,7 +2198,7 @@ def _repair_in_run(database, row, action, proof, now, repair, repaired):
     return replacement
 
 
-def cycle(database, config, client, now=None, *, purpose=None, repair=None):
+def cycle(database, config, client, now=None, *, purpose=None, repair=None, type_fit=None):
     """Guarded opt-in executor; all uncertain/claimed actions reconcile, and only a read showing an
     unclear send absent may send it again (check before resend: a Unipile message in
     followup_execution.port_receipt, a reply in retry_reply, an invite in sequence.reconcile_invite).
@@ -2182,6 +2280,18 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
                     database.execute("UPDATE outreach_actions SET state='CLOSED' WHERE action_id=? AND state IN ('PENDING','BLOCKED')", (row["action_id"],))
                 item.update(state="CLOSED", blocker="OUTREACH_CLOSED")
                 continue
+            if row["state"] in {"PENDING", "BLOCKED"} and _followup_too_late(database, action, now):
+                # Owner, 2026-11-12: a follow-up more than 14 days past its due time is never sent,
+                # one queued inside the window included. The plan already refuses it at every gate
+                # (engagement.next_action); this ends the unclaimed row the way a closed person's
+                # is ended, with the reason, before any read or judge call.
+                with database:
+                    database.execute("""UPDATE outreach_actions SET state='CLOSED',result=? WHERE action_id=?
+                        AND state IN ('PENDING','BLOCKED') AND claimed_at IS NULL""",
+                        (json.dumps({"closed_before_send": {"reason": engagement.FOLLOWUP_TOO_LATE, "closed_at": now.isoformat()}}),
+                         row["action_id"]))
+                item.update(state="CLOSED", blocker=engagement.FOLLOWUP_TOO_LATE)
+                continue
             if (action.get("purpose") == "REPLY" and row["state"] == "UNCERTAIN_NO_RETRY"
                     and hasattr(client, "retry_reply")):
                 # A reply send that hit an error is retried, at most 3 attempts in all, each after a
@@ -2198,6 +2308,33 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
                     item.update(state="PACING_WAIT", reason=pace["reason"], wait_until=pace["wait_until"])
                     continue
             phase = "INSPECTION" if row["state"] in {"PENDING", "BLOCKED"} else "RECONCILIATION"
+            if phase == "INSPECTION" and action.get("purpose") == "FOLLOWUP":
+                import outreach_agent
+                if outreach_agent.situation_blocks(database, row["action_id"]) >= SITUATION_BLOCK_LIMIT:
+                    # The sixth SITUATION verdict is already saved (the run stopped before it was
+                    # closed): the judge is not asked again, whatever it would answer now.
+                    _close_situation(database, row, now, item)
+                    continue
+                if outreach_agent.judge_blocked_text(database, action):
+                    # Owner, 2026-11-12: "a text is judged once. After a block only a rewrite is judged."
+                    # The judge's own BLOCKED verdict on this exact text is on record, so no read and no
+                    # judge call: the only way on is a new writing, asked for here when this round has
+                    # not had its one repair for the person (a second block in the round that wrote it,
+                    # a stopped run). With no writing left it stays as it is, unsent.
+                    replacement = _repair_in_run(database, row, action, {}, now, repair, repaired)
+                    if replacement is not None:
+                        rows.append(replacement)
+                        item["repair"] = {"state": "RECOMPOSED", "action_id": replacement["action_id"]}
+                    else:
+                        # Its read is parked, as a text that could not be judged always was, so the row
+                        # sorts after live work; a rewrite that replaces it starts the read again
+                        # (followup_execution.promote: resume_read, new_text).
+                        with database:
+                            database.execute("""UPDATE outreach_read_retries SET state='INVALID_PROOF',next_at=NULL,
+                                last_error='JUDGE_BLOCKED_TEXT',updated_at=? WHERE action_id=? AND phase='INSPECTION'
+                                AND state IN ('READY','RETRY_WAIT')""", (now.isoformat(), row["action_id"]))
+                    item.update(state="BLOCKED", blocker="JUDGE_BLOCKED_TEXT_NOT_JUDGED_AGAIN")
+                    continue
             read_token = _claim_read(database, row["action_id"], phase, now)
             if read_token is None:
                 item["read_retry"] = _read_status(database, row["action_id"], phase)
@@ -2270,8 +2407,30 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
             if gates:
                 outcome = "INVALID_PROOF" if invalid_proof else "RETRY_WAIT" if unresolved_proof else "READY"
                 error = "MALFORMED_INSPECTION_PROOF" if invalid_proof else "SOURCE_EVIDENCE_UNRESOLVED" if unresolved_proof else None
+                # Owner, 2026-11-12: "A situation block uses no writing. The same text waits and is
+                # checked again later, until it passes or the 14 days run out." The follow-up judge
+                # says which kind of block it is (the proof's agent_block_about, an enum; the reason's
+                # wording is never read). No objection, no repair, no failed try: the read waits on
+                # the read backoff, at least SITUATION_RECHECK_MINUTES apart, and the queued text is
+                # judged again. Still BLOCKED until a READY, so nothing is sent meanwhile.
+                situation = (action.get("purpose") == "FOLLOWUP" and not invalid_proof
+                             and "AGENT_DECISION_NOT_READY" in gates and proof.get("agent_block_about") == "SITUATION")
+                if situation:
+                    outcome, error = "RETRY_WAIT", SITUATION_WAIT
+                    import outreach_agent
+                    if outreach_agent.situation_blocks(database, row["action_id"]) >= SITUATION_BLOCK_LIMIT:
+                        # The cap, tested on the saved verdicts before the read is finished: a read
+                        # whose finish is lost (a stale lease) still ends here, never in a seventh call.
+                        _finish_read(database, row["action_id"], phase, read_token, now, outcome, error)
+                        _close_situation(database, row, now, item)
+                        continue
                 if not _finish_read(database, row["action_id"], phase, read_token, now, outcome, error):
                     item.update(blocker="STALE_INSPECTION_READ", read_retry=_read_status(database, row["action_id"], phase))
+                    continue
+                if situation:
+                    with database:
+                        database.execute("UPDATE outreach_actions SET state='BLOCKED',result=? WHERE action_id=? AND state IN ('PENDING','BLOCKED')", (json.dumps(gates), row["action_id"]))
+                    item.update(state="BLOCKED", gates=gates, blocker=SITUATION_WAIT, read_retry=_read_status(database, row["action_id"], phase))
                     continue
                 if "AGENT_DECISION_NOT_READY" in gates:
                     # Record the objection FIRST: the producer reads it back through
@@ -2289,6 +2448,24 @@ def cycle(database, config, client, now=None, *, purpose=None, repair=None):
                     database.execute("UPDATE outreach_actions SET state='BLOCKED',result=? WHERE action_id=? AND state IN ('PENDING','BLOCKED')", (json.dumps(gates), row["action_id"]))
                 item.update(state="BLOCKED", gates=gates, read_retry=_read_status(database, row["action_id"], phase))
                 continue
+            if type_fit is not None and action.get("purpose") == "FOLLOWUP":
+                # E17 (owner, 2026-11-12): a READY follow-up whose judge noted that its question sits in
+                # another contact type's lane gets one rewrite, tried on the side
+                # (followup_execution.type_fit_turn, which never raises). It answers None, and this
+                # action goes on to its claim untouched, unless a rewrite passed the judge and every
+                # gate and already replaced the queued text in one transaction; then that row, action
+                # and proof are the ones claimed below, under the same payload check as any other.
+                swapped = type_fit(row, action, proof, now)
+                if refresh_now:
+                    now = dt.datetime.now(dt.timezone.utc)
+                # The turn (a writer call and a second judge call) ran inside this read's 600 s lease:
+                # give the held token a full lease again so the claim below still finishes its read.
+                # A token this cycle no longer holds is not renewed, and the claim reports the stale
+                # read exactly as it would have without the turn.
+                _renew_read(database, row["action_id"], phase, read_token, now)
+                if swapped is not None:
+                    row, action, proof = swapped
+                    item["type_fit"] = "REWRITTEN"
             try:
                 database.execute("BEGIN IMMEDIATE")
                 if refresh_now:

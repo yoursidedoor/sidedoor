@@ -53,7 +53,7 @@ clock clears within the hour), and when woken (`request_check`). The
 render never calls the relay: `view` reads the stored files only.
 
 `POST /license/heartbeat` {key, machine, version[, milestones]} (relay/server.py; `heartbeat_body`:
-`milestones` only while the user turned on progress counts, E12.T2): 200 with a signed entitlement
+`milestones` while the progress-counts box shows on, E12.T2): 200 with a signed entitlement
 (with `update_required` and `min_version` when the relay's MIN_APP_VERSION is above `version`,
 E12.T5: `update_required`, shown by `update_check.banner`); 401
 LICENSE_INVALID (unknown key); 403 MACHINE_NOT_ACTIVATED. `POST /license/activate` likewise
@@ -568,8 +568,9 @@ def _check(home, relay_url, post, now):
 
 
 def heartbeat_body(key, machine, home=None):
-    """{key, machine, version}, plus `milestones` only while the user turned on progress counts
-    (E12.T2, `progress_share`). `version` lets the relay sign an update flag (E12.T5)."""
+    """{key, machine, version}, plus `milestones` while the progress-counts box shows on (E12.T2,
+    `progress_share.shown`: the saved choice, else on until Start is done), otherwise the opt-out
+    marker. `version` lets the relay sign an update flag (E12.T5)."""
     import progress_share
     import version
     return dict({"key": key, "machine": machine, "version": version.current()}, **progress_share.heartbeat_fields(home))

@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 
 import approvals
 import engagement
@@ -34,6 +35,23 @@ class SharedBudgetExhausted(TimeoutError):
         super().__init__(self.code)
         self.reset_at = workflow_tasks.next_day_start(now, config.get("timezone", "America/Los_Angeles"),
                                                       workflow_tasks.day_start_hour(config)).astimezone(dt.timezone.utc)
+
+
+# E17 (owner, 2026-11-12): "One rewrite, then send regardless ... Type fit alone can never hold or fail a
+# message", tried on the side: "the rewrite is written and judged WITHOUT being saved. It replaces the
+# original only if it passes. Otherwise it is thrown away and the original goes out untouched."
+TYPE_FIT_ATTEMPT = "TYPE_FIT_ATTEMPT"   # the audit row written before the one attempt a message ever gets
+TYPE_FIT_AUDIT = "type-fit:"            # audit id prefix of a side judgment's records
+
+
+def type_fit_attempted(database, key):
+    return database.execute("SELECT 1 FROM outreach_agent_audit WHERE action_id=? AND kind=?",
+                            (key, TYPE_FIT_ATTEMPT)).fetchone() is not None
+
+
+def type_fit_feedback(note, **previous):
+    """The judge's advisory note in the writers' repair hand-back shape (_judge_text_rejection)."""
+    return [dict({"rejection_reason": note, "required_correction": None, "agent_decision": "READY"}, **previous)]
 
 
 def _task_summary(database, task_id):
@@ -427,8 +445,30 @@ class Adapter(outreach.HeyReachActionAdapter):
         trimmed.pop("reads", None)
         return trimmed
 
-    def _judge(self, action, phase, config, claim=None, request=None):
+    def _type_fit_rewrite(self, action):
+        """True when this action's text is the saved rewrite a type-fit note bought (E17): its research
+        draft version says so. Anything unreadable is False, so the packet stays as it always was."""
+        source = action.get("source") if isinstance(action.get("source"), dict) else {}
+        if source.get("kind") != outreach_promotion.SOURCE_KIND:
+            return False
+        try:
+            row = self.database.execute("SELECT payload FROM rw_drafts WHERE identity=? AND version=? AND content_hash=?",
+                                        (source.get("identity"), source.get("version"), source.get("content_hash"))).fetchone()
+            return bool(row) and json.loads(row[0])["composition"].get("type_fit_rewrite") is True
+        except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError):
+            return False
+
+    def type_fit_note(self, action):
+        """The advisory note of the READY decision `inspect` last reached on exactly this action, else None."""
+        judged = getattr(self, "_judged", None)
+        return approvals.type_fit_note(judged[1]) if judged and judged[0] == digest(action) else None
+
+    def _judge(self, action, phase, config, claim=None, request=None, *, type_fit_rewrite=False):
+        """`type_fit_rewrite`: the text is a type-fit rewrite judged on the side, before it is saved
+        (type_fit_turn). Its records go under their own audit id, so a rewrite that is thrown away never
+        shows as the verdict on the message that goes out."""
         initial = action.get("purpose") in {"INITIAL", "FIRST_MESSAGE", "PREPARE_CAMPAIGN", "INVITE"}
+        audit_id = (TYPE_FIT_AUDIT if type_fit_rewrite else "") + action["action_id"]
         observation = self.judgment_observation(action, self.collect(
             action, phase, claim, new_contact_history=initial and phase == "INSPECTION"))
         now = engagement.timestamp(observation["finished_at"])
@@ -441,6 +481,14 @@ class Adapter(outreach.HeyReachActionAdapter):
         packet = {"action": action, "action_sha256": digest(action), "phase": phase,
                   "claim": dict(claim) if claim is not None else None, "request": request, "observation": observation,
                   "direct_history": history["proof"] if history is not None else {} if initial else _direct_proof(action, config, now),
+                  # Who this person is to the role (E17), named as the compose packet names it, for the
+                  # judge's advisory type-fit note only. Never a gate: "UNKNOWN" when research recorded
+                  # no label or it cannot be read. The note buys one rewrite on the side (type_fit_turn).
+                  **({"recipient": {"contact_type": reply_worker.recipient_contact_type(
+                      self.database, [action.get("profile")])}} if initial and phase == "INSPECTION" else {}),
+                  # This text is the one rewrite a type-fit note bought: the judge raises type fit no more.
+                  **({"type_fit_rewrite": True} if initial and phase == "INSPECTION"
+                     and (type_fit_rewrite or self._type_fit_rewrite(action)) else {}),
                   **self.judgment_context(action, config, now)}
         template = resources.read_text("outreach-agent-prompt.md")
         schema = resources.read_text("outreach-agent-schema.json")
@@ -464,18 +512,18 @@ class Adapter(outreach.HeyReachActionAdapter):
         approved = approvals.approval_for(self.database, action) if phase == "INSPECTION" else None
         if approved is not None:
             provenance = {"route": "OWNER_APPROVAL", "decision_source": "OWNER_APPROVAL:" + approved["record_id"]}
-        reference = audit(self.database, action["action_id"], phase, "OBSERVATION", now.isoformat(),
+        reference = audit(self.database, audit_id, phase, "OBSERVATION", now.isoformat(),
                           {"packet": packet, "source_sha256": source_hash, "provenance": provenance})
         if approved is not None:
             decision = approvals.decision(action, approved)
-            audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
+            audit(self.database, audit_id, phase, "DECISION", now.isoformat(),
                   {"observation_id": reference, "decision": decision, "decision_source": decision["decision_source"]})
             return observation, packet["direct_history"], decision, reference
         reuse_key = judgment_key(packet, template, schema) if initial and phase == "INSPECTION" else None
         cached = reusable_judgment(self.database, reuse_key, now, config) if reuse_key else None
         if cached is not None:
             # The same inputs were judged already: no compute booked, no model called (C1).
-            audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
+            audit(self.database, audit_id, phase, "DECISION", now.isoformat(),
                   {"observation_id": reference, "decision": cached["decision"], "route": "REUSED",
                    "reuse_key": reuse_key, "reused_from": cached["decision_id"], "judged_at": cached["judged_at"]})
             return observation, packet["direct_history"], cached["decision"], reference
@@ -490,7 +538,7 @@ class Adapter(outreach.HeyReachActionAdapter):
                     raise SharedBudgetExhausted(config, now)
             raw = execute(config, prompt, schema, timeout)
             def _record(turn, reason):
-                audit(self.database, action["action_id"], phase, "DECISION_REPAIR", now.isoformat(),
+                audit(self.database, audit_id, phase, "DECISION_REPAIR", now.isoformat(),
                       {"observation_id": reference, "turn": turn, "rejection_reason": reason})
 
             repairs = []
@@ -510,7 +558,7 @@ class Adapter(outreach.HeyReachActionAdapter):
             current = self.database.execute("SELECT payload FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
             if current and json.loads(current[0]) != action:
                 raise ValueError("OUTREACH_ACTION_CHANGED_DURING_INVESTIGATION")
-            decision_id = audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
+            decision_id = audit(self.database, audit_id, phase, "DECISION", now.isoformat(),
                   {"observation_id": reference, "output": raw, "output_sha256": reply_worker.sha(raw), "decision": decision,
                    **({"reuse_key": reuse_key} if reuse_key else {}),
                    **({"route": DIRECT_ROUTE, "reasoning_effort": DIRECT_EFFORT, "max_tokens": DIRECT_MAX_TOKENS,
@@ -530,7 +578,7 @@ class Adapter(outreach.HeyReachActionAdapter):
                                                   "outreach judgment repair turn completed; shared daily pool: unused tail of a cleanly completed reservation")
             return observation, packet["direct_history"], decision, reference
         except Exception as error:
-            audit(self.database, action["action_id"], phase, "FAILURE", now.isoformat(),
+            audit(self.database, audit_id, phase, "FAILURE", now.isoformat(),
                   {"observation_id": reference, "error_type": type(error).__name__,
                    "code": getattr(error, "code", None), "error": str(error)[:300],
                    **({"next_at": error.reset_at.isoformat()} if isinstance(error, SharedBudgetExhausted) else {}),
@@ -542,8 +590,11 @@ class Adapter(outreach.HeyReachActionAdapter):
                     error if provider_limits.wait_of(error) else None)
             raise
 
-    def inspect(self, action, config):
-        observation, direct, decision, reference = self._judge(action, "INSPECTION", config)
+    def inspect(self, action, config, *, type_fit_rewrite=False):
+        # The ordinary call is exactly what it always was; only a side judgment passes the option.
+        observation, direct, decision, reference = self._judge(
+            action, "INSPECTION", config, **({"type_fit_rewrite": True} if type_fit_rewrite else {}))
+        self._judged = (digest(action), decision)
         thread = decision["conversation_id"]
         port = observation.get("route") == sequence.SOURCE
         if port:
@@ -699,10 +750,11 @@ class Adapter(outreach.HeyReachActionAdapter):
                            if action.get("purpose") == "FIRST_MESSAGE" else positive)
             proof["history_outcome"] = ("SUPPRESSED" if any(value is True for value in suppressing.values())
                                         else "CAPABILITY_GATED" if proof["capability_gates"] else "INVESTIGATED")
-            audit(self.database, action["action_id"], "INSPECTION", "HISTORY", observation["finished_at"],
-                  {"identity": profile_key(action["profile"]), "sender_id": config["sender_id"],
-                   "findings": positive, "observation_id": reference,
-                   "capability_gates": proof["capability_gates"], "outcome": proof["history_outcome"]})
+            if not type_fit_rewrite:   # a side judgment leaves no finding behind for later history reads
+                audit(self.database, action["action_id"], "INSPECTION", "HISTORY", observation["finished_at"],
+                      {"identity": profile_key(action["profile"]), "sender_id": config["sender_id"],
+                       "findings": positive, "observation_id": reference,
+                       "capability_gates": proof["capability_gates"], "outcome": proof["history_outcome"]})
         return proof
 
     def reconcile(self, action, config):
@@ -865,10 +917,15 @@ class Adapter(outreach.HeyReachActionAdapter):
         except BaseException:
             self.database.rollback()
             raise
-        if operation == "send_message":
-            ack = self.port.send_message(arguments["chat_id"], arguments["text"])
-        else:
-            ack = self.port.start_chat(arguments["provider_id"], arguments["text"])
+        try:
+            if operation == "send_message":
+                ack = self.port.send_message(arguments["chat_id"], arguments["text"])
+            else:
+                ack = self.port.start_chat(arguments["provider_id"], arguments["text"])
+        except Exception as error:
+            if outreach.never_forwarded(error):   # E18 B8: held, nothing sent: no try spent
+                outreach.unwrite_held_request(self.database, action_id, error)
+            raise
         return {**request, "finished_at": outreach_provider._now(), "status": "ACKNOWLEDGED_UNCONFIRMED",
                 "raw": sequence._jsonable(ack.raw)}
 
@@ -1169,6 +1226,42 @@ def record_judge_objection(database, action, proof, now):
                   "previous_invitation": action.get("invitation")})
 
 
+def judge_blocked_text(database, action):
+    """True when the send judge has already answered BLOCKED for this action's exact message text.
+
+    Owner, 2026-11-12: "a text is judged once. After a block only a rewrite is judged." Read from the
+    judge's own records: the INSPECTION DECISION row it writes on answering, and the OBSERVATION row
+    that decision names, which holds the action it was shown. The text is the message itself, so a
+    "rewrite" that says the same thing again is the same text. A judgment that never produced a
+    verdict (a crash, a lost lease, a failed read, a provider wait) left no DECISION row and is judged
+    as before; READY and UNKNOWN verdicts are not matched. A rewrite tried on the side (type fit)
+    keeps its records under its own audit id and is never found here. A block about the SITUATION
+    (followup_execution._validate_judgment) is not a verdict on the text: the same text is put to
+    the judge again later, so those rows are not matched; a row without the field is a MESSAGE block.
+    """
+    if not isinstance(action, dict) or not isinstance(action.get("message"), str):
+        return False
+    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outreach_agent_audit'").fetchone():
+        return False
+    return database.execute("""SELECT 1 FROM outreach_agent_audit AS verdict
+        JOIN outreach_agent_audit AS shown ON shown.id=json_extract(verdict.record,'$.observation_id')
+        WHERE verdict.action_id=? AND verdict.phase='INSPECTION' AND verdict.kind='DECISION'
+        AND json_extract(verdict.record,'$.decision.decision')='BLOCKED'
+        AND COALESCE(json_extract(verdict.record,'$.decision.block_about'),'MESSAGE')<>'SITUATION'
+        AND shown.action_id=verdict.action_id AND shown.kind='OBSERVATION'
+        AND json_extract(shown.record,'$.packet.action.message')=? LIMIT 1""",
+        (action.get("action_id"), action["message"])).fetchone() is not None
+
+
+def situation_blocks(database, action_id):
+    """How many times the send judge has answered BLOCKED about the SITUATION for this action."""
+    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outreach_agent_audit'").fetchone():
+        return 0
+    return database.execute("""SELECT count(*) FROM outreach_agent_audit WHERE action_id=? AND phase='INSPECTION'
+        AND kind='DECISION' AND json_extract(record,'$.decision.decision')='BLOCKED'
+        AND json_extract(record,'$.decision.block_about')='SITUATION'""", (action_id,)).fetchone()[0]
+
+
 def pending_objection(database, identity, purpose=None):
     """The newest unanswered judge objection for this recipient, as repair_feedback.
 
@@ -1228,6 +1321,21 @@ def compose_draft(root, database, config, row, execute=None, now=None, *, repair
     the guarded dispatcher. Returns {"state": "COMPOSED"|"REJECTED", ...}.
     """
     now = engagement.timestamp(now or dt.datetime.now(dt.timezone.utc))
+    written = _compose_text(root, database, config, row, execute, now, repair)
+    if written["state"] != "COMPOSED":
+        return written
+    with research.transaction(database):
+        latest = database.execute("SELECT * FROM rw_drafts WHERE identity=? ORDER BY version DESC LIMIT 1", (row["identity"],)).fetchone()
+        _require(latest is not None and tuple(latest) == tuple(row), "DRAFT_CHANGED_DURING_COMPOSITION")
+        created = outreach_promotion.insert_version(database, row["identity"], written["payload"], now)
+    return {"state": "COMPOSED", "draft_id": created["draft_id"], "version": created["version"],
+            "evidence": written["evidence"]}
+
+
+def _compose_text(root, database, config, row, execute, now, repair):
+    """The writing half of compose_draft: build the packet, call the model, validate and correct the
+    text. Saves no draft version. Returns the REJECTED outcome, or {"state": "COMPOSED", "payload": the
+    next version's payload, "evidence"} for the caller to save or throw away."""
     # Note composition is a direct low-reasoning call too (cost cut C2, 2026-10-22), in the send
     # judge's shape, unless an executor is injected (tests, manual tools); no Codex (2026-10-27).
     direct = execute is None
@@ -1332,14 +1440,9 @@ def compose_draft(root, database, config, row, execute=None, now=None, *, repair
                    "resume_text_sha256": resume["text_sha256"], **provenance,
                    "posting": ({key: posting[key] for key in ("state", "source", "url", "observed_at", "sha256")}
                                if posting["state"] == "BROWSER_READ" else None)}
-    with research.transaction(database):
-        latest = database.execute("SELECT * FROM rw_drafts WHERE identity=? ORDER BY version DESC LIMIT 1", (row["identity"],)).fetchone()
-        _require(latest is not None and tuple(latest) == tuple(row), "DRAFT_CHANGED_DURING_COMPOSITION")
-        payload = outreach_promotion.superseding_payload(scaffold, invitation=output["invitation"],
-                                                         first_message=output["first_message"], composition=composition)
-        created = outreach_promotion.insert_version(database, row["identity"], payload, now)
-    return {"state": "COMPOSED", "draft_id": created["draft_id"], "version": created["version"],
-            "evidence": composition["evidence"]}
+    payload = outreach_promotion.superseding_payload(scaffold, invitation=output["invitation"],
+                                                     first_message=output["first_message"], composition=composition)
+    return {"state": "COMPOSED", "payload": payload, "evidence": composition["evidence"]}
 
 
 def _compose_step(root, database, config, row, execute, now):
@@ -1390,6 +1493,108 @@ def _compose_step(root, database, config, row, execute, now):
             status="COMPLETE" if not blocker else "RETRY_WAIT", blocker=blocker,
             next_action=None if not blocker else "Recompose from verified facts within the bounded attempts; do not send template text")
     return dict(_task_summary(database, task_id), attempted=True, composition=result.get("state"))
+
+
+def _inspection_gates(database, config, candidate, draft, proof, now):
+    """What holds a judged draft: the proof's own gates and the shared action guard."""
+    check = dict(candidate, conversation_id=proof.get("conversation_id"))
+    gates = [*proof.get("capability_gates", []), *outreach.action_gates(database, config, check, proof, now)]
+    if proof.get("route") == "INVITATION" and candidate["purpose"] == "INITIAL":
+        gates = [gate for gate in gates if gate != "VERIFIED_CONVERSATION_MISSING"]
+        if not isinstance(draft.get("invitation"), str) or not 0 < len(draft["invitation"]) <= 300:
+            gates.append("INVITATION_TEXT_MISSING_OR_TOO_LONG")
+    return gates
+
+
+def type_fit_turn(root, database, config, adapter, row, draft, candidate, note, execute, now, realtime=False):
+    """E17, first notes: the one rewrite a type-fit note buys, tried on the side. Never raises.
+
+    `row` is the person's latest draft version, judged READY with `note` and already recorded as such.
+    The marker is written first, so a note gets one attempt ever (a crash, a retry or a reused
+    judgment finds the marker and the note goes out as it is). The writer is then called with the
+    note in its repair hand-back shape and the text goes through compose_draft's own checks, the
+    draft validation and the normal judge, all without a draft version being saved. Only a rewrite
+    the judge calls READY with no gate is saved, as the next version, in one transaction that
+    requires `row` to still be the latest: from then on the rewrite is the person's only current
+    note, and its check is completed with the judgment it just passed.
+
+    Returns None when the original stands (nothing was saved), else {"version", "item", "result"}:
+    the rewrite's summary item and its inspection result. `result` is None when the rewrite was
+    saved but its check could not be completed here; the next cycle checks it like any latest note.
+    """
+    try:
+        scaffold = outreach_promotion._scaffold(database, row, draft)
+        key = "outreach-compose:" + scaffold["draft_id"]
+        if type_fit_attempted(database, key):
+            return None
+        audit(database, key, "COMPOSITION", TYPE_FIT_ATTEMPT, now.isoformat(),
+              {"identity": row["identity"], "version": row["version"], "content_hash": row["content_hash"]})
+    except Exception:
+        return None
+    saved = None
+
+    def unused(reason):
+        # Why the original stood, for the record only: not a failure, a hold or a try of anything.
+        try:
+            audit(database, TYPE_FIT_AUDIT + candidate["action_id"], "INSPECTION", "TYPE_FIT_UNUSED", now.isoformat(),
+                  {"reason": reason, "saved": saved is not None})
+        except Exception:
+            pass
+        return saved
+
+    try:
+        written = _compose_text(root, database, config, row, execute, now, type_fit_feedback(
+            note, previous_invitation=draft.get("invitation"), previous_first_message=draft.get("first_message")))
+        if written["state"] != "COMPOSED":
+            return unused("WRITER_" + ",".join(written.get("gates", [])))
+        payload = dict(written["payload"], composition=dict(written["payload"]["composition"], type_fit_rewrite=True))
+        if (payload["invitation"], payload["first_message"]) == (draft.get("invitation"), draft.get("first_message")):
+            return unused("WRITER_CHANGED_NOTHING")
+        side = outreach_promotion.next_version(database, row["identity"], payload, now)
+        side_draft, identity, verification = outreach_promotion._validate(database, side, now, require_composition=True)
+        outreach_promotion._local_gates(database, config, side_draft, identity, now)
+        source = outreach_promotion._source(side)
+        rewrite = dict(candidate, message=side_draft["first_message"] or side_draft["invitation"],
+                       invitation=side_draft["invitation"], verification=verification, source=source)
+        proof = adapter.inspect(rewrite, config, type_fit_rewrite=True)
+        decision = adapter._judged[1]
+        written_at = now      # the draft version's time, as computed above
+        if realtime:          # as prepare_drafts does after its own inspection: the read is not from the future
+            now = dt.datetime.now(dt.timezone.utc)
+        if (proof.get("agent_decision") != "READY" or proof.get("history_outcome") == "SUPPRESSED"
+                or _inspection_gates(database, config, rewrite, side_draft, proof, now)):
+            return unused("JUDGE_" + str(proof.get("agent_decision")))
+        with research.transaction(database):
+            latest = database.execute("SELECT * FROM rw_drafts WHERE identity=? ORDER BY version DESC LIMIT 1",
+                                      (row["identity"],)).fetchone()
+            _require(latest is not None and tuple(latest) == tuple(row), "DRAFT_CHANGED_DURING_TYPE_FIT_REWRITE")
+            created = outreach_promotion.insert_version(database, row["identity"], payload, written_at)
+            _require(research.encoded(created) == side["payload"], "TYPE_FIT_REWRITE_CHANGED")
+        # The swap is done: `row` is no longer the latest version and nothing downstream accepts it.
+        saved = {"version": side["version"], "item": {"draft_id": source["draft_id"], "type_fit_rewrite": True}, "result": None}
+        stored = database.execute("SELECT * FROM rw_drafts WHERE identity=? AND version=?",
+                                  (side["identity"], side["version"])).fetchone()
+        with database:
+            task_id = enqueue_inspection(database, stored, side_draft, source, now)
+        saved["item"].update(_task_summary(database, task_id))
+        claim = workflow_tasks.claim(database, task_id, now.isoformat(), lease_seconds=600)
+        if claim["status"] != "CLAIMED":
+            return saved
+        result = {"purpose": candidate["purpose"], "proof": proof, "conversation_id": proof.get("conversation_id"),
+                  "draft_source": source, "outcome": proof.get("history_outcome", "INVESTIGATED"),
+                  "route": proof.get("route"), "profile": identity, "draft": side_draft, "verification": verification}
+        with database:
+            workflow_tasks.finish(database, task_id, claim["token"], now.isoformat(), result,
+                                  [{"source": proof.get("evidence", "workflow_tasks:" + task_id), "observed_at": now.isoformat()}])
+        saved["item"].update(_task_summary(database, task_id), outcome="READY")
+        saved["result"] = result
+        # The verdict the rewrite passed, under the message's own id, where the pages read it.
+        audit(database, candidate["action_id"], "INSPECTION", "DECISION", proof["checked_at"],
+              {"observation_id": str(proof.get("evidence", "")).partition(":")[2], "decision": decision,
+               "route": "TYPE_FIT_REWRITE"})
+        return saved
+    except Exception as error:
+        return unused(type(error).__name__)
 
 
 def reinspection_grant(database, draft_id):
@@ -1611,12 +1816,7 @@ def prepare_drafts(root, database, config, client, execute=None, now=None, *, hi
                 latest = database.execute("SELECT * FROM rw_drafts WHERE identity=? ORDER BY version DESC LIMIT 1", (row["identity"],)).fetchone()
                 if not latest or tuple(latest) != tuple(row):
                     raise ValueError("DRAFT_CHANGED_DURING_HISTORY_INVESTIGATION")
-                check = dict(candidate, conversation_id=proof.get("conversation_id"))
-                gates = [*proof.get("capability_gates", []), *outreach.action_gates(database, config, check, proof, now)]
-                if proof.get("route") == "INVITATION" and purpose == "INITIAL":
-                    gates = [gate for gate in gates if gate != "VERIFIED_CONVERSATION_MISSING"]
-                    if not isinstance(draft.get("invitation"), str) or not 0 < len(draft["invitation"]) <= 300:
-                        gates.append("INVITATION_TEXT_MISSING_OR_TOO_LONG")
+                gates = _inspection_gates(database, config, candidate, draft, proof, now)
                 blocker = ";".join(gates) if gates else None
             except SharedBudgetExhausted as error:
                 capacity_error = error
@@ -1682,7 +1882,19 @@ def prepare_drafts(root, database, config, client, execute=None, now=None, *, hi
                     item["repair"] = {"state": "RECOMPOSED", "version": repair["version"],
                                       "rejection": (proof or {}).get("agent_decision")}
             if not blocker and not suppressed:
-                if result["route"] == "INVITATION":
+                # E17: a READY note the judge says asks the wrong kind of question for this person gets
+                # one rewrite, tried on the side. Only a rewrite that passed replaces the note; anything
+                # else leaves this READY note exactly as it is.
+                note = adapter.type_fit_note(candidate) if "composition" in draft else None
+                turn = (type_fit_turn(root, database, config, adapter, row, draft, candidate, note, execute, now, realtime)
+                        if note else None)
+                if turn is not None:
+                    item["type_fit"] = {"state": "REWRITTEN", "version": turn["version"]}
+                    output["items"].append(turn["item"])
+                    result = turn["result"]
+                if result is None:
+                    pass      # the rewrite is the latest note and its own check picks it up next cycle
+                elif result["route"] == "INVITATION":
                     output["campaign_candidates"].append(result)
                 else:
                     output["contexts"][identity] = result

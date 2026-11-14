@@ -571,7 +571,7 @@ class ReplyDecisionRoutingTests(ReplyDecisionHarness, unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         def execute(config, prompt, schema, timeout):
             request = json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2])
-            return routing.encoded(self.output(request, "QUESTION"))
+            return routing.encoded(dict(self.output(request, "QUESTION"), asks_to_stop_contact=False))
         with patch.object(reply_worker, "execute_text", side_effect=execute) as executor:
             self.assertFalse(reply_worker.cycle(root, self.database, self.config, NOW)["items"])
             self.assertFalse(executor.called)
@@ -614,7 +614,7 @@ class ReplyDecisionRoutingTests(ReplyDecisionHarness, unittest.TestCase):
         self.assertEqual(upgrade_id, self.source_result(source_key)["review_task_id"])
         self.database.commit()
         def execute(config, prompt, schema, timeout):
-            return routing.encoded(self.output(json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2])))
+            return routing.encoded(dict(self.output(json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2])), asks_to_stop_contact=False))
         with patch.object(reply_worker, "execute_text", side_effect=execute):
             reply_worker.cycle(Path(__file__).resolve().parents[1], self.database, self.config, NOW)
         self.assertEqual(prior, routing.one(self.database, "SELECT * FROM reply_worker_results WHERE task_id=?", (prior_id,)))
@@ -663,7 +663,7 @@ class ReplyDecisionRoutingTests(ReplyDecisionHarness, unittest.TestCase):
         self.database.commit()
         self.assertIsNotNone(revised)
         def execute(config, prompt, schema, timeout):
-            return routing.encoded(self.output(json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2]), "QUESTION"))
+            return routing.encoded(dict(self.output(json.loads(prompt.partition("\n\nUNTRUSTED_SOURCE_JSON:\n")[2]), "QUESTION"), asks_to_stop_contact=False))
         with patch.object(reply_worker, "execute_text", side_effect=execute):
             reply_worker.cycle(Path(__file__).resolve().parents[1], self.database, self.config, NOW)
             self.database.commit()

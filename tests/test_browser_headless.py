@@ -3,7 +3,6 @@ return me to my last screen", option A). Offline: the Chrome bundle is a fake fo
 launches and CDP are fakes; no Chrome, no Node."""
 
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
-import datetime as dt
 import io
 import json
 from pathlib import Path
@@ -14,7 +13,6 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import application_browser  # noqa: E402
 import browser_guard  # noqa: E402
 import browser_runtime  # noqa: E402
 import setup_steps  # noqa: E402
@@ -121,8 +119,8 @@ class Composition(unittest.TestCase):
         for absent in ("--use-mock-keychain", "--enable-automation", "--headless", "--hide-scrollbars"):
             self.assertNotIn(absent, command)
         self.assertEqual(command[-1], "about:blank")
-        self.assertIn("--remote-debugging-port=53111",
-                      browser_runtime.background_command(Path("/x.app"), Path("/p"), 53111))
+        # E16.T1: no session is reopened on a chosen port; a headed launch always takes a free one.
+        self.assertIn("--remote-debugging-port=0", browser_runtime.background_command(Path("/x.app"), Path("/p")))
 
     def test_launch_headless_starts_chrome_directly_and_reads_its_port(self):
         profile = self.directory / "profile"
@@ -154,63 +152,37 @@ def answer(value):
 
 
 class Browser:
-    """Fake @playwright/mcp behind browser_run_code_unsafe: the headless page's state, the restore, and
-    window placements."""
+    """Fake @playwright/mcp behind browser_run_code_unsafe: client hints and window placements."""
 
     def __init__(self):
         self.codes = []
 
     def __call__(self, method, params):
-        if method == "initialize":           # the restarted browser server (H1)
-            self.codes.append("initialize")
-            return {"result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}}
         code = params["arguments"]["code"]
         self.codes.append(code)
         if "setUserAgentOverride" in code:
             return answer([{"url": "about:blank"}])
-        if code == browser_guard.STATE_CODE:
-            return answer([{"url": "https://boards.example.com/apply/7", "cookies": [
-                {"name": "sid", "value": "s", "domain": "boards.example.com", "path": "/", "expires": -1}]}])
-        if "addCookies" in code:
-            return answer([{"cookies": 1, "url": "https://boards.example.com/apply/7"}])
         if "windowState: 'minimized'" in code:
             return answer([{"windowId": 1, "state": "minimized", "was": "normal"}])
         return answer([{"windowId": 1, "left": 80, "top": 60}])
 
     def kinds(self):
-        return [code if code == "initialize" else "hints" if "setUserAgentOverride" in code
-                else "state" if code == browser_guard.STATE_CODE else "restore" if "addCookies" in code
+        return ["hints" if "setUserAgentOverride" in code
                 else "hide" if "windowState: 'minimized'" in code else "front" if "bringToFront" in code else "other"
                 for code in self.codes]
 
 
-class Wait:
-    """A HumanCheckWait stand-in: begins (on_begun, as the real one does once the owner is notified) and
-    returns the re-read instruction."""
-
-    def __init__(self, begun=True):
-        self.on_begun, self.begun = None, begun
-
-    def call(self):
-        if self.begun and self.on_begun is not None:
-            self.on_begun()
-        return "Waited for the owner. Re-read the page once."
-
-
 class HeadlessGuard(unittest.TestCase):
-    def proxy(self, browser, wait=None, relaunch=None, launched="http://127.0.0.1:53111"):
+    def proxy(self, browser, launched="http://127.0.0.1:53111"):
         directory = scratch(self)
         self.events = []
         with mock.patch.object(browser_guard.subprocess, "Popen") as popen:
             proxy = browser_guard.Proxy(
                 "submit", ["node", "cli.js"], audit=directory / "guard.jsonl", stdin=io.StringIO(""),
-                stdout=io.StringIO(), human_check_wait=wait, focus_keeper=False,
+                stdout=io.StringIO(), focus_keeper=False,
                 background_chrome=str(directory / "profile"), headless_user_agent=UA_141,
-                launch_headless=lambda path, ua: self.events.append(("headless", path, ua)) or launched,
-                relaunch_headed=relaunch or (lambda path, port: self.events.append(("headed", path, port))),
-                stop_chrome=lambda config: self.events.append(("stop", config["browser_driver"]["profile"])))
+                launch_headless=lambda path, ua: self.events.append(("headless", path, ua)) or launched)
         self.child_argv = popen.call_args[0][0]
-        proxy.spawn_child = mock.Mock                           # a respawned browser server is a fake too
         proxy.child_call = browser
         proxy.to_child = lambda message: None
         self.out = proxy.stdout
@@ -219,14 +191,6 @@ class HeadlessGuard(unittest.TestCase):
 
     def audit(self, proxy):
         return [json.loads(line) for line in proxy.audit_path.read_text().splitlines()]
-
-    def run_wait(self, proxy):
-        threads = []
-        with mock.patch.object(browser_guard.threading, "Thread",
-                               side_effect=lambda target, daemon, **kw: threads.append(target) or mock.Mock()):
-            proxy.call_human_check({"jsonrpc": "2.0", "id": 9})
-            threads[0]()
-        return json.loads(self.out.getvalue().splitlines()[-1])["result"]["content"][0]["text"]
 
     def test_a_headless_session_is_attached_and_never_placed_or_focus_kept(self):
         browser = Browser()
@@ -242,82 +206,6 @@ class HeadlessGuard(unittest.TestCase):
         proxy.focus_keeper = None
         self.assertIsNone(proxy.start_focus_keeper())          # no focus keeper for a windowless Chrome
         self.assertTrue(self.audit(proxy)[0]["headless"])
-
-    def test_the_captcha_wait_reopens_the_profile_headed_on_the_same_port_and_page(self):
-        browser = Browser()
-        proxy = self.proxy(browser, wait=Wait())
-        profile = proxy.background_chrome
-        text = self.run_wait(proxy)
-        self.assertEqual(self.events[1:], [("stop", profile), ("headed", profile, 53111)])
-        self.assertEqual(browser.kinds(), ["state", "initialize", "restore", "front", "hide"])   # H1: a new server
-        restore = browser.codes[2]
-        self.assertIn('"name": "sid"', restore)                 # session cookies carried over
-        self.assertIn('"https://boards.example.com/apply/7"', restore)
-        self.assertLess(restore.index("addCookies"), restore.index("page.goto"))
-        self.assertTrue(text.endswith(browser_guard.REOPENED_TEXT))
-        self.assertFalse(proxy.headless)
-        self.assertTrue(proxy.offscreen)                        # the rest of the session: headed, minimized
-        decisions = [entry["decision"] for entry in self.audit(proxy)]
-        self.assertIn("HEADED_FOR_HUMAN_CHECK", decisions)
-        self.assertLess(decisions.index("BROWSER_SERVER_RESTARTED"), decisions.index("HEADED_FOR_HUMAN_CHECK"))
-        self.assertLess(decisions.index("HEADED_FOR_HUMAN_CHECK"), decisions.index("WINDOW_ONSCREEN"))
-        self.assertNotIn('"value"', proxy.audit_path.read_text())   # no cookie is written to the audit
-
-    def test_the_users_app_is_recorded_before_the_reopen_and_restored_when_the_wait_ends(self):
-        # Round 2, finding 1: a headless session has no keeper until the reopen; the app in front is
-        # recorded before Chrome is reopened and brought forward, and gets the front back at the end.
-        CHROME, CODE = 900, 300
-        order = []
-
-        class Desktop:
-            now = CODE
-
-            def front(self_inner):
-                order.append(("front", self_inner.now))
-                return self_inner.now
-
-            def activate(self_inner, pid):
-                order.append(("activate", pid))
-                self_inner.now = pid
-                return True
-        desktop = Desktop()
-
-        class FrontBrowser(Browser):
-            def __call__(self_inner, method, params):
-                answer_ = Browser.__call__(self_inner, method, params)
-                if method != "initialize" and "bringToFront" in params["arguments"]["code"]:
-                    desktop.now = CHROME      # the tick window comes forward
-                return answer_
-        browser = FrontBrowser()
-        proxy = self.proxy(browser, wait=Wait(),
-                           relaunch=lambda path, port: order.append(("relaunch", port)))
-        proxy.focus_keeper = browser_guard.FocusKeeper(lambda: CHROME, desktop.front, desktop.activate,
-                                                       suspended=lambda: proxy.showing,
-                                                       chrome_shown=lambda pid: False, alive=lambda pid: True)
-        proxy.start_focus_keeper = lambda headed=False: order.append(("keeper",))
-        self.run_wait(proxy)
-        self.assertEqual(order[0], ("front", CODE))                 # recorded first
-        self.assertLess(order.index(("front", CODE)), order.index(("relaunch", 53111)))
-        self.assertLess(order.index(("keeper",)), order.index(("relaunch", 53111)))   # polling before Chrome starts
-        self.assertEqual(order[-1], ("activate", CODE))             # and restored when the wait ends
-        self.assertEqual(desktop.now, CODE)
-
-    def test_a_wait_that_never_begins_reopens_nothing(self):
-        browser = Browser()
-        proxy = self.proxy(browser, wait=Wait(begun=False))
-        text = self.run_wait(proxy)
-        self.assertEqual(browser.codes, [])
-        self.assertEqual(len(self.events), 1)
-        self.assertTrue(proxy.headless)
-        self.assertNotIn(browser_guard.REOPENED_TEXT, text)
-
-    def test_a_failed_reopen_is_recorded_and_the_wait_goes_on(self):
-        def broken(path, port):
-            raise OSError("Chrome wrote no DevTools port within 60 s")
-        proxy = self.proxy(Browser(), wait=Wait(), relaunch=broken)
-        text = self.run_wait(proxy)
-        self.assertEqual(text, "Waited for the owner. Re-read the page once.")
-        self.assertIn("HEADED_REOPEN_FAILED", [entry["decision"] for entry in self.audit(proxy)])
 
     def test_a_failed_headless_launch_runs_the_session_headed_and_minimized(self):
         # H2: `open -g` headed first, then Playwright's own launch; both by the --offscreen rules.
@@ -386,7 +274,7 @@ class ClientHints(unittest.TestCase):
                                         stdout=io.StringIO(), focus_keeper=False, background_chrome=str(directory),
                                         headless_user_agent=UA_141, launch_headless=lambda p, ua: "http://127.0.0.1:1",
                                         client_hints={"brands": []})
-        proxy.child_call, proxy.to_child, proxy.spawn_child = browser, (lambda message: None), mock.Mock
+        proxy.child_call, proxy.to_child = browser, (lambda message: None)
         proxy.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
         self.assertEqual(browser.kinds(), ["hints"])
         proxy.headless = False                                  # a headed session reports Chrome's own hints
@@ -476,53 +364,6 @@ class ScreenMetrics(unittest.TestCase):
         proxy.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
         self.assertEqual(browser.kinds(), ["hints"])
         self.assertIn('"screenWidth": 1728', browser.codes[0])
-
-
-class RestartedBrowserServer(unittest.TestCase):
-    """H1 against the fake @playwright/mcp over real pipes: the guard replays the client's initialize to a
-    fresh server and goes on relaying through it."""
-
-    def test_respawn_replays_initialize_and_the_new_server_answers(self):
-        import browser_fixtures
-        directory = scratch(self)
-        snapshot, calls = directory / "snapshot.yaml", directory / "calls.jsonl"
-        snapshot.write_text("- generic [ref=e1]\n")
-        out = io.StringIO()
-        proxy = browser_guard.Proxy("inspect", browser_fixtures.fake_runtime(snapshot, calls),
-                                    audit=directory / "guard.jsonl", stdin=io.StringIO(""), stdout=out,
-                                    focus_keeper=False)
-        import threading
-        threading.Thread(target=proxy.pump_child, daemon=True).start()
-        try:
-            proxy.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-                "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "codex", "version": "1"}}})
-            first = proxy.child
-            proxy.respawn_child()
-            self.assertIsNot(proxy.child, first)
-            first.wait(10)                                      # the old server is closed
-            answer = proxy.child_call("tools/call", {"name": "browser_snapshot", "arguments": {}})
-            self.assertIn("ref=e1", json.dumps(answer))
-            self.assertEqual(proxy.initialize_params["clientInfo"]["name"], "codex")
-            self.assertTrue(proxy.requests.empty())             # the old server's end did not end the session
-            relayed = [json.loads(line) for line in out.getvalue().splitlines()]
-            self.assertEqual([m.get("id") for m in relayed], [1])   # only the client's own initialize answer
-        finally:
-            proxy.stop_child()
-
-
-class HumanCheckWaitBegins(unittest.TestCase):
-    def test_on_begun_runs_once_and_only_when_the_wait_began(self):
-        for extended, expected in ((True, 1), (False, 0)):
-            path = scratch(self) / "human-check.json"
-            path.write_text("{}")
-            wait = application_browser.HumanCheckWait(path, sleep=lambda s: None,
-                                                      clock=lambda: dt.datetime(2026, 10, 24, tzinfo=dt.timezone.utc))
-            calls = []
-            wait.on_begun = lambda: calls.append(1)
-            with mock.patch.object(application_browser.HumanCheckWait, "begin", lambda self, now: extended):
-                wait.call()
-                wait.call()
-            self.assertEqual(len(calls), expected)
 
 
 if __name__ == "__main__":

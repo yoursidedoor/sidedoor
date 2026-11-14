@@ -265,6 +265,18 @@ def prune_traces(root, now=None, ttl_seconds=TRACE_TTL_SECONDS):
 
 def startup(root):
     try:
+        # E15.T4: saved site sessions unused for 90 days go with the same sweep. Never raises.
+        import site_sessions
+        site_sessions.prune()
+    except Exception:
+        pass
+    try:
+        # E15.T7: a saved password whose site has had no open job for 90 days goes too. Never raises.
+        import saved_sign_ins
+        saved_sign_ins.prune(saved_sign_ins.open_sites(root))
+    except Exception:
+        pass
+    try:
         traces = prune_traces(root)
         if traces["removed"]:
             # Machine contract (E2.T6): a JSON status line (parsed by tests and reports); stays print.

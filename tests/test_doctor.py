@@ -97,7 +97,8 @@ class HealthyHomeTest(DoctorBase):
         names = [line["name"] for line in lines]
         self.assertEqual(names, ["Python and Sidedoor", "Home folder", "Setup file", "Profile", "Résumé", "Credentials", "OpenRouter",
                                  "Codex", "Google Chrome", "Browser runtime", "Secure connection", "License", "LinkedIn",
-                                 "Database", "Recent failures", "Model cost", "Scheduler", "Tray icon", "PDF writer", "App location",
+                                 "Database", "Recent failures", "Model cost", "Sign-ins and checks",
+                                 "Scheduler", "Tray icon", "PDF writer", "App location",
                                  "Disk space", "Computer"])
         self.assertEqual({line["name"]: line["status"] for line in lines if line["status"] != "OK"}, {})
         found = self.by_name(lines)

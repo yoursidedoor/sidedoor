@@ -514,9 +514,19 @@ class DesktopAdapter:
             except (KeyError, TypeError) as error:
                 unreadable_result(self.database, request, error, now)
                 return None
-        if operation == "submit" or now < request["expires_at"]:
+        if operation == "submit" or now < request["expires_at"] or self.reusable(request, now):
             return json.loads(request["result"])
         return None
+
+    def reusable(self, request, now):
+        """Whether a finished read is handed back instead of read again: inside READ_REUSE_SECONDS, or,
+        at any age, a wall result the job must wait on (`access_outcomes.usable_wall`, the same answer
+        `access_outcomes.unread_wall` uses). A fresh request is queued in `call` only after this said
+        no, inside the same write transaction, so the clock passing the reuse mark between the access
+        check and this call can never start a second session on one wall."""
+        import access_outcomes
+        return (now < later(request["created_at"], READ_REUSE_SECONDS)
+                or access_outcomes.usable_wall(self.database, request, now) is not None)
 
     def cached_available(self, operation, payload):
         return self.cached(operation, payload) is not None
@@ -585,7 +595,7 @@ class DesktopAdapter:
                     self.database.commit()
                     return result
             if request and request["state"] == "DONE" and operation not in {"verify", "reconcile"}:
-                if operation == "submit" or now < later(request["created_at"], READ_REUSE_SECONDS):
+                if operation == "submit" or self.reusable(request, now):
                     result = json.loads(request["result"])
                     if result.get("error"):
                         self.database.execute("UPDATE desktop_requests SET state='CONSUMED' WHERE request_id=?", (request["request_id"],))

@@ -344,24 +344,22 @@ class GuardMinimizes(unittest.TestCase):
             now[0] += browser_guard.HIDE_RETRY_SECONDS
             proxy.hide_now()
             self.assertEqual(len(threads), 2)
-            proxy.showing = True
-            now[0] += 1.0
-            proxy.hide_now()
-            self.assertEqual(len(threads), 2)
         self.assertIn("ms", self.audit(proxy)[0])
 
-    def test_the_captcha_wait_shows_the_window_and_the_keeper_is_suspended(self):
+    def test_a_held_call_never_shows_the_window_and_the_keeper_keeps_correcting(self):
+        """E16.T1: nothing un-minimizes the window. The guard's dormant hold (no application session has
+        one) places nothing on screen and does not pause the focus keeper."""
         windows = Windows()
         seen = []
 
-        class Wait:
+        class Hold:
             def call(self_inner):
                 seen.append((list(windows.kinds()), keeper.suspended()))
-                return "RECHECK_NOW"
-        proxy = self.proxy(windows, human_check_wait=Wait())
+                return "RELEASED"
+        proxy = self.proxy(windows, human_check_wait=Hold())
         desktop = Desktop(MAIL)
         keeper = browser_guard.FocusKeeper(lambda: CHROME, desktop.front, desktop.activate,
-                                           suspended=lambda: proxy.showing, alive=lambda pid: True)
+                                           suspended=proxy.front_released, alive=lambda pid: True)
         proxy.focus_keeper = keeper
         threads = []
         with mock.patch.object(browser_guard.threading, "Thread",
@@ -370,11 +368,10 @@ class GuardMinimizes(unittest.TestCase):
         keeper.poll()
         desktop.now = CHROME
         keeper.poll()
-        self.assertEqual(desktop.activated, [])            # suspended: no correction
+        self.assertEqual(desktop.activated, [MAIL])        # not suspended: the front goes back to the user's app
         threads[0]()
-        self.assertEqual(seen, [(["front"], True)])        # un-minimized on-screen and in front for the tick
-        self.assertEqual(windows.kinds(), ["front", "min"])   # minimized again after the wait
-        self.assertEqual(desktop.activated, [MAIL])        # and the front given back at once
+        self.assertEqual(seen, [([], False)])              # nothing put on screen or in front for the hold
+        self.assertNotIn("front", windows.kinds())
 
     def test_the_session_chrome_is_found_by_its_profile_never_the_everyday_one(self):
         profile = scratch(self) / "profile"

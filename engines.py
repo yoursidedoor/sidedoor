@@ -585,7 +585,10 @@ class ClaudeTraceReader:
             elif block.get("type") == "tool_use":
                 name, tool_use_id = block.get("name"), block.get("id")
                 arguments = block.get("input") if isinstance(block.get("input"), dict) else {}
-                if not self._allowed(name):
+                # The removed browser_run_code_unsafe is not the kill switch's (owner, 2026-11-12): Claude
+                # denies the call itself and the session goes on; application_browser.tool_event judges
+                # its outcome (anything but a denial or the guard's refusal still fails the session).
+                if not self._allowed(name) and name != self.engine.REMOVED_BROWSER_TOOL:
                     found.append(self._error(ClaudeEngine.FORBIDDEN_TOOL, "tool not allowed: %s" % name))
                 if name == self.engine.ANSWER_TOOL:
                     self.answer_ids.add(tool_use_id)
@@ -636,7 +639,10 @@ class ClaudeTraceReader:
                 found.append(self._error(ClaudeEngine.TOOL_OUTPUT_TOO_LARGE, text))
             elif started.server and failed and self.engine.TIMED_OUT in text:   # MCP_TOOL_TIMEOUT (MCP calls only)
                 found.append(self._error(ClaudeEngine.TOOL_TIMEOUT, text))
-            call = dataclasses.replace(started, result=result, status="failed" if failed else "completed", error=error)
+            status = "failed" if failed else "completed"
+            if failed and name == self.engine.REMOVED_BROWSER_TOOL and tool_use_id in self.denied:
+                status = "denied"   # Claude's own permission_denied event named this call: it never ran
+            call = dataclasses.replace(started, result=result, status=status, error=error)
             if isinstance(tool_use_id, str):
                 self.calls[tool_use_id] = call
             found.append(TraceEvent("completed", self.engine.call_kind(name), call, status=call.status))
@@ -692,6 +698,7 @@ class ClaudeEngine(Engine):
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
     TOOL_OUTPUT_TOO_LARGE = "TOOL_OUTPUT_TOO_LARGE"
     FORBIDDEN_TOOL = "FORBIDDEN_TOOL"
+    REMOVED_BROWSER_TOOL = "mcp__browser__browser_run_code_unsafe"   # browser_guard.REMOVED_TOOL, as Claude names it
     RATE_LIMITED = "RATE_LIMITED"
     SIGNED_OUT = "SIGNED_OUT"
     API_ERROR = "API_ERROR"
@@ -816,7 +823,7 @@ class ClaudeEngine(Engine):
                                "support_email"})
     SUBMIT = "submit"
 
-    def browser_tools(self, operation, human_check=None, claim=None):
+    def browser_tools(self, operation, human_check=None, claim=None, held=()):
         """The guard tools a browser session of `operation` may call, as Codex approves them
         (browser_runtime.codex_options): every browser tool, less the code tools for the code-free
         operations, plus `arm` when the session holds the private claim (submit only, U1 3f), plus the
@@ -829,6 +836,7 @@ class ClaudeEngine(Engine):
             tools.append(browser_guard.ARM_TOOL)
         if human_check:
             tools.append(browser_guard.HUMAN_CHECK_TOOL)
+        tools.extend(held)   # E15.T7 to T9: the access step's tools the run's guard holds (browser_guard.held_step_tools)
         return tools + [browser_guard.CONTINUE_TOOL]   # Claude only: the pieces of a long answer (E4 b)
 
     def browser_command(self, config, directory, application=False, main_model=False):
@@ -857,14 +865,15 @@ class ClaudeEngine(Engine):
         argv[argv.index("--"):argv.index("--")] = ["--piece-chars", str(self.PIECE_CHARS)]
         # The guard's environment as Codex gives it (codex_options): the user's session variables, so
         # Chrome finds its keychain, and Sidedoor's home, which the guard reads its policy from.
-        environment = dict(browser_runtime.session_environment(),
+        environment = dict(browser_runtime.guard_environment(),
                            **{user_profile.HOME_VARIABLE: str(user_profile.home())})
         if not config.get("claude"):
             config = self.prepare(config)
         mcp_config = self.mcp_config(directory, {browser_runtime.SERVER: argv}, name="browser.mcp.json",
                                      environment={browser_runtime.SERVER: environment})
+        import browser_guard
         allowed = tuple("mcp__%s__%s" % (browser_runtime.SERVER, tool)
-                        for tool in self.browser_tools(operation, human_check, claim))
+                        for tool in self.browser_tools(operation, human_check, claim, browser_guard.held_step_tools(argv)))
         return self._built(config, directory / "output.json", (), allowed=allowed, mcp_config=mcp_config,
                            schema=directory / "schema.json", read=not main_model,
                            tool_timeout=(browser_runtime.HUMAN_CHECK_TOOL_TIMEOUT_SECONDS if human_check
@@ -1567,7 +1576,8 @@ class AntigravityEngine(Engine):
         import browser_guard
         import research_tools
         return {self.SERVER_NAMES["browser"]: list(browser_guard.TOOLS) + [browser_guard.ARM_TOOL,
-                                                                            browser_guard.HUMAN_CHECK_TOOL],
+                                                                            browser_guard.HUMAN_CHECK_TOOL]
+                + list(browser_guard.STEP_TOOLS),
                 self.SERVER_NAMES["research_tools"]: [tool["name"] for phase in ("discovery", "qualification")
                                                       for tool in research_tools.tools(phase)]}
 
@@ -1906,10 +1916,11 @@ class AntigravityEngine(Engine):
                                       "operation, and a submit (only) holds the arm claim")
         human_check = config.get("_application_human_check")
         argv = browser_runtime.guard_command(config, directory, operation, claim, human_check)
-        environment = dict(browser_runtime.session_environment(),
+        environment = dict(browser_runtime.guard_environment(),
                            **{user_profile.HOME_VARIABLE: str(user_profile.home())})
         import browser_guard
-        tools = [tool for tool in CLAUDE.browser_tools(operation, human_check, claim) if tool != browser_guard.CONTINUE_TOOL]
+        tools = [tool for tool in CLAUDE.browser_tools(operation, human_check, claim, browser_guard.held_step_tools(argv))
+                 if tool != browser_guard.CONTINUE_TOOL]
         return self._built(config, directory / "output.json", directory / self.WORKSPACE,
                            servers={browser_runtime.SERVER: (argv, environment, tools)},
                            schema=directory / "schema.json", read=not main_model,

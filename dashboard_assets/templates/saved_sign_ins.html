@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="metrics-page saved-sign-ins">
+<p><a href="/settings#account-setting">Back to Settings</a></p>
+<h1 class="title">{{ s.title }}</h1>
+<p class="muted">{{ s.intro }}</p>
+{% if s.message %}<p class="note note-success" role="status">{{ s.message }}</p>{% endif %}
+{% if s.warning %}<p class="note note-warning" role="status">{{ s.warning }}</p>{% endif %}
+{% if s.no_unlock %}<p class="muted">{{ s.no_unlock }}</p>{% endif %}
+{% if s.unavailable %}<p class="note note-warning" role="status">{{ s.unavailable }}</p>
+{% elif not s.rows %}<div class="card empty"><p>{{ s.none_yet }}</p></div>
+{% else %}
+<section class="card">
+  <table class="metrics-table saved-sign-ins-table">
+    <thead><tr><th scope="col">Site</th><th scope="col">Email</th><th scope="col">How it was made</th><th scope="col">Last used</th><th scope="col">Password</th><th scope="col"><span class="visually-hidden">Remove</span></th></tr></thead>
+    <tbody>
+      {% for row in s.rows %}
+      <tr>
+        <th scope="row">{{ row.site }}{% if row.password_removed %} <span class="chip chip-muted">{{ s.password_removed }}</span>{% endif %}</th>
+        <td>{{ row.email }}</td>
+        <td>{{ row.made_by }}</td>
+        <td>{{ row.used or "" }}</td>
+        <td>{% if row.password %}<code class="saved-password">{{ row.password }}</code> <a class="button button-quiet" href="{{ s.path }}">Hide password</a>
+          {% elif row.can_show %}<form method="post" action="{{ s.path }}/show" hx-post="{{ s.path }}/show" hx-target="body" hx-disabled-elt="find button">
+          <input type="hidden" name="site" value="{{ row.site }}">
+          <button class="button button-quiet" type="submit">Show password</button></form>{% endif %}</td>
+        <td><form method="post" action="{{ s.path }}/remove" hx-post="{{ s.path }}/remove" hx-target="body" hx-confirm="{{ row.confirm }}" hx-disabled-elt="find button">
+          <input type="hidden" name="site" value="{{ row.site }}">
+          <button class="button button-quiet" type="submit">Remove</button></form></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+<form method="post" action="{{ s.path }}/remove-all" hx-post="{{ s.path }}/remove-all" hx-target="body" hx-confirm="{{ s.remove_all_confirm }}" hx-disabled-elt="find button" class="actions">
+  <button class="button button-quiet" type="submit">Remove all</button>
+</form>
+{% endif %}
+</div>
+{% endblock %}

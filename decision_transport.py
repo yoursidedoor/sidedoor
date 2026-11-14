@@ -537,7 +537,14 @@ def _apply_answer(database, decision, job, response, now):
     if valid_answer:
         database.execute("INSERT INTO application_answers VALUES (?,?,?,?,?) ON CONFLICT(job_key,field) DO UPDATE SET semantic=excluded.semantic,value=excluded.value,source=excluded.source", (decision["job_key"], decision["field"], decision["semantic"], encoded(value), "authenticated-owner-decision:" + decision["id"]))
         database.execute("UPDATE user_decisions SET state='ANSWERED',raw_response=? WHERE id=?", (encoded(response), decision["id"]))
-        database.execute("UPDATE application_jobs SET next_at=NULL WHERE job_key=?", (job["job_key"],))
+        # A site's profile questions are answered together (E15): the job stays held until the last of them
+        # is answered, so one answer of three never costs a read that only holds the job again.
+        import access_step
+        more = decision["field"].startswith(access_step.FIELD_PREFIX) and database.execute(
+            "SELECT 1 FROM user_decisions WHERE job_key=? AND state='PENDING' AND id<>? AND field LIKE ? LIMIT 1",
+            (job["job_key"], decision["id"], access_step.FIELD_PREFIX + "%")).fetchone()
+        if not more:
+            database.execute("UPDATE application_jobs SET next_at=NULL WHERE job_key=?", (job["job_key"],))
         return "APPLIED"
     database.execute("UPDATE user_decisions SET state='INVALID_ANSWER',raw_response=?,last_error='Exact factual answer required, approval is not an answer' WHERE id=?", (encoded(response), decision["id"]))
     reissue_fact(database, decision, now)

@@ -524,7 +524,7 @@ def check_linkedin(home, online=False, relay_url=None, transport=None):
     if status is None:
         return _line(WARN, "LinkedIn", "Not checked yet.", "Connect LinkedIn in Settings > Connections.")
     if status == "checking":
-        return _line(WARN, "LinkedIn", message or "Waiting for LinkedIn.", "Finish signing in on the LinkedIn page.")
+        return _line(WARN, "LinkedIn", message or "Waiting for LinkedIn.", "Open Settings > Connections.")
     return _line(FAIL, "LinkedIn", message or "Needs you.", "Open Settings > Connections.")
 
 
@@ -551,11 +551,11 @@ def _linkedin_read(home, relay_url=None, transport=None):
         statuses = unipile_port._account_statuses(item)
         if not statuses or all(value in unipile_port.VALID_STATUSES for value in statuses):
             return _line(OK, "LinkedIn", "LinkedIn connected: %s (checked just now)." % name)
-        return _line(FAIL, "LinkedIn", "LinkedIn needs you to sign in again.", "Click Reconnect in Settings > Connections.")
+        return _line(FAIL, "LinkedIn", "LinkedIn needs you to sign in again.", "Sign in to LinkedIn in Settings > Connections.")
     if isinstance(parsed, dict) and parsed.get("type") == "errors/no_client_session":
-        return _line(FAIL, "LinkedIn", "LinkedIn needs you to sign in again.", "Click Reconnect in Settings > Connections.")
+        return _line(FAIL, "LinkedIn", "LinkedIn needs you to sign in again.", "Sign in to LinkedIn in Settings > Connections.")
     if (status == 403 and error == "LICENSE_NOT_LINKED") or (status == 200 and items == []):
-        return _line(FAIL, "LinkedIn", "LinkedIn is not connected.", "Click Connect in Settings > Connections.")
+        return _line(FAIL, "LinkedIn", "LinkedIn is not connected.", "Sign in to LinkedIn in Settings > Connections.")
     return _line(WARN, "LinkedIn", "Sidedoor's LinkedIn service answered HTTP %s." % status, "Try again in a few minutes.")
 
 
@@ -633,6 +633,20 @@ def check_model_cost(root, config, now=None):
     finally:
         database.close()
     return _line(OK, "Model cost", model_calls.summary_line(totals) + ".")
+
+
+def check_access(root, config, now=None):
+    """How often a site asked for a sign-in or a check and how that ended (E15.T11): the Metrics page's
+    totals, counts only (no site names: this line is also in Report a problem's summary)."""
+    import sqlite3
+    import metrics_page
+    try:
+        line = metrics_page.support_line(root, config, now)
+    except sqlite3.OperationalError:   # locked or busy: the same words as Recent failures, never a failed check
+        line = None
+    if line is None:
+        return _line(WARN, "Sign-ins and checks", "Not available: the records can't be read.")
+    return _line(OK, "Sign-ins and checks", line)
 
 
 def check_disk(home, usage=shutil.disk_usage):
@@ -845,6 +859,7 @@ def run(home=None, root=None, config=None, online=False, running=_ASK, loop=None
     guarded("Database", lambda: records.extend(_records(root, config, loop, now)) or list(records[:2]))
     pause = records[2] if len(records) == 3 else None
     guarded("Model cost", check_model_cost, root, config, now)
+    guarded("Sign-ins and checks", check_access, root, config, now)
     guarded("Scheduler", check_scheduler, running, pause)
     guarded("Tray icon", check_tray, home)
     guarded("PDF writer", check_pdf_writer)

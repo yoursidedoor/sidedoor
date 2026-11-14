@@ -477,6 +477,10 @@ def _packet(root, database, config, candidate, planned, observation, now):
     recent = [message for message in messages if not invitation or not _matches(invitation, message, candidate["conversation_id"])][-8:]
     historical = candidate["verification"].get("historical_context", candidate["verification"])
     return {"candidate": candidate, "plan": planned, "sources": sources,
+            # Who this person is to the role (E17.T2), named as the first-contact packet names it.
+            # Context for the writer, never a gate: "UNKNOWN" when research recorded no label.
+            "recipient": {"contact_type": reply_worker.recipient_contact_type(
+                database, [candidate["profile"], *_aliases(database, candidate["profile"])])},
             "initial_invitation": invitation, "conversation_context": recent,
             "historical_context": {"scope": "HISTORICAL_TEAM_AND_ROLE_NOT_CURRENT_HIRING",
                 "verification": historical,
@@ -542,14 +546,20 @@ def thread_gates(database, config, action, room, now=None):
     return sorted(set(gates))
 
 
-def judgment_context(database, action):
-    """Parent shared adapter supplies this to its independent send judge."""
-    task = database.execute("SELECT status,result FROM workflow_tasks WHERE task_id=?", (action["followup_task_id"],)).fetchone()
-    _require(task and task["status"] == "COMPLETE", "FOLLOWUP_COMPOSITION_INCOMPLETE")
-    result = json.loads(task["result"])
-    _require(result.get("decision") == "COMPOSE" and result.get("action_id") == action["action_id"], "FOLLOWUP_COMPOSITION_MISMATCH")
+def judgment_context(database, action, output_ref=None):
+    """Parent shared adapter supplies this to its independent send judge.
+
+    `output_ref` (E17, type_fit_turn): the writer output behind a rewrite that is not saved yet, in
+    place of the composition task's result; every other binding is checked the same way."""
+    rewrite = output_ref is not None
+    if not rewrite:
+        task = database.execute("SELECT status,result FROM workflow_tasks WHERE task_id=?", (action["followup_task_id"],)).fetchone()
+        _require(task and task["status"] == "COMPLETE", "FOLLOWUP_COMPOSITION_INCOMPLETE")
+        result = json.loads(task["result"])
+        _require(result.get("decision") == "COMPOSE" and result.get("action_id") == action["action_id"], "FOLLOWUP_COMPOSITION_MISMATCH")
+        output_ref, rewrite = result["output_ref"], result.get("type_fit_rewrite") is True
     output = database.execute("SELECT record FROM outreach_agent_audit WHERE id=? AND action_id=? AND phase=? AND kind='OUTPUT'",
-                              (result["output_ref"], action["action_id"], PHASE)).fetchone()
+                              (output_ref, action["action_id"], PHASE)).fetchone()
     _require(output is not None, "FOLLOWUP_OUTPUT_MISSING")
     output = json.loads(output[0])
     source = database.execute("SELECT record FROM outreach_agent_audit WHERE id=? AND action_id=? AND phase=? AND kind='INPUT'",
@@ -564,7 +574,25 @@ def judgment_context(database, action):
     if action["message"] == raw_message:
         decision["message"] = raw_message
     _require(decision["message"] == action["message"], "FOLLOWUP_PROPOSAL_CHANGED")
-    return {"followup_context": packet, "followup_decision": decision}
+    # This text is the one rewrite a type-fit note bought: the judge raises type fit no more.
+    return {"followup_context": packet, "followup_decision": decision, **({"type_fit_rewrite": True} if rewrite else {})}
+
+
+# The follow-up send judge answers the shared outreach-decision-v1 object plus one field of its own
+# (owner, 2026-11-12: "The judge says which kind of block it is ... the problem is the message, or
+# the problem is the situation"). Its own schema file, so the first-note judge's strict schema, its
+# validator and its judgment-reuse key are untouched (FollowupAdapter._judge reads the file).
+def _validate_judgment(raw, packet):
+    """outreach_agent._validate on the shared fields, then `block_about`: SITUATION or MESSAGE for a
+    BLOCKED decision, None for any other. An answer without the field (one saved or in flight from
+    before it existed, an injected executor) or with anything but SITUATION is a MESSAGE block,
+    which is what every block was before. Only this enum is ever read; never the reason's wording."""
+    output = json.loads(raw, object_pairs_hook=reply_worker._unique_object)
+    about = output.pop("block_about", None) if isinstance(output, dict) else None
+    decision = outreach_agent._validate(json.dumps(output), packet)
+    decision["block_about"] = (None if decision["decision"] != "BLOCKED" else
+                               "SITUATION" if about == "SITUATION" else "MESSAGE")
+    return decision
 
 
 def judgment_observation(action, observation):
@@ -631,6 +659,39 @@ def _defer_capacity(database, task_id, config, now, timeout, budget):
         return {"state": state, "next_at": next_at, "blocker": blocker, "attempts": task["attempts"], "deadline": task["deadline"]}
 
 
+# Plan answers that are waits, not ends: our own message seen in the inbox and not matched to its
+# send yet, a conversation the inbox reader could not decode yet, a first message still expected, and
+# another purpose having its turn (plan's FOLLOWUP_ONLY, e.g. the day before an interview). The
+# follow-up can be due again after them, so its writer task is kept. So is the task of a person the
+# user excluded or suppressed (plan's EXCLUDED_CONTACT, SUPPRESSED_CONTACT): the user can lift that,
+# and the rewrite then resumes as it did before this close existed. While it stands the plan is not
+# DUE, so nothing is written, judged or sent.
+PLAN_HOLDS_THAT_CLEAR = frozenset({"OBSERVED_OUTBOUND_REQUIRES_PURPOSE_RECONCILIATION", "INBOX_CONVERSATION_UNDECODABLE",
+                                   "NOTE_WAITS_FOR_ACCEPTANCE", "FOLLOWUP_ONLY", "EXCLUDED_CONTACT", "SUPPRESSED_CONTACT"})
+
+
+def _close_unneeded(database, aliases, planned, now):
+    """Close this person's follow-up writer tasks that wait for another try once the plan no longer
+    asks for a follow-up (a reply, an opt-out, an exclusion, the limit, the 14-day window; a closure
+    cancels them itself in engagement.close_outreach, and this is the same close). A task left in
+    RETRY_WAIT would never run again and Failures would keep saying Sidedoor will try again."""
+    if planned.get("state") in {"DUE", "WAITING"} or planned.get("blocker") in PLAN_HOLDS_THAT_CLEAR:
+        return
+    placeholders = ",".join("?" for unused in aliases)
+    waiting = database.execute(
+        "SELECT task_id FROM workflow_tasks WHERE worker='message_writer' AND contact_id IN (" + placeholders
+        + ") AND json_extract(inputs,'$[0].followup_version')=? AND status='RETRY_WAIT'", (*aliases, VERSION)).fetchall()
+    if not waiting:
+        return
+    reason = planned.get("blocker") or "FOLLOWUP_NOT_DUE"
+    with engagement.transaction(database):
+        for (task_id,) in waiting:
+            changed = database.execute("""UPDATE workflow_tasks SET status='CANCELLED',blocker=?,next_action=NULL,next_at=NULL,
+                updated_at=? WHERE task_id=? AND status='RETRY_WAIT'""", (reason, now.isoformat(), task_id))
+            if changed.rowcount == 1:
+                workflow_tasks.record(database, task_id, "CANCELLED", now.isoformat(), {"reason": reason, "lifecycle": "FOLLOWUP_NOT_DUE"})
+
+
 def repair_rejected(root, database, config, adapter, action, proof, now=None, execute=None):
     """Rewrite a judge-rejected follow-up inside the same run (owner, 2026-09-23: "i want it in-run").
 
@@ -639,6 +700,15 @@ def repair_rejected(root, database, config, adapter, action, proof, now=None, ex
     follow-up's own message_writer task and re-runs the ordinary promotion path for that single
     recipient. The objection reaches the model through _packet's repair_feedback
     (outreach_agent.pending_objection), so the rewrite answers it instead of repeating it.
+
+    Each rewrite is one try of that task (max_attempts, 3 with the first writing). Every rejection
+    is recorded on the task as a failed try, so once the tries are spent `workflow_tasks.claim`
+    ends it EXHAUSTED and Failures lists it with the rejections as its causes; the rejected text
+    stays queued, unclaimed, and is never judged or sent: a text the judge blocked is not put to it
+    again (outreach.cycle, outreach_agent.judge_blocked_text), so three writings get at most three
+    verdicts. A task with no writing left, or whose writer held on the objection, is not reopened.
+    `now` is the calling cycle's own clock (None: the real one), never the instant the judge
+    answered: the rewrite's fresh thread read is stamped after that instant (FU1).
 
     Returns the action_id whose text was rewritten, or None. Never raises: a failed repair turn
     must not fail the cycle that called it.
@@ -653,18 +723,24 @@ def repair_rejected(root, database, config, adapter, action, proof, now=None, ex
         aliases = _aliases(database, action["profile"])
         placeholders = ",".join("?" for unused in aliases)
         reopened = database.execute(
-            "SELECT task_id,status FROM workflow_tasks WHERE worker='message_writer' AND contact_id IN ("
+            "SELECT task_id,status,result FROM workflow_tasks WHERE worker='message_writer' AND contact_id IN ("
             + placeholders + ") AND json_extract(inputs,'$[0].followup_version')=? AND json_extract(inputs,'$[0].ordinal')=? LIMIT 1",
             (*aliases, VERSION, action.get("ordinal"))).fetchone()
-        if reopened is None:
-            return None
+        if reopened is None or reopened["status"] in {"BLOCKED", "CANCELLED", "EXHAUSTED"}:
+            return None          # no writing left: the rejected text stays queued, unsent
         if reopened["status"] == "COMPLETE":
+            if json.loads(reopened["result"] or "{}").get("decision") != "COMPOSE":
+                return None      # the writer held on the objection: that ends it, never another rewrite
             # Same reopen the expired-history path already performs a few lines below in promote.
             with database:
-                database.execute("""UPDATE workflow_tasks SET status='RETRY_WAIT',blocker='FOLLOWUP_JUDGE_REJECTED',
+                changed = database.execute("""UPDATE workflow_tasks SET status='RETRY_WAIT',blocker='FOLLOWUP_JUDGE_REJECTED',
                     next_action=?,next_at=?,updated_at=? WHERE task_id=? AND status='COMPLETE'""",
                     ("Rewrite the follow-up to answer the judge's objection; do not resend the rejected text",
                      current.isoformat(), current.isoformat(), reopened["task_id"]))
+                if changed.rowcount == 1:
+                    # The failed try, where failures_page._counts reads it (as workflow_tasks.finish records one).
+                    workflow_tasks.record(database, reopened["task_id"], "RETRY_WAIT", current.isoformat(),
+                                          {"blocker": "FOLLOWUP_JUDGE_REJECTED"})
         stored = database.execute("SELECT payload_hash FROM outreach_actions WHERE action_id=?",
                                   (action["action_id"],)).fetchone()
         if stored is None:
@@ -674,6 +750,202 @@ def repair_rejected(root, database, config, adapter, action, proof, now=None, ex
         return action["action_id"]
     except Exception:
         return None
+
+
+def _writer(adapter, execute=None):
+    """The follow-up writer: a direct OpenRouter call (owner, 2026-10-27), unless an executor is injected."""
+    if execute is not None:
+        return execute
+    return (adapter.text_execute("followup", effort=outreach_agent.COMPOSE_EFFORT,
+                                 max_tokens=outreach_agent.COMPOSE_MAX_TOKENS)
+            if hasattr(adapter, "text_execute") else getattr(adapter, "execute", None)
+            ) or reply_worker.text_executor("followup", effort=outreach_agent.COMPOSE_EFFORT,
+                                            max_tokens=outreach_agent.COMPOSE_MAX_TOKENS)
+
+
+def _writer_prompt():
+    return (resources.read_text("followup-prompt.md").split("\nFOLLOWUP_SEND_JUDGE:\n", 1)[0],
+            resources.read_text("followup-schema.json"))
+
+
+def _write(root, database, config, adapter, execute, template, schema, timeout, candidate, planned, sources,
+           verification, acceptance, task_id, action_id, ordinal, attempt, now, *, repair_feedback=None, wrote=None):
+    """The writing half of promote: read the thread, build the packet, call the model, validate the
+    answer and bind the action to its records. Queues nothing and finishes no task. `repair_feedback`
+    replaces the packet's pending objection; `wrote` runs once the answer is valid. Returns
+    (decision, the action or None on HOLD, output_ref, the time of the final checks)."""
+    observation = _collect(adapter, database, dict(candidate, action_id=action_id, purpose="FOLLOWUP", ordinal=ordinal,
+        sender_id=config["sender_id"]), "INSPECTION")
+    current = _now(now)
+    _require(plan(database, candidate, current) == planned, "FOLLOWUP_CHANGED_DURING_READ")
+    if observation.get("route") == UNIPILE:
+        # The person's newest chat, or none yet (start_chat then creates it).
+        candidate = dict(candidate, conversation_id=observation.get("selected_conversation_id"))
+    elif candidate["conversation_id"] is None:
+        conversation_id = observation.get("selected_conversation_id")
+        if not isinstance(conversation_id, str) or not conversation_id:
+            raise reply_worker.Held("FOLLOWUP_OBSERVED_THREAD_REQUIRED", retry=True)
+        candidate = dict(candidate, conversation_id=conversation_id)
+    packet = _packet(root, database, config, candidate, planned, observation, current)
+    if repair_feedback is not None:
+        packet["repair_feedback"] = repair_feedback
+    elif packet["repair_feedback"]:
+        # The pending objection is the person's newest one. It is handed back only for the text it
+        # rejected, while that text is still the queued one: a first writing (this slot is empty,
+        # e.g. the second follow-up after a repaired first) is not a rewrite of an older message.
+        queued = database.execute("SELECT payload FROM outreach_actions WHERE action_id=?", (action_id,)).fetchone()
+        if queued is None or json.loads(queued[0]).get("message") != packet["repair_feedback"][0].get("previous_message"):
+            packet["repair_feedback"] = None
+    if acceptance:
+        packet["acceptance"] = acceptance
+    packet["task_id"] = task_id
+    prompt = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + routing.encoded({"source_sha256": routing.digest(packet), **packet})
+    _require(len(prompt.encode()) <= outreach_agent.prompt_limit(config), "FOLLOWUP_INPUT_TOO_LARGE")
+    reference = outreach_agent.audit(database, action_id, PHASE, "INPUT", current.isoformat(),
+        {"packet": packet, "observation": observation, "prompt_sha256": reply_worker.sha(template),
+         "schema_sha256": reply_worker.sha(schema), "attempt": attempt})
+    raw = execute(config, prompt, schema, timeout)
+    output_ref = outreach_agent.audit(database, action_id, PHASE, "OUTPUT", current.isoformat(), {"input_ref": reference, "raw": raw})
+    try:
+        decision = _validate(raw, packet)
+    except ValueError as error:
+        # An answer that breaks the schema's rule (e.g. COMPOSE with no message) gets the
+        # task's ordinary retry, within its attempt limit, instead of ending BLOCKED.
+        raise reply_worker.Held(str(error) if error.args and isinstance(error.args[0], str)
+                                and error.args[0].startswith("FOLLOWUP_") else "FOLLOWUP_OUTPUT_INVALID",
+                                retry=True) from None
+    if wrote is not None:
+        wrote()
+    current = _now(now)
+    _require(plan(database, candidate, current) == planned and routing.digest(_sources(database, config, candidate["profile"], current)) == routing.digest(sources),
+             "FOLLOWUP_CHANGED_DURING_COMPOSITION")
+    action = None
+    if decision["decision"] == "COMPOSE":
+        action = dict(candidate, action_id=action_id, purpose="FOLLOWUP", ordinal=ordinal, sender_id=config["sender_id"],
+            provider="unipile" if _unipile_route(adapter, database, candidate["profile"]) else "heyreach", channel="linkedin", subject="",
+            # No em or en dash goes out (owner style rule), normalised as replies are.
+            message=reply_execution.without_dashes(decision["message"]),
+            verification=dict(verification, content_verified=True, content_sources=["outreach_agent_audit:" + output_ref]),
+            followup_task_id=task_id, followup_due_at=planned["due_at"],
+            followup_sources_sha256=routing.digest(sources), followup_thread_sha256=packet["thread_sha256"])
+        action["verification"].update(verified_at=current.isoformat(),
+            verification_scope="CURRENT_IDENTITY_AND_COMPOSED_CONTENT_ONLY",
+            identity_source="outreach_agent_audit:" + reference,
+            identity_observed_at=packet["identity_observed_at"],
+            team_evidence_scope=packet["historical_context"]["scope"],
+            historical_context=packet["historical_context"]["verification"])
+        action["followup_action_ref"] = outreach_agent.audit(database, action_id, PHASE, "ACTION", current.isoformat(), action)
+    return decision, action, output_ref, current
+
+
+def type_fit_turn(root, database, config, adapter, row, action, proof, now=None, execute=None):
+    """E17, follow-ups: the one rewrite a type-fit note buys, tried on the side. Never raises.
+
+    Called by outreach.cycle for a queued follow-up its send judge just called READY with every gate
+    clear, before the claim. When that decision carries the judge's advisory note and this follow-up
+    has not had its attempt, the marker is written first (one attempt ever), then the writer is
+    called with the note in its repair hand-back shape and the rewrite is validated, bound to its
+    own records and judged, all without touching the queued action or the composition task. Only a
+    rewrite judged READY with every gate clear replaces the original, in ONE transaction: the queued
+    payload (a compare-and-swap on the hash the judge saw, refused once anything was claimed) and the
+    composition task's result move together, so at every instant one text is queued and it is the
+    text its proof and task result describe.
+
+    Returns (row, action, proof) of the rewrite once it is the queued message, else None: the
+    original goes on to its claim exactly as it would have.
+    """
+    try:
+        note = adapter.type_fit_note(action) if hasattr(adapter, "type_fit_note") else None
+        if (not note or action.get("purpose") != "FOLLOWUP" or proof.get("agent_decision") != "READY"
+                or outreach_agent.type_fit_attempted(database, action["action_id"])):
+            return None
+        current = _now(now)
+        outreach_agent.audit(database, action["action_id"], PHASE, outreach_agent.TYPE_FIT_ATTEMPT, current.isoformat(),
+                             {"payload_hash": row["payload_hash"]})
+    except Exception:
+        return None
+    reservation = None
+
+    def unused(reason):
+        # Why the original stood, for the record only: not a failure, a hold or a try of anything.
+        try:
+            outreach_agent.audit(database, outreach_agent.TYPE_FIT_AUDIT + action["action_id"], PHASE, "TYPE_FIT_UNUSED",
+                                 current.isoformat(), {"reason": reason})
+            if reservation:
+                with database:
+                    workflow_tasks.settle_compute(database, reservation, current.isoformat(), _now(None).isoformat(),
+                                                  "followup type-fit rewrite not used; shared daily pool: unused tail")
+        except Exception:
+            pass
+        return None
+
+    try:
+        timeout = config.get("followup_execution", {}).get("timeout_seconds", 60)
+        budget = config.get("daily_compute_seconds", 10800)
+        task_id = action["followup_task_id"]
+        task = database.execute("SELECT * FROM workflow_tasks WHERE task_id=?", (task_id,)).fetchone()
+        _require(task is not None and task["status"] == "COMPLETE", "FOLLOWUP_COMPOSITION_INCOMPLETE")
+        bound = json.loads(task["inputs"])[0]
+        candidate, ordinal = bound["candidate"], bound["ordinal"]
+        planned = plan(database, candidate, current)
+        sources = _sources(database, config, candidate["profile"], current)
+        _require(planned.get("state") == "DUE" and ordinal == planned.get("ordinal") == action["ordinal"]
+                 and planned.get("due_at") == action["followup_due_at"]
+                 and routing.digest(sources) == action["followup_sources_sha256"], "FOLLOWUP_NOT_DUE_OR_SOURCE_CHANGED")
+        # The acceptance the original was written with (a read of its own; not repeated here).
+        acceptance = judgment_context(database, action)["followup_context"].get("acceptance")
+        template, schema = _writer_prompt()
+        with database:
+            reserved = workflow_tasks.reserve_compute(database, "followup-type-fit:" + action["action_id"], current.isoformat(),
+                                                      timeout, config.get("timezone", "America/Los_Angeles"), budget)
+        if not reserved:
+            return unused("NO_COMPUTE")
+        reservation = "followup-type-fit:" + action["action_id"]
+        feedback = outreach_agent.type_fit_feedback(note, identity=profile_key(action["profile"]), purpose="FOLLOWUP",
+                                                    previous_message=action["message"], previous_invitation=None)
+        decision, rewrite, output_ref, checked = _write(
+            Path(root), database, config, adapter, _writer(adapter, execute), template, schema, timeout, candidate, planned,
+            sources, candidate["verification"], acceptance, task_id, action["action_id"], ordinal, "type-fit", now,
+            repair_feedback=feedback)
+        if rewrite is None:
+            return unused("WRITER_HOLD")
+        if rewrite["message"] == action["message"]:
+            return unused("WRITER_CHANGED_NOTHING")
+        side_proof = adapter.inspect(rewrite, config, type_fit_side={"output_ref": output_ref, "queued": action})
+        verdict = adapter._judged[1]
+        required = ("sender_ready", "followup_transport_supported", "followup_context_verified",
+                    "followup_thread_unchanged", "provider_restriction_observed", "has_reply", "negative_reply", "opt_out")
+        if (not isinstance(side_proof, dict) or side_proof.get("agent_decision") != "READY"
+                or any(type(side_proof.get(field)) is not bool and side_proof.get(field) is not None for field in required)
+                or outreach.action_gates(database, config, rewrite, side_proof, _now(now))):
+            return unused("JUDGE_" + str(side_proof.get("agent_decision") if isinstance(side_proof, dict) else None))
+        result = {"decision": decision["decision"], "action_id": action["action_id"], "output_ref": output_ref,
+                  "type_fit_rewrite": True}
+        evidence = [{"source": "outreach_agent_audit:" + output_ref, "observed_at": checked.isoformat()}]
+        with engagement.transaction(database):
+            _require(not binding_gates(database, config, rewrite, checked), "FOLLOWUP_BINDING_CHANGED")
+            queued = outreach.enqueue_action(database, rewrite, replacing=row["payload_hash"])
+            _require(queued["state"] == "REPLACED", "FOLLOWUP_TYPE_FIT_NOT_REPLACED")
+            changed = database.execute("""UPDATE workflow_tasks SET result=?,evidence=?,updated_at=? WHERE task_id=?
+                AND status='COMPLETE' AND result=?""", (workflow_tasks.encoded(result), workflow_tasks.encoded(evidence),
+                                                        checked.isoformat(), task_id, task["result"]))
+            _require(changed.rowcount == 1, "FOLLOWUP_TASK_CHANGED_DURING_TYPE_FIT")
+            workflow_tasks.record(database, task_id, "TYPE_FIT_REWRITE", checked.isoformat(),
+                                  {"result": result, "previous_result": json.loads(task["result"])})
+        swapped = database.execute("SELECT * FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
+    except Exception as error:
+        return unused(error.code if isinstance(error, reply_worker.Held) else type(error).__name__)
+    try:
+        with database:
+            workflow_tasks.settle_compute(database, reservation, current.isoformat(), _now(None).isoformat(),
+                                          "followup type-fit rewrite completed; shared daily pool: unused tail of a cleanly completed reservation")
+        # The verdict the rewrite passed, under the message's own id, where the pages read it.
+        outreach_agent.audit(database, action["action_id"], "INSPECTION", "DECISION", side_proof["checked_at"],
+                             {"observation_id": str(side_proof.get("evidence", "")).partition(":")[2], "decision": verdict,
+                              "route": "TYPE_FIT_REWRITE"})
+    except Exception:
+        pass
+    return swapped, rewrite, side_proof
 
 
 def promote(root, database, config, adapter, *, candidates=None, execute=None, now=None, replacing=None):
@@ -689,16 +961,9 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
     outreach.initialize_actions(database)
     outreach_agent.initialize(database)
     database.commit()
-    # The follow-up writer is a direct OpenRouter call (owner, 2026-10-27), unless an executor is injected.
-    if execute is None:
-        execute = (adapter.text_execute("followup", effort=outreach_agent.COMPOSE_EFFORT,
-                                        max_tokens=outreach_agent.COMPOSE_MAX_TOKENS)
-                   if hasattr(adapter, "text_execute") else getattr(adapter, "execute", None)
-                   ) or reply_worker.text_executor("followup", effort=outreach_agent.COMPOSE_EFFORT,
-                                                   max_tokens=outreach_agent.COMPOSE_MAX_TOKENS)
+    execute = _writer(adapter, execute)
     root = Path(root)
-    template = resources.read_text("followup-prompt.md").split("\nFOLLOWUP_SEND_JUDGE:\n", 1)[0]
-    schema = resources.read_text("followup-schema.json")
+    template, schema = _writer_prompt()
     items, seen, started = [], set(), 0
     for original in _candidates(database) if candidates is None else candidates:
         if started >= limit:
@@ -720,14 +985,29 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
             planned = plan(database, candidate, current)
             if planned["state"] != "DUE":
                 item.update(planned)
+                _close_unneeded(database, aliases, planned, current)
                 continue
             ordinal = planned["ordinal"]
             placeholders = ",".join("?" for unused in aliases)
-            slot = database.execute("SELECT action_id,state FROM outreach_actions WHERE identity IN (" + placeholders + ") AND slot=?",
+            slot = database.execute("SELECT action_id,state,payload_hash FROM outreach_actions WHERE identity IN (" + placeholders + ") AND slot=?",
                                     (*aliases, "FOLLOWUP:" + str(ordinal))).fetchone()
+            existing = database.execute("SELECT * FROM workflow_tasks WHERE worker='message_writer' AND contact_id IN (" + placeholders
+                + ") AND json_extract(inputs,'$[0].followup_version')=? AND json_extract(inputs,'$[0].ordinal')=? LIMIT 1",
+                (*aliases, VERSION, ordinal)).fetchone()
+            rejected = None
             if slot:
-                item.update(action_id=slot[0], state=slot[1])
-                continue
+                # An occupied slot is done, except the one case of a rewrite (FU1): the queued text is
+                # the one the judge rejected and its writer task is open again. Then this pass writes
+                # the rewrite and swaps it into that same row (enqueue_action's compare-and-swap on the
+                # rejected text's hash; nothing claimed is ever touched). The task is open only through
+                # repair_rejected's reopen, so this also resumes a rewrite a stopped run left behind
+                # (the reopen and the swap are two transactions), on the next round.
+                rejected = (replacing or {}).get(slot[0]) or (
+                    slot[2] if existing is not None and existing["status"] in {"QUEUED", "RETRY_WAIT", "RUNNING"}
+                    and outreach._never_dispatched(database, slot[0]) else None)
+                if rejected is None:
+                    item.update(action_id=slot[0], state=slot[1])
+                    continue
             verification = candidate["verification"]
             _require(all(verification.get(field) is True for field in ("identity_verified", "team_relevance_verified"))
                 and all(verification.get(field) for field in ("identity_source", "team_source"))
@@ -744,9 +1024,6 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
                 acceptance = readiness["event"]
             inputs = [{"source": sources[0]["source"], "observed_at": current.isoformat(), "followup_version": VERSION,
                        "candidate": candidate, "ordinal": ordinal, "sources_sha256": routing.digest(sources)}]
-            existing = database.execute("SELECT * FROM workflow_tasks WHERE worker='message_writer' AND contact_id IN (" + placeholders
-                + ") AND json_extract(inputs,'$[0].followup_version')=? AND json_extract(inputs,'$[0].ordinal')=? LIMIT 1",
-                (*aliases, VERSION, ordinal)).fetchone()
             with database:
                 task_id = existing["task_id"] if existing else workflow_tasks.enqueue(database, "message_writer", action_id,
                     "followup:" + action_id, inputs, (current + dt.timedelta(hours=24)).isoformat(), current.isoformat(),
@@ -786,72 +1063,31 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
                 item.update(state="RETRY_WAIT", blocker="FOLLOWUP_SHARED_CAPACITY_EXHAUSTED", next_at=reset.isoformat())
                 claim = None
                 continue
-            observation = _collect(adapter, database, dict(candidate, action_id=action_id, purpose="FOLLOWUP", ordinal=ordinal,
-                sender_id=config["sender_id"]), "INSPECTION")
-            current = _now(now)
-            _require(plan(database, candidate, current) == planned, "FOLLOWUP_CHANGED_DURING_READ")
-            if observation.get("route") == UNIPILE:
-                # The person's newest chat, or none yet (start_chat then creates it).
-                candidate = dict(candidate, conversation_id=observation.get("selected_conversation_id"))
-            elif candidate["conversation_id"] is None:
-                conversation_id = observation.get("selected_conversation_id")
-                if not isinstance(conversation_id, str) or not conversation_id:
-                    raise reply_worker.Held("FOLLOWUP_OBSERVED_THREAD_REQUIRED", retry=True)
-                candidate = dict(candidate, conversation_id=conversation_id)
-            packet = _packet(root, database, config, candidate, planned, observation, current)
-            if acceptance:
-                packet["acceptance"] = acceptance
-            packet["task_id"] = task_id
-            prompt = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + routing.encoded({"source_sha256": routing.digest(packet), **packet})
-            _require(len(prompt.encode()) <= outreach_agent.prompt_limit(config), "FOLLOWUP_INPUT_TOO_LARGE")
-            reference = outreach_agent.audit(database, action_id, PHASE, "INPUT", current.isoformat(),
-                {"packet": packet, "observation": observation, "prompt_sha256": reply_worker.sha(template),
-                 "schema_sha256": reply_worker.sha(schema), "attempt": task["attempts"] + 1})
-            raw = execute(config, prompt, schema, timeout)
-            output_ref = outreach_agent.audit(database, action_id, PHASE, "OUTPUT", current.isoformat(), {"input_ref": reference, "raw": raw})
-            try:
-                decision = _validate(raw, packet)
-            except ValueError as error:
-                # An answer that breaks the schema's rule (e.g. COMPOSE with no message) gets the
-                # task's ordinary retry, within its attempt limit, instead of ending BLOCKED.
-                raise reply_worker.Held(str(error) if error.args and isinstance(error.args[0], str)
-                                        and error.args[0].startswith("FOLLOWUP_") else "FOLLOWUP_OUTPUT_INVALID",
-                                        retry=True) from None
-            with database:
-                workflow_tasks.settle_compute(database, followup_reservation, followup_reserved_at,
-                                              _now(None).isoformat(), "followup judgment completed; shared daily pool: unused tail of a cleanly completed reservation")
-            current = _now(now)
-            _require(plan(database, candidate, current) == planned and routing.digest(_sources(database, config, candidate["profile"], current)) == routing.digest(sources),
-                     "FOLLOWUP_CHANGED_DURING_COMPOSITION")
-            action = None
-            if decision["decision"] == "COMPOSE":
-                action = dict(candidate, action_id=action_id, purpose="FOLLOWUP", ordinal=ordinal, sender_id=config["sender_id"],
-                    provider="unipile" if _unipile_route(adapter, database, candidate["profile"]) else "heyreach", channel="linkedin", subject="",
-                    # No em or en dash goes out (owner style rule), normalised as replies are.
-                    message=reply_execution.without_dashes(decision["message"]),
-                    verification=dict(verification, content_verified=True, content_sources=["outreach_agent_audit:" + output_ref]),
-                    followup_task_id=task_id, followup_due_at=planned["due_at"],
-                    followup_sources_sha256=routing.digest(sources), followup_thread_sha256=packet["thread_sha256"])
-                action["verification"].update(verified_at=current.isoformat(),
-                    verification_scope="CURRENT_IDENTITY_AND_COMPOSED_CONTENT_ONLY",
-                    identity_source="outreach_agent_audit:" + reference,
-                    identity_observed_at=packet["identity_observed_at"],
-                    team_evidence_scope=packet["historical_context"]["scope"],
-                    historical_context=packet["historical_context"]["verification"])
-                action["followup_action_ref"] = outreach_agent.audit(database, action_id, PHASE, "ACTION", current.isoformat(), action)
+            def settled():
+                with database:
+                    workflow_tasks.settle_compute(database, followup_reservation, followup_reserved_at,
+                                                  _now(None).isoformat(), "followup judgment completed; shared daily pool: unused tail of a cleanly completed reservation")
+
+            decision, action, output_ref, current = _write(
+                root, database, config, adapter, execute, template, schema, timeout, candidate, planned, sources,
+                verification, acceptance, task_id, action_id, ordinal, task["attempts"] + 1, now, wrote=settled)
             with engagement.transaction(database):
                 if action:
                     _require(not binding_gates(database, config, action, current), "FOLLOWUP_BINDING_CHANGED")
-                    # `replacing` is set only by repair_rejected, and only to the exact hash of
-                    # the note the judge rejected. verification above was rebuilt for this new
-                    # text, so the verified text and the sent text stay the same thing.
-                    item.update(outreach.enqueue_action(database, action,
-                                                        replacing=(replacing or {}).get(action_id)))
+                    # `rejected` is set only for a rewrite, and only to the exact hash of the note
+                    # the judge rejected. verification above was rebuilt for this new text, so the
+                    # verified text and the sent text stay the same thing.
+                    item.update(outreach.enqueue_action(database, action, replacing=rejected))
                 else:
                     item.update(state="HELD", blocker="FOLLOWUP_AI_HOLD", next_action=decision["next_action"])
                 workflow_tasks.finish(database, task_id, claim["token"], current.isoformat(),
                     {"decision": decision["decision"], "action_id": action_id, "output_ref": output_ref},
                     [{"source": "outreach_agent_audit:" + output_ref, "observed_at": current.isoformat()}])
+            if item.get("state") == "REPLACED":
+                # While its task was open the rejected text could not be judged (a stopped run, a
+                # failed rewrite try), and that read is parked at INVALID_PROOF. The rewrite is a new
+                # text with its own writer output: its inspection starts again.
+                outreach.resume_read(database, action_id, "INSPECTION", current, new_text=True)
         except (ValueError, KeyError, TypeError, IndexError, OSError, TimeoutError, reply_worker.Held) as error:
             if item not in items:
                 items.append(item)
@@ -895,7 +1131,11 @@ def cycle(root, database, config, adapter, *, candidates=None, execute=None, now
         # rewritten action is re-judged in this same cycle (owner, 2026-09-23).
         result["execution"] = outreach.cycle(
             database, config, adapter, now=now, purpose="FOLLOWUP",
-            repair=lambda action, proof, at: repair_rejected(root, database, config, adapter, action, proof, at))
+            # Both turns keep this cycle's own clock (None: the real one), as promote does: their fresh reads
+            # are stamped by the provider clock and must not be later than the time they are checked at.
+            repair=lambda action, proof, at: repair_rejected(root, database, config, adapter, action, proof, now, execute),
+            type_fit=lambda row, action, proof, at: type_fit_turn(root, database, config, adapter, row, action, proof,
+                                                                  now, execute))
     return result
 
 
@@ -962,10 +1202,10 @@ class FollowupAdapter(reply_execution.Adapter):
     def _unipile(self, action):
         return action.get("purpose") == "FOLLOWUP" and _unipile_route(self, self.database, action["profile"])
 
-    def judgment_context(self, action, config, now):
+    def judgment_context(self, action, config, now, output_ref=None):
         if action.get("purpose") != "FOLLOWUP":
             return super().judgment_context(action, config, now)
-        context = judgment_context(self.database, action)
+        context = judgment_context(self.database, action, output_ref)
         _require(context["followup_context"]["candidate_resume"] == reply_resume.context(self.root), "FOLLOWUP_DESIGNATED_RESUME_CHANGED")
         return dict(context, decision_time=now.isoformat())
 
@@ -981,9 +1221,15 @@ class FollowupAdapter(reply_execution.Adapter):
             return trimmed
         return judgment_observation(action, observation)
 
-    def _judge(self, action, phase, config, claim=None, request=None):
+    def _judge(self, action, phase, config, claim=None, request=None, *, type_fit_side=None, **first_note):
+        """`type_fit_side` (E17, type_fit_turn): `action` is a rewrite judged before it is queued. Its
+        context comes from its own writer output, the queued action must still be the original, and
+        its records go under their own audit id so a rewrite that is thrown away never shows as the
+        verdict on the message that goes out."""
         if action.get("purpose") != "FOLLOWUP":
-            return super()._judge(action, phase, config, claim, request)
+            return super()._judge(action, phase, config, claim, request, **first_note)
+        side = type_fit_side or {}
+        audit_id = (outreach_agent.TYPE_FIT_AUDIT if type_fit_side else "") + action["action_id"]
         original = port_observation(self.port, action["profile"]) if self._unipile(action) else self.provider.collect(action, phase, claim)
         observation = self.judgment_observation(action, original)
         now = _now(observation["finished_at"])
@@ -994,17 +1240,18 @@ class FollowupAdapter(reply_execution.Adapter):
             "claim": dict(claim) if claim is not None else None, "request": request, "observation": observation,
             "direct_history": {"scope": "AUTHENTICATED_EXISTING_THREAD_AND_CANONICAL_LIFECYCLE",
                                "all_time_new_contact_clearance": None},
-            **({"decision_time": now.isoformat()} if approved is not None else self.judgment_context(action, config, now))}
+            **({"decision_time": now.isoformat()} if approved is not None
+               else self.judgment_context(action, config, now, side.get("output_ref")))}
         if approved is not None:
             decision = approvals.decision(action, approved)
-            reference = outreach_agent.audit(self.database, action["action_id"], phase, "OBSERVATION", now.isoformat(),
+            reference = outreach_agent.audit(self.database, audit_id, phase, "OBSERVATION", now.isoformat(),
                 {"packet": packet, "original_observation": original, "source_sha256": outreach_agent.digest(packet),
                  "provenance": {"route": "OWNER_APPROVAL", "decision_source": decision["decision_source"]}})
-            outreach_agent.audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
+            outreach_agent.audit(self.database, audit_id, phase, "DECISION", now.isoformat(),
                 {"observation_id": reference, "decision": decision, "decision_source": decision["decision_source"]})
             return observation, packet["direct_history"], decision, reference
         template = resources.read_text("followup-prompt.md").split("\nFOLLOWUP_SEND_JUDGE:\n", 1)[1]
-        schema = resources.read_text("outreach-agent-schema.json")
+        schema = resources.read_text("followup-judge-schema.json")
         prompt = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + outreach_agent.encoded(
             {"source_sha256": outreach_agent.digest(packet), **packet})
         timeout = config.get("outreach_agent", {}).get("timeout_seconds", 60)
@@ -1014,7 +1261,7 @@ class FollowupAdapter(reply_execution.Adapter):
         if not self.injected_execute:   # the follow-up send judge is a direct call (owner, 2026-10-27)
             provenance.update(executable=None, route=outreach_agent.DIRECT_ROUTE,
                               reasoning_effort=reply_worker.DIRECT_EFFORT, max_tokens=reply_worker.DIRECT_MAX_TOKENS)
-        reference = outreach_agent.audit(self.database, action["action_id"], phase, "OBSERVATION", now.isoformat(),
+        reference = outreach_agent.audit(self.database, audit_id, phase, "OBSERVATION", now.isoformat(),
             {"packet": packet, "original_observation": original, "source_sha256": outreach_agent.digest(packet),
              "provenance": provenance})
         try:
@@ -1023,30 +1270,32 @@ class FollowupAdapter(reply_execution.Adapter):
                         config.get("timezone", "America/Los_Angeles"), config.get("daily_compute_seconds", 10800)):
                     raise outreach_agent.SharedBudgetExhausted(config, now)
             raw = self.text_execute("followup_send_judge")(config, prompt, schema, timeout)
-            output_ref = outreach_agent.audit(self.database, action["action_id"], phase, "RAW_OUTPUT", now.isoformat(),
+            output_ref = outreach_agent.audit(self.database, audit_id, phase, "RAW_OUTPUT", now.isoformat(),
                                                {"observation_id": reference, "output": raw})
-            decision = outreach_agent._validate(raw, packet)
+            decision = _validate_judgment(raw, packet)
             saved = self.database.execute("SELECT payload FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
-            _require(saved and json.loads(saved[0]) == action, "FOLLOWUP_ACTION_CHANGED_DURING_JUDGMENT")
-            outreach_agent.audit(self.database, action["action_id"], phase, "DECISION", now.isoformat(),
+            _require(saved and json.loads(saved[0]) == side.get("queued", action), "FOLLOWUP_ACTION_CHANGED_DURING_JUDGMENT")
+            outreach_agent.audit(self.database, audit_id, phase, "DECISION", now.isoformat(),
                 {"observation_id": reference, "output_ref": output_ref, "decision": decision})
             with self.database:
                 workflow_tasks.settle_compute(self.database, "outreach-ai:" + reference, now.isoformat(),
                                               _now(None).isoformat(), "followup judgment completed; shared daily pool: unused tail of a cleanly completed reservation")
             return observation, packet["direct_history"], decision, reference
         except Exception as error:
-            outreach_agent.audit(self.database, action["action_id"], phase, "FAILURE", now.isoformat(),
+            outreach_agent.audit(self.database, audit_id, phase, "FAILURE", now.isoformat(),
                                   {"observation_id": reference, "error_type": type(error).__name__,
                                    **({"executor": reply_worker.executor_detail(error)} if reply_worker.executor_detail(error) else {})})
             if isinstance(error, reply_worker.Held) and error.retry:
                 raise TimeoutError("FOLLOWUP_JUDGE_TRANSIENT_FAILURE") from None
             raise
 
-    def inspect(self, action, config):
+    def inspect(self, action, config, *, type_fit_side=None):
         if action.get("purpose") != "FOLLOWUP":
             return super().inspect(action, config)
         _require(not binding_gates(self.database, config, action, outreach_provider._now()), "FOLLOWUP_NOT_DUE_OR_STOPPED")
-        observation, unused_direct, decision, reference = self._judge(action, "INSPECTION", config)
+        observation, unused_direct, decision, reference = self._judge(
+            action, "INSPECTION", config, **({"type_fit_side": type_fit_side} if type_fit_side else {}))
+        self._judged = (outreach_agent.digest(action), decision)
         now = _now(observation["finished_at"])
         saved = self.database.execute("SELECT record FROM outreach_agent_audit WHERE id=?", (reference,)).fetchone()
         original = json.loads(saved[0])["original_observation"]
@@ -1080,6 +1329,11 @@ class FollowupAdapter(reply_execution.Adapter):
             "checked_at": original["finished_at"], "evidence": "outreach_agent_audit:" + reference,
             "conversation_id": decision["conversation_id"] if decision["conversation_id"] == action["conversation_id"] else None,
             "provider_snapshot_complete": unchanged, "agent_decision": decision["decision"], "next_action": decision["next_action"],
+            # The judge's reason, for the writer's hand-back (outreach_agent._judge_text_rejection). A proof
+            # saved before this key reads "UNSPECIFIED" there, as it always did; nothing binds to it.
+            "agent_reason": decision.get("reason"),
+            # What a BLOCKED is about (_validate_judgment): only SITUATION is read, by outreach.cycle.
+            "agent_block_about": decision.get("block_about"),
             "followup_task_id": action["followup_task_id"], "followup_sources_sha256": action["followup_sources_sha256"],
             "followup_thread_sha256": action["followup_thread_sha256"]}
 
@@ -1108,6 +1362,11 @@ class FollowupAdapter(reply_execution.Adapter):
             "checked_at": original["finished_at"], "evidence": "outreach_agent_audit:" + reference,
             "conversation_id": action["conversation_id"] if decision["conversation_id"] == action["conversation_id"] else None,
             "provider_snapshot_complete": unchanged, "agent_decision": decision["decision"], "next_action": decision["next_action"],
+            # The judge's reason, for the writer's hand-back (outreach_agent._judge_text_rejection). A proof
+            # saved before this key reads "UNSPECIFIED" there, as it always did; nothing binds to it.
+            "agent_reason": decision.get("reason"),
+            # What a BLOCKED is about (_validate_judgment): only SITUATION is read, by outreach.cycle.
+            "agent_block_about": decision.get("block_about"),
             "followup_task_id": action["followup_task_id"], "followup_sources_sha256": action["followup_sources_sha256"],
             "followup_thread_sha256": action["followup_thread_sha256"]}
 
@@ -1207,10 +1466,15 @@ class FollowupAdapter(reply_execution.Adapter):
         except BaseException:
             self.database.rollback()
             raise
-        if operation == "send_message":
-            ack = self.port.send_message(arguments["chat_id"], arguments["text"])
-        else:
-            ack = self.port.start_chat(arguments["provider_id"], arguments["text"])
+        try:
+            if operation == "send_message":
+                ack = self.port.send_message(arguments["chat_id"], arguments["text"])
+            else:
+                ack = self.port.start_chat(arguments["provider_id"], arguments["text"])
+        except Exception as error:
+            if outreach.never_forwarded(error):   # E18 B8: held, nothing sent: no try spent
+                outreach.unwrite_held_request(self.database, action_id, error)
+            raise
         return {**request, "finished_at": outreach_provider._now(), "status": "ACKNOWLEDGED_UNCONFIRMED",
                 "raw": sequence._jsonable(ack.raw)}
 
@@ -1535,6 +1799,11 @@ def _resend_after_check(adapter, action, claim, state, raw, result, request, obs
         entry.update(status="ACKNOWLEDGED_UNCONFIRMED", finished_at=outreach_provider._now(), raw=sequence._jsonable(ack.raw))
         after = "ACKNOWLEDGED_UNCONFIRMED"
     except Exception as error:   # a write's exception is UNKNOWN: it may have landed; checked again first
+        if outreach.never_forwarded(error):
+            # E18 B8: held before any request. Not an attempt: the row returns to the state it was read in.
+            result["message_retries"] = retries
+            outreach.held_write_note(result, error, request["operation"])
+            return _move(database, action, "REQUEST_STARTED", state, result)
         entry.update(status="ERROR", finished_at=outreach_provider._now(), error_type=type(error).__name__,
                      diagnostic=str(error)[:300])
         after = "UNCERTAIN_NO_RETRY"

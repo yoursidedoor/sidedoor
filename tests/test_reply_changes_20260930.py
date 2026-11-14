@@ -199,6 +199,7 @@ class ReplyRepairTests(unittest.TestCase):
                 output = json.loads(original(config, prompt, schema, timeout))
                 if "previous_reply_proposal" in packet:
                     self.assertTrue(packet["repair_feedback"])
+                    self.assertEqual([], packet["owner_notes"])   # the rewriter is shown the decision's notes (none here)
                     output["reply_proposal"]["text"] = "Happy to talk \u2014 which part matters most to you?"
                 elif packet.get("phase") == "INSPECTION":
                     judged.append(packet["action"]["message"])

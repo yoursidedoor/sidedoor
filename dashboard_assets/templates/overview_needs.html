@@ -1,0 +1,32 @@
+  {# One "Needs you" card (owner, 2026-10-24): each kind of thing waiting on the user, with its own way
+     there. The counts are the ones those pages total: Approvals' messages, applications waiting, questions and notes, and
+     Applications' "Blocked, needs you" filter. A zero row is not shown; all zero says "Nothing needs you right now.".
+     E15.T2: the applications waiting on a sign-in or a human check are counted in a row of their own
+     (`sign_ins`: the cards shown, a site's group counted once) and shown as cards under the rows. `rows` is `overview_page.NEEDS_ROWS` (E15.T3: the desktop notification reads the same rows); an action on a card redraws this section. #}
+  {# L7 (owner, 2026-11-14): the count tile sits in the row of three; the cards are a block of their own below
+     that row, across the full width (`.overview-needs-wrap` is display: contents, so both are grid items).
+     The wrapper keeps the id an action redraws. #}
+  <div class="overview-needs-wrap" id="overview-needs">
+  <section class="card overview-needs" aria-labelledby="needs-title">
+    <h2 id="needs-title">Needs you</h2>
+    {% if needs == na %}
+    <p class="muted">Not available</p>
+    {% else %}
+    <ul class="overview-needs-list">
+      {% for key, one, many, href, label in rows %}{% set count = needs[key] %}{% if count %}
+      <li class="overview-needs-row">
+        <span class="overview-number">{{ count }}</span>
+        <span class="overview-needs-what">{{ one if count == 1 else many }}</span>
+        <a class="button overview-needs-go" href="{{ href }}">{{ label }}</a>
+      </li>
+      {% endif %}{% endfor %}
+    </ul>
+    {% if not (needs.questions or needs.messages or needs.couldnt_send or needs.notes or needs.applications or needs.applications_held or needs.sign_ins) %}<p class="muted">Nothing needs you right now.</p>{% endif %}
+    {% endif %}
+  </section>
+  {% if sign_ins and sign_ins != na and (sign_ins.cards or (f and f.text)) %}
+  <section class="card overview-sign-ins" aria-label="Sign-ins and human checks">
+    {% with s = sign_ins, at = "overview", target = "overview-needs" %}{% include "access_cards.html" %}{% endwith %}
+  </section>
+  {% endif %}
+  </div>

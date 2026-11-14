@@ -56,13 +56,13 @@
   </div>
   {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
   <div class="approval-actions">
-  <form method="post" action="/approvals/applications/approve" hx-post="/approvals/applications/approve" hx-target="closest article" hx-swap="outerHTML" class="approval-inline" id="{{ fid }}">
+  <form method="post" action="/approvals/applications/approve{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/applications/approve{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML" class="approval-inline" id="{{ fid }}">
     <input type="hidden" name="application_id" value="{{ a.id }}"><input type="hidden" name="payload_hash" value="{{ a.payload_hash }}">
     <button class="button button-highlight" type="submit"><span class="when-view">{{ "Approve and send" if email else "Approve and submit" }}</span><span class="when-edit">{{ "Approve my edits and send" if email else "Approve my edits and submit" }}</span></button>
   </form>
   {% if a.held_at %}<span class="muted approval-m-small">Waiting since {{ v.when(a.held_at) }}. Nothing is {{ "sent" if email else "submitted" }} until you approve it.</span>{% endif %}
   <details class="approval-reject"><summary>Reject</summary>
-    <form method="post" action="/approvals/applications/reject" hx-post="/approvals/applications/reject" hx-target="closest article" hx-swap="outerHTML">
+    <form method="post" action="/approvals/applications/reject{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/applications/reject{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
       <input type="hidden" name="application_id" value="{{ a.id }}"><input type="hidden" name="payload_hash" value="{{ a.payload_hash }}">
       <label for="reason-{{ a.dom }}">Why (optional, only for you)</label>
       <input id="reason-{{ a.dom }}" name="reason" maxlength="1000">

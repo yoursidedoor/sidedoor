@@ -609,7 +609,9 @@ def judge(reader, action_id):
             continue
         source = record.get("decision_source") or decision.get("decision_source")
         approved = isinstance(source, str) and source.startswith("OWNER_APPROVAL")
-        reason = decision.get("reason") if isinstance(decision.get("reason"), str) and not approved else None
+        # The judge's advisory type-fit note (E17) stays in the record and is not shown.
+        reason = (approvals.without_type_fit_note(decision.get("reason"))
+                  if isinstance(decision.get("reason"), str) and not approved else None)
         return {"verdict": verdict, "reason": reason, "approved": approved}
     return None
 

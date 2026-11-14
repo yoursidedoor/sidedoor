@@ -37,7 +37,7 @@ def configuration():
 
 def inference(source_hash, message=MESSAGE):
     quote = {"start": 0, "end": len(message), "text": message}
-    return {"output_version": worker.VERSION, "source_sha256": source_hash,
+    return {"output_version": worker.VERSION, "source_sha256": source_hash, "asks_to_stop_contact": False,
             "label": "AGREEMENT", "literal_quote": message, "quote_span": quote,
             "role_reference": None, "reason": "Fixture inference, never a business fact.",
             "unknown_factual_requirements": [], "reply_proposal": None,

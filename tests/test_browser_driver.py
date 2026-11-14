@@ -11,7 +11,7 @@ Worked examples (BACKLOG E7.T1 brief):
 1. upload through the file chooser, arm once before Submit, a second arm denied
    (RealBrowserTests.test_1_..., ArmThroughTheGuardTests)
 2. rule 1 refuses Connect / Message / Follow with live's code (RealBrowserTests.test_2_..., GuardTests)
-3. CAPTCHA wait through the guard extends the request deadline (HumanCheckThroughTheGuardTests)
+3. a human check stops the session at once: no wait tool, no window (tests/test_stop_at_once_e16_t1.py)
 4. frozen: the server is `[sys.executable, "browser-guard", ...]`, never a .py path (FrozenCommandTests)
 5. a 40-field form finishes under 70 calls with browser_fill_form (RealBrowserTests.test_5_...)
 """
@@ -39,6 +39,7 @@ import application_browser  # noqa: E402
 import applications  # noqa: E402
 import browser_guard  # noqa: E402
 import browser_runtime  # noqa: E402
+import engines  # noqa: E402
 import linkedin_contacts  # noqa: E402
 import outreach_history_browser  # noqa: E402
 import setup_steps  # noqa: E402
@@ -115,21 +116,23 @@ class GuardTests(unittest.TestCase):
                 self.assertFalse(guard.client.call("browser_click", {"element": "Connect", "target": "e3"})[0])
                 self.assertEqual(len(guard.forwarded()), 1)
 
-    def test_tools_list_is_every_browser_tool_plus_arm_and_wait_only_when_given(self):
+    def test_tools_list_is_every_browser_tool_and_never_the_retired_captcha_wait(self):
         guard = GuardProcess(self, "inspect", CAPTCHA_SNAPSHOT)
         names = {tool["name"] for tool in guard.client.request("tools/list")["tools"]}
         self.assertEqual(names, set(browser_guard.TOOLS))
+        # E16.T1: even given the old wait context, an application session is offered no wait tool
+        # (tests/test_stop_at_once_e16_t1.py covers the refusal of a call to it).
         context = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, context, True)
         (context / "human-check.json").write_text(json.dumps({"root": str(context), "request_id": "r", "directory": str(context),
                                                               "job_key": "k", "operation": "inspect"}))
         guard = GuardProcess(self, "inspect", CAPTCHA_SNAPSHOT, human_check=context / "human-check.json")
         names = {tool["name"] for tool in guard.client.request("tools/list")["tools"]}
-        self.assertEqual(names, set(browser_guard.TOOLS) | {browser_guard.HUMAN_CHECK_TOOL})
-        # An arm call to a server that holds no claim is not the guard's: it goes to the browser,
-        # which has no such tool (a read session can never arm).
+        self.assertEqual(names, set(browser_guard.TOOLS))
+        # An arm call to a server that holds no claim is refused by the guard and never reaches the
+        # browser (a read session can never arm; E15.T4 Q5: only the tools a session holds are forwarded).
         guard.client.call("arm", {"observed_form_revision": "x"})
-        self.assertEqual([call["tool"] for call in guard.forwarded()], ["arm"])
+        self.assertEqual([call["tool"] for call in guard.forwarded()], [])
 
 
 def submit_fixture(testcase):
@@ -165,8 +168,8 @@ class ArmThroughTheGuardTests(unittest.TestCase):
             guard_dir.mkdir()
             (guard_dir / "snapshot.yaml").write_text(snapshot, encoding="utf-8")
             (guard_dir / "calls.jsonl").write_text("")
-            argv = browser_runtime.guard_command(config, directory, "submit", config["_application_guard_claim"],
-                                                 config["_application_human_check"])
+            self.assertNotIn("_application_human_check", config)   # E16.T1: no wait context for a session
+            argv = browser_runtime.guard_command(config, directory, "submit", config["_application_guard_claim"])
             argv = argv[:argv.index("--") + 1] + fake_runtime(guard_dir / "snapshot.yaml", guard_dir / "calls.jsonl")
             client = Client(argv, cwd=directory)
             try:
@@ -203,73 +206,188 @@ class ArmThroughTheGuardTests(unittest.TestCase):
                 self.assertNotIn(seen["token"].encode(), path.read_bytes(), str(path))
 
 
-class HumanCheckThroughTheGuardTests(unittest.TestCase):
-    """Worked example 3: wait_for_human_check is the proxy's own tool and extends the deadline."""
+class ARefusedRunCodeCallIsANonEvent(unittest.TestCase):
+    """Owner, 2026-11-12: "treat a refused call to the removed tool as a non-event, so the session's result
+    stands". Real `consume`, the real guard process in front of the fake browser server: the model calls
+    browser_run_code_unsafe once, is refused, and goes on."""
+    RUN_CODE = ("browser_run_code_unsafe", {"code": "async (page) => { await page.getByLabel('Email').fill('x'); }"})
+    SNAPSHOT = '- button "Submit application" [ref=e1] [cursor=pointer]\n- textbox "Email" [ref=e2]\n'
 
-    def test_captcha_wait_extends_the_claim_and_moves_the_session_deadline(self):
-        root = Path(tempfile.mkdtemp(prefix="e7t1-captcha-"))
-        self.addCleanup(shutil.rmtree, root, True)
-        fixture = Fixture(root / "fixture")
-        self.addCleanup(fixture.database.close)
-        request_id = fixture.queue("inspect")
+    def session(self, operation, steps, finish, fixture=None, request_id=None, forge=None):
+        if fixture is None:
+            root = Path(tempfile.mkdtemp(prefix="run-code-"))
+            self.addCleanup(shutil.rmtree, root, True)
+            fixture = Fixture(root / "fixture")
+            self.addCleanup(fixture.database.close)
+            request_id = fixture.queue(operation)
         seen = {}
 
         def scripted(config, prompt, directory, timeout):
             request = request_at(directory)
-            def lease():
-                with contextlib.closing(sqlite3.connect(fixture.root / "state/orchestrator.sqlite3")) as fresh:
-                    return fresh.execute("SELECT lease_until FROM desktop_requests WHERE request_id=?", (request_id,)).fetchone()[0]
-            # The wait comes late in the session: 100 s of the lease left, so the extension shows.
-            late = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=100)).isoformat()
-            with contextlib.closing(sqlite3.connect(fixture.root / "state/orchestrator.sqlite3")) as fresh, fresh:
-                fresh.execute("UPDATE desktop_requests SET lease_until=?,expires_at=? WHERE request_id=?", (late, late, request_id))
-            before = lease()
-            slept = []
-            wait = application_browser.HumanCheckWait(config["_application_human_check"], sleep=slept.append)
-            (directory / "snapshot.yaml").write_text(CAPTCHA_SNAPSHOT, encoding="utf-8")
-            (directory / "calls.jsonl").write_text("")
-            to_proxy, from_client = os.pipe()
-            to_client, from_proxy = os.pipe()
-            proxy = browser_guard.Proxy("inspect", fake_runtime(directory / "snapshot.yaml", directory / "calls.jsonl"),
-                                        audit=directory / "guard.jsonl", stdin=os.fdopen(to_proxy, encoding="utf-8"),
-                                        stdout=os.fdopen(from_proxy, "w", encoding="utf-8"), human_check_wait=wait)
-            thread = threading.Thread(target=proxy.run, daemon=True)
-            thread.start()
-            client = Client(streams=(os.fdopen(from_client, "w", encoding="utf-8"), os.fdopen(to_client, encoding="utf-8")))
-            dispatched = []
-            with mock.patch("notifications.dispatch", lambda *args, **kwargs: dispatched.append(args)):
-                client.call("browser_snapshot")
-                seen["wait"] = client.call(browser_guard.HUMAN_CHECK_TOOL)
-                seen["again"] = client.call(browser_guard.HUMAN_CHECK_TOOL)
-            client.close()
-            thread.join(10)
-            seen["slept"] = slept
-            seen["dispatched"] = len(dispatched)
-            seen["extension"] = json.loads((directory / "human_check.json").read_text())
-            seen["lease"] = (before, lease())
-            seen["counted"] = [application_browser.tool_item(entry["item"], False) for entry in client.trace]
-            result = {"blocked": {"code": "CAPTCHA_REQUIRED", "next_action": "Ask the owner to clear the check"}}
-            (directory / "output.json").write_text(json.dumps({"request_id": request["request_id"], "binding": request["binding"],
-                                                               "result_json": json.dumps(result), "evidence": []}))
-            client.write_trace(directory / "trace.jsonl")
+            fake = directory / "fake"
+            fake.mkdir()
+            (fake / "snapshot.yaml").write_text(self.SNAPSHOT, encoding="utf-8")
+            (fake / "calls.jsonl").write_text("")
+            argv = browser_runtime.guard_command(config, directory, operation, config.get("_application_guard_claim"),
+                                                 config.get("_application_human_check"))
+            argv = argv[:argv.index("--") + 1] + fake_runtime(fake / "snapshot.yaml", fake / "calls.jsonl")
+            client = Client(argv, cwd=directory)
+            try:
+                seen["answers"] = [step(client) if callable(step) else client.call(*step) for step in steps]
+                if forge:
+                    forge(client.trace)
+                finish(directory, request, client)
+            finally:
+                client.close()
+            seen["child"] = [json.loads(line)["tool"] for line in (fake / "calls.jsonl").read_text().splitlines()]
+            seen["audit"] = [json.loads(line) for line in (directory / "guard.jsonl").read_text().splitlines()]
+            seen["trace"] = (directory / "trace.jsonl").read_bytes()
+            seen["directory"] = directory
+        seen["summary"] = application_browser.consume(fixture.root, fixture.database, fixture.config, request_id, scripted)
+        seen["result"] = json.loads(fixture.database.execute("SELECT result FROM desktop_requests WHERE request_id=?",
+                                                             (request_id,)).fetchone()[0] or "null")
+        seen["events"] = [row[0] for row in fixture.database.execute("SELECT event FROM desktop_events ORDER BY rowid")]
+        return seen
 
-        started = dt.datetime.now(dt.timezone.utc)
-        summary = application_browser.consume(fixture.root, fixture.database, fixture.config, request_id, scripted)
-        self.assertEqual(summary["state"], "COMPLETE", summary)
-        self.assertEqual(seen["wait"][0], False)
-        self.assertTrue(seen["wait"][1].startswith("Waited for the owner."), seen["wait"])
-        self.assertTrue(seen["again"][1].startswith("WAIT_EXPIRED"), seen["again"])     # once only, as live
-        self.assertEqual(seen["slept"], [application_browser.HUMAN_CHECK_SECONDS])
-        self.assertEqual(seen["dispatched"], 1)
-        until = dt.datetime.fromisoformat(seen["extension"]["until"])
-        expected = started + dt.timedelta(seconds=application_browser.HUMAN_CHECK_SECONDS + application_browser.HUMAN_CHECK_FINISH)
-        self.assertLess(abs((until - expected).total_seconds()), 60)
-        self.assertGreater(seen["lease"][1], seen["lease"][0])
-        self.assertEqual(dt.datetime.fromisoformat(seen["lease"][1]), until)
-        self.assertEqual(seen["counted"], [True, False, False])   # the wait is never a counted call
-        events = [row[0] for row in fixture.database.execute("SELECT event FROM desktop_events WHERE request_id=?", (request_id,))]
-        self.assertIn("HUMAN_CHECK_WAIT", events)
-        self.assertEqual(fixture.database.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0], 1)
+    @staticmethod
+    def blocked(directory, request, client):
+        result = {"blocked": {"code": "CAPTCHA_REQUIRED", "next_action": "Ask the owner to clear the check"}}
+        (directory / "output.json").write_text(json.dumps({"request_id": request["request_id"], "binding": request["binding"],
+                                                           "result_json": json.dumps(result), "evidence": []}))
+        client.write_trace(directory / "trace.jsonl")
+
+    READ = [("browser_navigate", {"url": "https://jobs.ashbyhq.com/synthetic/role-123"}), ("browser_snapshot", {})]
+
+    def comparable(self, seen):
+        # What the session decided and what it counted and bound. (Times, and `source`, the hash of the
+        # whole trace file with the refused call's own lines in it, differ between any two runs.)
+        result = {key: seen["result"].get(key) for key in ("blocked", "status", "reason", "observed_browser_calls",
+                                                           "browser_evidence", "rejected_evidence", "error")}
+        return seen["summary"]["state"], seen["summary"].get("code"), result
+
+    def test_a_read_that_called_it_ends_as_the_same_read_without_the_call(self):
+        for operation in ("inspect", "verify", "reconcile", "investigate"):
+            plain = self.session(operation, self.READ, self.blocked)
+            called = self.session(operation, self.READ[:1] + [self.RUN_CODE] + self.READ[1:], self.blocked)
+            self.assertTrue(called["answers"][1][0], operation)                              # the model was refused
+            self.assertTrue(called["answers"][1][1].startswith("REFUSED " + browser_guard.REMOVED_CODE))
+            self.assertNotIn("browser_run_code_unsafe", called["child"])                     # it never ran
+            self.assertEqual(plain["summary"]["state"], "COMPLETE", (operation, plain["summary"]))
+            self.assertEqual(self.comparable(called), self.comparable(plain), operation)     # result, call count, evidence
+            self.assertEqual(called["result"]["observed_browser_calls"], plain["result"]["observed_browser_calls"])
+            self.assertEqual(called["events"], plain["events"], operation)
+
+    @staticmethod
+    def raw(name, arguments):
+        """A step whose arguments go out exactly as given (Client.call turns falsy ones into {}), recorded
+        in the trace as Codex records a step."""
+        def step(client):
+            client.calls += 1
+            result = client.request("tools/call", {"name": name, "arguments": arguments})
+            error = bool(result.get("isError"))
+            client.trace.append({"type": "item.completed", "item": {
+                "id": "item_%d" % client.calls, "type": "mcp_tool_call", "server": "browser", "tool": name,
+                "arguments": arguments, "error": None, "status": "failed" if error else "completed",
+                "result": {"content": result.get("content", []), "structured_content": None}}})
+            return error, "\n".join(block.get("text", "") for block in result.get("content", []))
+        return step
+
+    def test_whatever_shape_its_arguments_have_the_call_is_the_removed_tools_refusal_and_a_non_event(self):   # X7
+        plain = self.session("inspect", self.READ, self.blocked)
+        shapes = ["async page => 1", "", [], {"code": "async (page) => 1"}]
+        called = self.session("inspect", self.READ[:1] + [self.raw("browser_run_code_unsafe", shape) for shape in shapes]
+                              + self.READ[1:], self.blocked)
+        for error, text in called["answers"][1:5]:
+            self.assertTrue(error)
+            self.assertTrue(text.startswith("REFUSED " + browser_guard.REMOVED_CODE + ":"), text)   # as the removed tool
+        self.assertNotIn("browser_run_code_unsafe", called["child"])                               # never forwarded
+        self.assertEqual([(row["decision"], row.get("code")) for row in called["audit"] if row.get("tool") == "browser_run_code_unsafe"],
+                         [("REFUSED", browser_guard.REMOVED_CODE)] * 4)
+        self.assertEqual(called["summary"]["state"], "COMPLETE", called["summary"])                # the session stands
+        self.assertEqual(self.comparable(called), self.comparable(plain))                          # same result, same count
+        self.assertEqual(called["events"], plain["events"])                                        # nothing against the job
+        # Controls: another tool with malformed arguments is still malformed (and, being a tool call the
+        # guard refused, an ordinary failed step); a well-formed click passes unchanged.
+        click = {"element": "Submit application", "target": "e1"}
+        control = self.session("inspect", self.READ + [self.raw("browser_click", []), ("browser_click", click)], self.blocked)
+        self.assertTrue(control["answers"][2][1].startswith("REFUSED " + browser_guard.MALFORMED_CODE + ":"))
+        self.assertEqual(control["answers"][3][0], False)
+        self.assertEqual(control["child"].count("browser_click"), 1)
+        forwarded = [row for row in control["audit"] if row["decision"] == "FORWARDED" and row["tool"] == "browser_click"]
+        self.assertEqual([row["arguments"] for row in forwarded], [click])
+
+    def test_a_submit_that_called_it_first_is_still_the_one_confirmed_submission(self):
+        submit = [("arm", {"observed_form_revision": "fixture-form-v1"}), ("browser_snapshot", {}),
+                  ("browser_click", {"element": "Submit application", "target": "e1"}), ("browser_snapshot", {})]
+        outcomes = []
+        for steps in (submit, [self.RUN_CODE] + submit):
+            fixture, request_id = submit_fixture(self)
+            seen = self.session("submit", steps, lambda d, r, c: confirmed_output(d, r, c, "Submit application"),
+                                fixture, request_id)
+            self.assertEqual(seen["summary"]["state"], "COMPLETE", seen["summary"])
+            self.assertEqual(seen["child"].count("browser_click"), 1)                        # exactly one submit
+            self.assertIs(seen["result"]["acknowledged"], True)
+            self.assertEqual(seen["result"]["confirmation_text"], "Submit application")
+            outcomes.append((seen["result"], seen["events"]))
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_a_trace_showing_it_as_run_or_another_unauthorized_tool_still_fails_the_session(self):
+        def ran(trace):                                    # a forged trace: the call shown as having run
+            for entry in trace:
+                if entry["item"].get("tool") == "browser_run_code_unsafe":
+                    entry["item"].update(status="completed", result={
+                        "content": [{"type": "text", "text": '### Result\n"ok"'}], "structured_content": None})
+        forged = self.session("inspect", self.READ[:1] + [self.RUN_CODE] + self.READ[1:], self.blocked, forge=ran)
+        self.assertEqual((forged["summary"]["state"], forged["summary"]["code"]), ("FAILED", "APPLICATION_UNAUTHORIZED_TOOL"))
+        other = self.session("inspect", self.READ + [("arm", {"observed_form_revision": "x"})], self.blocked)   # arm in a read
+        self.assertEqual((other["summary"]["state"], other["summary"]["code"]), ("FAILED", "APPLICATION_UNAUTHORIZED_TOOL"))
+
+    def test_a_step_that_started_and_was_never_seen_refused_fails_the_finished_session(self):   # D3
+        started = {"type": "item.started", "item": {"type": "mcp_tool_call", "id": "rc1", "server": "browser",
+                                                    "tool": "browser_run_code_unsafe", "arguments": {"code": "x"},
+                                                    "status": "in_progress"}}
+        self.assertIs(application_browser.tool_event(engines.CODEX.item_event(started["item"], "started"), False), False)
+
+        def never_completed(trace):
+            trace[:] = [entry for entry in trace if entry["item"].get("tool") != "browser_run_code_unsafe"] + [started]
+        steps = self.READ[:1] + [self.RUN_CODE] + self.READ[1:]
+        unseen = self.session("inspect", steps, self.blocked, forge=never_completed)
+        self.assertEqual((unseen["summary"]["state"], unseen["summary"]["code"]), ("FAILED", "APPLICATION_UNAUTHORIZED_TOOL"))
+
+        def started_then_refused(trace):                   # as a real engine writes it: started, then the refusal
+            at = next(index for index, entry in enumerate(trace) if entry["item"].get("tool") == "browser_run_code_unsafe")
+            trace.insert(at, {"type": "item.started", "item": dict(trace[at]["item"], status="in_progress", result=None)})
+        seen = self.session("inspect", steps, self.blocked, forge=started_then_refused)
+        self.assertEqual(seen["summary"]["state"], "COMPLETE", seen["summary"])
+
+    def test_the_live_monitor_does_not_stop_a_session_at_the_refused_call(self):
+        refusal = {"content": [{"type": "text", "text": "REFUSED %s: %s" % (browser_guard.REMOVED_CODE, browser_guard.REMOVED_TEXT)}],
+                   "structured_content": None}                               # the Codex shape: no isError
+        item = {"type": "mcp_tool_call", "id": "c2", "server": "browser", "tool": "browser_run_code_unsafe",
+                "arguments": {"code": "async (page) => 1"}}
+        lines = [json.dumps({"type": "item.started", "item": dict(item, status="in_progress")}),
+                 json.dumps({"type": "item.completed", "item": dict(item, status="failed", result=refusal)}),
+                 json.dumps({"type": "item.completed", "item": {"type": "mcp_tool_call", "id": "c3", "server": "browser",
+                                                                "tool": "browser_snapshot", "arguments": {}, "status": "completed",
+                                                                "result": {"content": [{"type": "text", "text": "ok"}]}}})]
+        script = "for line in %r:\n    print(line, flush=True)" % lines
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(application_browser.browser_runtime, "require"), \
+                mock.patch.object(application_browser.browser_runtime, "settings", return_value={"isolated": True}), \
+                mock.patch.object(application_browser, "command", return_value=[sys.executable, "-c", script]), \
+                mock.patch.object(application_browser.reply_worker, "_environment", return_value={}):
+            application_browser.execute({}, "prompt", Path(root), 30)          # runs to its end: nothing raised
+            self.assertEqual(len((Path(root) / "trace.jsonl").read_text().splitlines()), 3)
+        ran = lines[:1] + [json.dumps({"type": "item.completed", "item": dict(item, status="completed", result={
+            "content": [{"type": "text", "text": "1"}], "structured_content": None})})]
+        script = "import time\nfor line in %r:\n    print(line, flush=True)\ntime.sleep(60)" % ran
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(application_browser.browser_runtime, "require"), \
+                mock.patch.object(application_browser.browser_runtime, "settings", return_value={"isolated": True}), \
+                mock.patch.object(application_browser, "command", return_value=[sys.executable, "-c", script]), \
+                mock.patch.object(application_browser.reply_worker, "_environment", return_value={}), \
+                self.assertRaisesRegex(ValueError, "APPLICATION_UNAUTHORIZED_TOOL"):
+            application_browser.execute({}, "prompt", Path(root), 30)          # shown as run: stopped at once
 
 
 class FrozenCommandTests(unittest.TestCase):
@@ -469,11 +587,41 @@ class TraceReaderTests(unittest.TestCase):
     def test_browser_code_is_checked_as_live_checked_cua_repl_code(self):
         with self.assertRaisesRegex(ValueError, "APPLICATION_UNSUPPORTED_BROWSER_CODE"):
             application_browser.tool_item(self.item("browser_evaluate", function="() => 1"), True)
-        for code in ("async (page) => { await fetch('https://x.test') }", "async (page) => eval('1')"):
-            with self.assertRaisesRegex(ValueError, "APPLICATION_UNSUPPORTED_BROWSER_CODE"):
-                application_browser.tool_item(self.item("browser_run_code_unsafe", code=code), True)
-        self.assertTrue(application_browser.tool_item(
-            self.item("browser_run_code_unsafe", code="async (page) => page.title()"), True))
+        # browser_run_code_unsafe is no session's tool (owner, 2026-11-12). A call the guard refused never
+        # ran: a non-event (not counted, the session goes on). Shown with any other outcome it is
+        # unauthorized, whatever its code, so a forged or malformed trace fails closed.
+        refusal = "REFUSED %s: %s" % (browser_guard.REMOVED_CODE, browser_guard.REMOVED_TEXT)
+        base = self.item("browser_run_code_unsafe", code="async (page) => page.title()")
+
+        def codex(text, status, **more):       # a step as Codex records it: content and structured_content, no isError
+            content = [] if text is None else [{"type": "text", "text": block} for block in ([text] if isinstance(text, str) else text)]
+            return dict(base, status=status, error=None, result={"content": content, "structured_content": None}, **more)
+        non_events = {"the guard's refusal, Codex shape": codex(refusal, "failed"),
+                      "the guard's refusal with an MCP isError": dict(codex(refusal, "failed"), result={
+                          "content": [{"type": "text", "text": refusal}], "isError": True}),
+                      "the engine rejected the call itself": dict(base, status="failed", result=None, error={"message": "unknown tool"})}
+        failures = {"it ran": codex('### Result\n"Apply"', "completed"),
+                    "the marker on an answer that is not an error": codex(refusal, "completed"),
+                    "an errored answer with nothing in it": codex(None, "failed"),
+                    "an errored answer with other words": codex("failed", "failed"),
+                    "another refusal code": codex("REFUSED SESSION_SECRET_REFUSED: x", "failed"),
+                    "the marker not at the start": codex("x " + refusal, "failed"),
+                    "the marker only in a second block": codex(["hello", refusal], "failed"),
+                    "no answer and no error": dict(base, status="completed"),
+                    "no answer, no error, failed": dict(base, status="failed", result=None, error=None),
+                    "the same tool name on another server": dict(codex(refusal, "failed"), server="evil")}
+        for submit, investigate in ((True, False), (False, False), (False, True)):
+            for name, item in non_events.items():
+                self.assertIs(application_browser.tool_event(engines.CODEX.item_event(item, "completed"), submit, investigate),
+                              False, name)
+            for name, item in failures.items():
+                with self.assertRaisesRegex(ValueError, "APPLICATION_UNAUTHORIZED_TOOL", msg=name):
+                    application_browser.tool_event(engines.CODEX.item_event(item, "completed"), submit, investigate)
+        # A different tool whose answer starts with the marker is what it was: unknown ones fail, known ones count.
+        marked = {"content": [{"type": "text", "text": refusal}], "structured_content": None}
+        with self.assertRaisesRegex(ValueError, "APPLICATION_UNAUTHORIZED_TOOL"):
+            application_browser.tool_item(dict(self.item("browser_magic"), status="failed", result=marked), False)
+        self.assertIs(application_browser.tool_item(dict(self.item("browser_snapshot"), status="failed", result=marked), False), True)
         self.assertTrue(application_browser.tool_item(self.item("browser_type", target="e1", text="fetch eval"), True))
 
     def test_investigate_reads_cannot_act_on_a_page_or_leave_public_urls(self):
@@ -482,8 +630,6 @@ class TraceReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "APPLICATION_INVESTIGATION_READ_ONLY"):
                 application_browser.tool_item(self.item(tool, target="e1"), False, True)
             self.assertTrue(application_browser.tool_item(self.item(tool, target="e1"), True, False))
-        with self.assertRaisesRegex(ValueError, "APPLICATION_INVESTIGATION_READ_ONLY"):
-            application_browser.tool_item(self.item("browser_run_code_unsafe", code="async (page) => page.click('a')"), False, True)
         for url in ("https://127.0.0.1/jobs", "http://careers.example/jobs", "https://aiapply.co/jobs"):
             with self.assertRaises(ValueError):
                 application_browser.tool_item(self.item("browser_navigate", url=url), False, True)
@@ -607,8 +753,7 @@ class RealBrowserTests(unittest.TestCase):
             request = request_at(directory)
             resume = request["payload"]["resume"]
             seen["staged"] = resume
-            client = Client(browser_runtime.guard_command(config, directory, "submit", config["_application_guard_claim"],
-                                                          config["_application_human_check"]), cwd=directory)
+            client = Client(browser_runtime.guard_command(config, directory, "submit", config["_application_guard_claim"]), cwd=directory)
             try:
                 client.call("browser_navigate", {"url": self.base + "application-form.html?questions=%d" % questions})
                 nodes = client.nodes()

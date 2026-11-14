@@ -10,6 +10,16 @@
   {% if j.problem %}<p class="app-problem">{{ j.problem }}</p>{% endif %}
   {% if j.todo %}<p class="app-todo{% if j.attention %} app-todo-you{% endif %}">{{ j.todo }}{% if j.todo_href %} <a class="button app-fix" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}</p>{% endif %}
 {% endmacro %}
+{% macro try_again(j, where="") %}
+  {# E15.T2: a job closed while it waited on a sign-in or a human check can be reopened (access_cards.try_again).
+     On the list it sits on the collapsed row (owner, 2026-11-14): the row's line says to press it. #}
+  {% if j.try_again %}
+  <form class="app-try{{ ' ' + where if where }}" method="post" action="/access/try-again" hx-post="/access/try-again" hx-target="this" hx-swap="outerHTML">
+    <input type="hidden" name="job_key" value="{{ j.key }}">
+    <button class="button button-quiet" type="submit">{{ j.try_again }}</button>
+  </form>
+  {% endif %}
+{% endmacro %}
 {% macro same_job(j, v) %}{% if j.closing and j.closing.other_key %}Same job as: <a href="{{ v.link(job=j.closing.other_key) }}">{{ j.closing.other }}</a>{% else %}Same job as an earlier application{% endif %}{% endmacro %}
 {% macro closing_block(j, v) %}
   {% if j.closed %}<p class="app-closed"><strong>Why it closed:</strong> {{ j.closed }}
@@ -23,6 +33,7 @@
 {% set na = v.unavailable %}
 {% if v.unreadable %}<p class="note note-warning app-unreadable" role="status">Sidedoor couldn't read its records.</p>{% endif %}
 
+{% if tried and tried.text %}<p class="note note-{{ tried.tone }}" role="status">{{ tried.text }}</p>{% endif %}
 {% if v.job or v.detail_missing %}
 <p><a href="{{ v.link() }}">Back to all applications</a></p>
 {% if v.job == na %}
@@ -42,6 +53,7 @@
   </dl>
   {{ next_steps(j) }}
   {{ closing_block(j, v) }}
+  {{ try_again(j) }}
   {% if j.receipt %}<h3>Receipt</h3>{{ receipt_block(j.receipt, v) }}{% endif %}
 
   <h3>Eligibility</h3>
@@ -119,8 +131,9 @@
         {% if j.closed and not j.duplicate %}<span class="app-summary-todo app-summary-closed">{{ j.closed }}</span>{% endif %}
         {% if j.duplicate %}<span class="app-summary-todo app-summary-closed">{{ same_job(j, v) }}</span>{% endif %}
         {% if j.reason %}<span class="app-summary-todo app-summary-reason muted">{{ j.reason }}</span>{% endif %}
-        {% if j.todo and (j.needs_you or not j.closed) %}<span class="app-summary-todo{% if j.attention %} app-todo-you{% endif %}">{{ j.todo }}</span>{% endif %}
-        {% if j.todo_href in ("/approvals#questions", "/approvals#applications") %}<a class="button app-answer" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}
+        {% if j.todo and j.todo != j.closed and (j.needs_you or not j.closed) %}<span class="app-summary-todo{% if j.attention %} app-todo-you{% endif %}">{{ j.todo }}</span>{% endif %}
+        {% if j.todo_href in ("/approvals#questions", "/approvals#applications", "/approvals#sign-ins") %}<a class="button app-answer" href="{{ j.todo_href }}">{{ j.todo_label }}</a>{% endif %}
+        {{ try_again(j, "app-try-row") }}
       </summary>
       <div class="app-body">
         <p>{% if j.url %}<a href="{{ j.url }}" rel="noopener noreferrer" target="_blank">Open the posting</a> · {% endif %}<a href="{{ v.link(company=j.employer, page=None) }}">More at {{ j.company }}</a></p>

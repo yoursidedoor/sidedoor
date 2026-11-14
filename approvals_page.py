@@ -17,6 +17,8 @@ Five lists, each read from the record the rest of the product already writes:
   (`approvals.application_control`); Approve saves exactly what the card shows
   (`approvals.approve_application`) and the job is submitted on the next applications pass, which the
   scheduler is asked to start now (`scheduler_loop.run_soon`); Reject closes it (`reject_application`).
+- Sign-ins and human checks (E15.T2): the applications waiting on the user behind a sign-in or a human
+  check (`access_cards.view`), every card; their buttons are routes in `dashboard.py` (POST /access/...).
 - Not sent yet: approved messages a sending rule then refused (`approvals.refused_after_approval`;
   owner, 2026-10-22, D3), with the reason in plain words and [Dismiss] (`approvals.dismiss_refused`).
 - Questions for you: `user_decisions` PENDING and unexpired (not the transport test), answered through
@@ -47,7 +49,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 import applications
@@ -73,6 +75,23 @@ AUDIT_SCAN = 50             # DECISION rows read per card (newest first) to find
 PURPOSE_WORDS = {"INVITE": "Invitation note", "PREPARE_CAMPAIGN": "Invitation note",
                  "INITIAL": "First message", "FIRST_MESSAGE": "First message after they accepted",
                  "FOLLOWUP": "Follow-up", "URGENT": "Follow-up", "REPLY": "Reply"}
+# E14 (owner, 2026-11-10): one label at a time. (URL value, chip words, the message purposes it narrows
+# Messages waiting to); a label without purposes is a section of its own. Any other value reads as All.
+LABELS = (("all", "All", None),
+          ("invitation-notes", "Invitation notes", ("INVITE", "PREPARE_CAMPAIGN")),
+          ("first-messages", "First messages", ("INITIAL", "FIRST_MESSAGE")),
+          ("follow-ups", "Follow-ups", ("FOLLOWUP", "URGENT")),
+          ("replies", "Replies", ("REPLY",)),
+          ("applications", "Applications", None),
+          # E15.T2 (owner, 2026-11-13): the applications waiting on a sign-in or a human check; its
+          # number is the cards that need the user, a site's group counted once (`access_cards.card_count`,
+          # the same number as Overview's `sign_ins`).
+          ("sign-ins", "Sign-ins and human checks", None),
+          ("questions", "Questions", None), ("notes", "Notes", None))
+LABEL_PURPOSES = {value: purposes for value, _, purposes in LABELS if purposes}
+# "Send these 7 replies" under a message label (E14.T3): (one, several).
+SEND_WORDS = {"invitation-notes": ("invitation note", "invitation notes"), "first-messages": ("first message", "first messages"),
+              "follow-ups": ("follow-up", "follow-ups"), "replies": ("reply", "replies")}
 VERDICT_WORDS = {"READY": "Ready to send", "BLOCKED": "Not ready", "UNKNOWN": "Could not decide"}
 # Plain words for the sending rules that most often refuse an approved message; any other code shows
 # the generic line (codes never show).
@@ -88,6 +107,7 @@ GATE_WORDS = {
     "EXCLUDED_CONTACT": "This person is on your exclusion list.",
     "VERIFIED_MESSAGE_ALREADY_SENT": "A message to this person was already sent.",
     "OTHER_OUTREACH_ACTION_RESERVED": "Another message to this person is already on its way.",
+    "FOLLOWUP_TOO_LATE": "This follow-up was due more than 14 days ago, so it was not sent.",   # engagement.FOLLOWUP_SEND_WINDOW_DAYS
 }
 # Owner-approved copy, 2026-11-06. A read that failed for a moment (outreach.cycle writes
 # INSPECTION_RETRY_WAIT; PROVIDER_SNAPSHOT_INCOMPLETE waits on a later read too), a LinkedIn session
@@ -108,6 +128,7 @@ FORM_NOT_READABLE_WORDS = ("Sidedoor cannot read this application form. Make it 
                            "application site in Sidedoor's browser, or check the form loads there), then answer with "
                            "a short note and Sidedoor reads the form again.")
 BUSY = "Sidedoor is busy with another task. Try again in a moment."
+FLASH_COOKIE = "sidedoor_approvals_flash"   # a plain "Send these N" post's result line, shown once after its redirect
 
 
 def _json(text):
@@ -181,7 +202,8 @@ def judge_verdict(database, action_id, evidence, held_decision=None):
             decision = record.get("decision")
             if record.get("observation_id") == reference and isinstance(decision, dict):
                 verdict = decision.get("decision") or verdict
-                reason = decision.get("reason") if isinstance(decision.get("reason"), str) else None
+                # The judge's advisory type-fit note (E17) stays in the record and is not shown.
+                reason = approvals.without_type_fit_note(decision.get("reason")) if isinstance(decision.get("reason"), str) else None
                 break
     words = VERDICT_WORDS.get(str(verdict or "").upper()) if verdict else None
     return {"verdict": words or "Not on record", "reason": reason}
@@ -256,11 +278,31 @@ def _role_line(title, company):
     return networking_page.role_line(title, company)
 
 
-def messages(database, page=1, only=None):
-    """(cards, total, page, unreadable): one page of waiting messages (or just `only`)."""
-    items, unreadable = approvals.waiting_read(database)
+def label_of(params):
+    """The page's label from a request's query; a missing or unknown one is "all"."""
+    value = params.get("label")
+    return value if value in {name for name, _, _ in LABELS} else "all"
+
+
+def shows(label, section):
+    """True when this section is listed under this label: every section under All, Messages waiting
+    under a message label, else only the label's own section."""
+    return label == "all" or section == ("messages" if label in LABEL_PURPOSES else label)
+
+
+def labelled(items, label):
+    """The waiting messages under this label (all of them unless it is a message label)."""
+    purposes = LABEL_PURPOSES.get(label)
+    return items if purposes is None else [item for item in items if item["purpose"] in purposes]
+
+
+def messages(database, page=1, only=None, label="all", read=None):
+    """(cards, total, page, unreadable): one page of waiting messages under `label` (or just `only`);
+    `read` is a `waiting_read` already made, so the chips count the same list."""
+    items, unreadable = read if read is not None else approvals.waiting_read(database)
     if only is not None:
         return [card_of(database, item) for item in items if item["action_id"] == only], 0, 1, unreadable
+    items = labelled(items, label)   # before the page is cut (E14.T2)
     pages = max(1, -(-len(items) // PAGE_SIZE))
     page = min(max(1, page), pages)
     return [card_of(database, item) for item in items[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]], len(items), page, unreadable
@@ -277,11 +319,13 @@ def pages_of(params):
     return found
 
 
-def query_of(pages, **change):
-    """The query string for these pages with `change` applied ({list: number}); page 1 is left out."""
+def query_of(pages, label="all", **change):
+    """The query string for this label and these pages with `change` applied ({list: number}); All and
+    page 1 are left out."""
     from urllib.parse import urlencode
     merged = dict(pages or {}, **change)
-    return urlencode([(PAGE_PARAMS[name], merged[name]) for name in PAGE_PARAMS if merged.get(name, 1) > 1])
+    return urlencode(([("label", label)] if label != "all" else [])
+                     + [(PAGE_PARAMS[name], merged[name]) for name in PAGE_PARAMS if merged.get(name, 1) > 1])
 
 
 def _clamp(page, total, size):
@@ -302,7 +346,8 @@ def _hold_line(database, action_id):
     error = row[0] if row and isinstance(row[0], str) else ""
     if error in {cls.code for cls in (unipile_port.LicenseHold, unipile_port.LicenseRequired, unipile_port.LicenseRefused)}:
         return LICENSE
-    if (error in {cls.code for cls in (unipile_port.SetupHold, unipile_port.LinkedInNotConnected, unipile_port.SenderNotConfigured)}
+    if (error in {cls.code for cls in (unipile_port.SetupHold, unipile_port.LinkedInNotConnected, unipile_port.SenderNotConfigured,
+                                        unipile_port.LinkedInDisconnected)}
             or error.split(":")[0] == "SessionInvalid"):
         return RECONNECT
     return None
@@ -366,6 +411,15 @@ def question_count(database, now):
                             (int(now.timestamp() * 1000),)).fetchone()[0]
 
 
+def _profile_site(field, role):
+    """The host a site-profile question came from (the job's own address), else None."""
+    import access_step
+    import site_sessions
+    if not isinstance(field, str) or not field.startswith(access_step.FIELD_PREFIX):
+        return None
+    return site_sessions.site_key(role.get("url") if isinstance(role, dict) else None)
+
+
 def questions(database, now, only=None, page=1):
     if not _has(database, "user_decisions"):
         return []
@@ -403,6 +457,9 @@ def questions(database, now, only=None, page=1):
                       "control": answer_control(kind, options, question, operational), "options": options,
                       "url": role.get("url") if str(role.get("url") or "").startswith("https://") else None,
                       "question": question, "answer_type": kind,
+                      # A question about a job site's own profile (E15): the site chose its words, so the card
+                      # names the site they came from beside the job.
+                      "site": _profile_site(field, role),
                       "choices": [choice for choice in choices if isinstance(choice, str)] if isinstance(choices, list) else [],
                       "required": bool(required) and not operational, "hint": None if operational else hint,
                       "site_reason": None if operational else site_reason,
@@ -584,13 +641,13 @@ def notice_view(database, event_key, message, at):
     job = _job_of(database, key)
     if job is None:
         if ":HUMAN_CHECK:" in key:
-            return dict(found, text="Sidedoor's browser asked for a human check (a CAPTCHA) and waited for you to tick it.")
+            return dict(found, text="A site asked for a human check (a CAPTCHA) while Sidedoor was applying.")
         return dict(found, text=cleaned(message))
     rest = key[len(job[0]) + 1:]
     if rest == "submitted":
         text = "Application submitted and confirmed."
     elif rest.startswith("HUMAN_CHECK:"):
-        text = "Sidedoor's browser asked for a human check (a CAPTCHA) and waited for you to tick it."
+        text = "A site asked for a human check (a CAPTCHA) while Sidedoor was applying."
     else:
         text = _code_words(rest)
     return dict(found, text=_named(job) + ": " + text, href=_job_href(job[0]), link="See the application")
@@ -664,21 +721,31 @@ def _when(config):
     return lambda moment: overview_page.when(moment, now, zone) if moment else None
 
 
-def gather(database, config, page=1, pages=None):
+def gather(database, config, page=1, pages=None, label="all"):
     """Everything the page lists, one page of each list (`pages`: {list: number}, `pages_of`; `page`
-    is the messages' page). Each list has `paging`: {page, pages, total} counted by its own COUNT, so
-    "Page X of Y (N)" is the real total. `database` is a read-only connection or None (no file yet)."""
+    is the messages' page) under `label` (E14). Each list has `paging`: {page, pages, total} counted by
+    its own COUNT, so "Page X of Y (N)" is the real total; a list the label hides is not read, only
+    counted. `counts` are the chips' numbers, from the same reads. `database` is a read-only connection
+    or None (no file yet)."""
     now = dt.datetime.now(dt.timezone.utc)
+    label = label if label in {name for name, _, _ in LABELS} else "all"
     pages = dict(pages or {}, messages=(pages or {}).get("messages", page))
     paging = {}
     if database is None:
         found = {"messages": [], "total": 0, "page": 1, "unreadable": 0, "applications": [], "refused": [], "questions": [],
-                 "notes": [], "notices": []}
+                 "notes": [], "notices": [], "release": []}
         paging = {name: {"page": 1, "pages": 1, "total": 0} for name in PAGE_PARAMS}
+        counts = {name: 0 for name, _, _ in LABELS}
     else:
         import reply_tools
-        cards, total, number, unreadable = messages(database, pages["messages"])
-        found = {"messages": cards, "total": total, "page": number, "unreadable": unreadable}
+        read = approvals.waiting_read(database)
+        counts = {name: len(labelled(read[0], name)) for name in LABEL_PURPOSES}
+        cards, total, number, unreadable = messages(database, pages["messages"], label=label, read=read) \
+            if shows(label, "messages") else ([], len(read[0]), 1, read[1])
+        found = {"messages": cards, "total": total, "page": number, "unreadable": unreadable,
+                 # "Send these N ..." (E14.T3): every waiting message under a message label, not just this page.
+                 "release": [{"action_id": item["action_id"], "payload_hash": item["payload_hash"]}
+                             for item in labelled(read[0], label)] if label in LABEL_PURPOSES else []}
         paging["messages"] = {"page": number, "pages": max(1, -(-total // PAGE_SIZE)), "total": total}
         for name, count, load in (
                 ("applications", application_count, lambda number: applications_waiting(database, page=number)),
@@ -689,12 +756,28 @@ def gather(database, config, page=1, pages=None):
             total = count(database)
             number, last = _clamp(pages.get(name, 1), total, LIST_SIZES[name])
             paging[name] = {"page": number, "pages": last, "total": total}
-            found[name] = load(number)
+            found[name] = load(number) if shows(label, name) else []
+        counts.update(applications=paging["applications"]["total"], questions=paging["questions"]["total"],
+                      notes=paging["notes"]["total"])
+        counts["all"] = len(read[0]) + counts["applications"] + counts["questions"] + counts["notes"]
+    # E15.T2: the applications waiting on a sign-in or a human check, every card (no paging), listed
+    # under All and under their own chip. The chip counts what Overview's Needs you counts (the cards
+    # that need the user, `access_cards.card_count`, D6), and All includes them.
+    import access_cards
+    found["sign_ins"] = overview_page.section(overview_page.Reader(database), access_cards.view, config, _when(config))
+    counts["sign-ins"] = found["sign_ins"]["count"] if isinstance(found["sign_ins"], dict) else 0
+    counts["all"] += counts["sign-ins"]
     found["pages"] = paging["messages"]["pages"]
     found["paging"] = paging
     current = {name: paging[name]["page"] for name in PAGE_PARAMS}
-    found["query"] = query_of(current)
-    found["link"] = lambda name, number: query_of(current, **{name: number})
+    found["label"] = label
+    found["shows"] = lambda section: shows(label, section)
+    # A chip opens its label at page 1 of every list (E14.T2).
+    found["chips"] = [{"label": name, "words": words, "count": counts[name], "current": name == label,
+                       "href": "/approvals" + ("?" + query_of({}, name) if name != "all" else "")} for name, words, _ in LABELS]
+    found["send_words"] = SEND_WORDS.get(label)
+    found["query"] = query_of(current, label)
+    found["link"] = lambda name, number: query_of(current, label, **{name: number})
     found["when"] = _when(config)
     return found
 
@@ -732,9 +815,27 @@ def register(app, templates, layout, *, home, root, config):
         pages = pages_of(request.query_params)
         if page is not None:
             pages["messages"] = page
-        context["view"] = read(lambda database: gather(database, config, pages=pages))
+        label = label_of(request.query_params)
+        context["view"] = read(lambda database: gather(database, config, pages=pages, label=label))
+        # A plain (no JavaScript) "Send these N" post's result, carried over its redirect once.
+        carried = _json(urllib.parse.unquote(request.cookies.get(FLASH_COOKIE, ""))) if flash is None else None
+        if isinstance(carried, dict) and carried.get("tone") in ("success", "warning", "error") and isinstance(carried.get("text"), str):
+            flash = {"top": {"tone": carried["tone"], "text": carried["text"]}}
         context.update(review=approvals.install_mode(root, home) == approvals.REVIEW, flash=flash or {})
-        return templates.TemplateResponse(request, "approvals.html", context)
+        response = templates.TemplateResponse(request, "approvals.html", context)
+        if FLASH_COOKIE in request.cookies:
+            response.delete_cookie(FLASH_COOKIE, path="/approvals")
+        return response
+
+    # For the sign-in cards' actions (dashboard.py, E15.T2): the page for a plain post, and the chip
+    # row for an htmx answer.
+    app.state.approvals_view = view
+    app.state.approvals_filters = lambda request: filters_after(request)
+
+    def back(request):
+        """The Approvals page's own address for this request's label and pages."""
+        query = query_of(pages_of(request.query_params), label_of(request.query_params))
+        return "/approvals" + ("?" + query if query else "")
 
     def answer_card(request, kind, key, finder, template, flash, gone):
         """One card's action answered: with htmx that card alone, as it now stands and carrying
@@ -743,10 +844,23 @@ def register(app, templates, layout, *, home, root, config):
         found = read(lambda database: finder(database) if database is not None else [])
         if request.headers.get("hx-request") == "true":
             if found:
-                return HTMLResponse(templates.get_template(template).render(
-                    item=found[0], f=flash, v={"when": _when(config), "query": query_of(pages_of(request.query_params))}))
-            return HTMLResponse(templates.get_template("approvals_done.html").render(dom=dom(kind, key), f=gone))
+                card = templates.get_template(template).render(
+                    item=found[0], f=flash, v={"when": _when(config), "query": query_of(pages_of(request.query_params),
+                                                                         label_of(request.query_params))})
+            else:
+                card = templates.get_template("approvals_done.html").render(dom=dom(kind, key), f=gone)
+            return HTMLResponse(card + filters_after(request))
         return view(request, {"cards": {found[0]["dom"]: flash}} if found else {"top": gone})
+
+    def filters_after(request):
+        """The chip row and the bulk "Send these N" form as they now stand, swapped in beside a card's
+        htmx answer (hx-swap-oob) so their counts and list follow the action (E14 review 3)."""
+        pages, label = pages_of(request.query_params), label_of(request.query_params)
+        current = read(lambda database: gather(database, config, pages=pages, label=label))
+        parts = [templates.get_template("approvals_labels.html").render(view=current, oob=True)]
+        if current["shows"]("messages"):
+            parts.append(templates.get_template("approvals_release.html").render(view=current, oob=True))
+        return "".join(parts)
 
     def write(change):
         """`change(database)` on a write connection; None when the database stayed locked."""
@@ -823,6 +937,64 @@ def register(app, templates, layout, *, home, root, config):
         return await decide(request, lambda database, action_id, shown, text, reason:
                             approvals.reject(database, action_id, shown_payload_hash=shown, reason=reason))
 
+    @app.post("/approvals/messages/release")
+    async def release(request: Request):
+        """"Send these N replies" under a message label (E14.T3, owner 2026-11-10, (a)): approve exactly
+        the messages the button listed; the mode is not changed."""
+        form = await request.form()
+        shown = list(zip(form.getlist("action_id"), form.getlist("payload_hash")))
+        label = label_of(request.query_params)
+
+        def done(tone, text):
+            # The address stays the Approvals page (E14 walkthrough, 2026-11-12): with htmx the page's
+            # content is swapped in place and nothing is pushed; a plain post is redirected (303) to the
+            # page it came from, so a reload is a GET, and the result line rides along once in a cookie.
+            if request.headers.get("hx-request") == "true":
+                return view(request, {"top": {"tone": tone, "text": text}})
+            response = RedirectResponse(back(request), status_code=303)
+            response.set_cookie(FLASH_COOKIE, urllib.parse.quote(json.dumps({"tone": tone, "text": text})), max_age=60,
+                                httponly=True, samesite="strict", path="/approvals")
+            return response
+        if label not in LABEL_PURPOSES or not shown:
+            return done("error", "This page is out of date. Reload it and try again.")
+
+        def release_under_label(database):
+            # Only this label's cards are approved (E14 review 4): a posted row that is waiting under
+            # another label is not approved and counts as changed. A row no longer waiting is left to
+            # release_all, which reports it as already approved or changed.
+            purposes = LABEL_PURPOSES[label]
+            waiting = {item["action_id"]: item["purpose"] for item in approvals.waiting_read(database)[0]}
+            kept = [pair for pair in shown if pair[0] not in waiting or waiting[pair[0]] in purposes]
+            result = approvals.release_all(database, kept, automatic=False)
+            result["changed"].extend({"state": "CHANGED", "action_id": action_id, "payload_hash": payload_hash}
+                                     for action_id, payload_hash in shown if (action_id, payload_hash) not in kept)
+            return result
+        result = await run_in_threadpool(write, release_under_label)
+        if result is None:
+            return done("error", BUSY)
+        sent, changed = len(result["released"]), len(result["changed"])
+        too_long, empty, already = len(result["too_long"]), len(result["empty"]), len(result["already"])
+        text = ("Approved %d message%s. %s on the next round, through the usual sending checks."
+                % (sent, "s" if sent != 1 else "", "They go out" if sent != 1 else "It goes out")) if sent else "Nothing was approved."
+        # Each kind of message not approved gets its own plain sentence (E14 review 1-3).
+        if too_long:
+            text += " %d invitation note%s too long and %s not sent: shorten %s on its card." % (
+                too_long, "s are" if too_long != 1 else " is", "were" if too_long != 1 else "was", "each" if too_long != 1 else "it")
+        if empty:
+            text += " %d message%s empty and %s not sent: write %s on its card, or reject it." % (
+                empty, "s are" if empty != 1 else " is", "were" if empty != 1 else "was", "each" if empty != 1 else "it")
+        if already:
+            text += " %d %s already approved." % (already, "were" if already != 1 else "was")
+        if changed:
+            text += " %d changed since %s shown and %s not sent." % (changed, "they were" if changed != 1 else "it was",
+                                                                  "were" if changed != 1 else "was")
+        return done("success" if sent else "warning", text)
+
+    @app.get("/approvals/messages/release")
+    def release_opened(request: Request):
+        """The release address opened (an old tab, a pasted link): the Approvals page, same label."""
+        return RedirectResponse(back(request), status_code=303)
+
     @app.post("/approvals/refused/dismiss")
     async def dismiss(request: Request):
         form = await request.form()
@@ -856,9 +1028,9 @@ def register(app, templates, layout, *, home, root, config):
             import scheduler_loop
             scheduler_loop.run_soon("applications")
             return reply({}, {"tone": "success", "text": ("Approved. Sidedoor sends this email application on its next "
-                                                          "applications run, which starts now." if email else
+                                                          "round, which starts now." if email else
                                                           "Approved. Sidedoor submits this application with these answers "
-                                                          "on its next applications run, which starts now.")})
+                                                          "on its next round, which starts now.")})
         if state == "REJECTED":
             return reply({}, {"tone": "success", "text": "Rejected. This application will never be "
                                                          + ("sent." if email else "submitted.")})

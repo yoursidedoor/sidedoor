@@ -825,6 +825,21 @@ class AwaitingClosure(HomeMixin, unittest.TestCase):
         with self.database:
             self.database.execute("UPDATE outreach_actions SET state=? WHERE action_id=?", (approvals.AWAITING, action_id))
 
+    def test_a_recorded_stop_request_closes_the_waiting_draft_and_a_lift_does_not_bring_it_back(self):
+        """Owner, 2026-11-12: the reply model's stop request is recorded as the stop state, not as an event."""
+        profile = "https://www.linkedin.com/in/mock-person"
+        self.held("opted-2", profile)
+        identity = engagement.identity_keys(self.database, profile)[0]
+        with self.database:
+            self.assertEqual("RECORDED", engagement.apply_stop_request(self.database, profile, identity, True, "heyreach", "stop-1"))
+        outreach.cycle(self.database, self.config, self.adapter, self.now)
+        row = self.database.execute("SELECT state,result FROM outreach_actions WHERE action_id='opted-2'").fetchone()
+        self.assertEqual(("CLOSED", "OPTED_OUT"), (row[0], json.loads(row[1])["closed_while_awaiting_approval"]["reason"]))
+        with self.database:
+            self.assertEqual("LIFTED", engagement.apply_stop_request(self.database, profile, identity, False, "heyreach", "again-1"))
+        outreach.cycle(self.database, self.config, self.adapter, self.now)
+        self.assertEqual("CLOSED", self.database.execute("SELECT state FROM outreach_actions WHERE action_id='opted-2'").fetchone()[0])
+
     def test_closed_and_opted_out_people_leave_approvals(self):
         self.held("closed-1", "https://www.linkedin.com/in/closed-person")
         self.held("opted-1", "https://www.linkedin.com/in/mock-person")

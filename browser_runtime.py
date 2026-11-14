@@ -44,16 +44,35 @@ MCP_CLI = Path("node_modules") / "@playwright" / "mcp" / "cli.js"
 LAUNCH_CONFIG = {"browser": {"launchOptions": {"ignoreDefaultArgs": ["--enable-automation", "--use-mock-keychain"]}}}
 STARTUP_TIMEOUT_SECONDS = 60
 TOOL_TIMEOUT_SECONDS = 120
-# The CAPTCHA wait answers after HUMAN_CHECK_SECONDS (600); live gave its server 30 s more.
+# The long tool-call allowance, for a session given a hold (`human_check`, guard_command / codex_options,
+# and the Claude and Antigravity commands): a held call may answer after up to 600 s, plus 30 s. Ordinary
+# sessions are not given one (E16.T1) and keep TOOL_TIMEOUT_SECONDS; today only support_email passes it.
 HUMAN_CHECK_TOOL_TIMEOUT_SECONDS = 630
+START_URL_CONFIG_KEY = "_application_start_url"   # an attended submit's start page (application_browser.consume)
 GUARD_AUDIT = "guard.jsonl"
+# Written by the guard beside its audit when it stops its own session (browser_guard.Proxy.stop_session:
+# the page could not be told the installed Chrome's own user agent, client hints and screen). The session's
+# launcher ends the session as a failed one on it (application_browser: SETUP_STOPPED_CODE, with its own
+# sentence on the Applications page; outreach_history_browser).
+GUARD_STOPPED = "guard-stopped.json"
+SETUP_STOPPED_CODE = "APPLICATION_BROWSER_SETUP_STOPPED"
 OUTPUT_FOLDER = "browser"   # @playwright/mcp's --output-dir: snapshots, screenshots, find results
 UPLOAD_FOLDER = "uploads"   # the staged résumé and cover letters: read-only, the guard's one MCP root
 # Tools whose argument is code; the webmail read (setup's email check) neither lists nor approves them.
-CODE_TOOLS = ("browser_evaluate", "browser_run_code_unsafe")
+CODE_TOOLS = ("browser_evaluate",)   # browser_run_code_unsafe is no session's (browser_guard.REMOVED_TOOL)
 # The operations that are never offered the code tools: the webmail read, and the support email (owner,
 # 2026-10-25: a body written into the page's DOM by code may lose its line breaks or never reach the draft).
 CODE_FREE_OPERATIONS = ("webmail", "support_email")
+
+
+def guard_stopped(directory):
+    """The reason the guard stopped the session run in `directory` (GUARD_STOPPED), or None."""
+    try:
+        value = json.loads((Path(directory) / GUARD_STOPPED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    reason = value.get("reason") if isinstance(value, dict) else None
+    return reason if isinstance(reason, str) and reason else "STOPPED"
 
 
 class RuntimeMissing(Exception):
@@ -423,11 +442,11 @@ class BrowserProfileBusy(Exception):
 UNAVAILABLE_TABLE = """CREATE TABLE IF NOT EXISTS browser_unavailable (
     code TEXT PRIMARY KEY, source TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)"""
 UNAVAILABLE_WORDS = {
-    "RUNTIME_MISSING": "Sidedoor's browser component is missing, so applications and the contact finder can't run.",
-    "PROFILE_IN_USE": "Sidedoor's browser can't start because the Sidedoor Chrome window is open."}
+    "RUNTIME_MISSING": "Sidedoor's browser component is missing.",
+    "PROFILE_IN_USE": "The Sidedoor Chrome window is open."}
 UNAVAILABLE_TODO = {
-    "RUNTIME_MISSING": "Reinstall Sidedoor. It tries again on its own once the browser component is back.",
-    "PROFILE_IN_USE": "Close the Sidedoor Chrome window. Sidedoor tries again on its own."}
+    "RUNTIME_MISSING": "Reinstall Sidedoor.",
+    "PROFILE_IN_USE": "Close the Sidedoor Chrome window."}
 
 
 def _utc_now():
@@ -562,21 +581,25 @@ BACKGROUND_LAUNCH_SECONDS = 60
 # position and as the "normal" bounds the guard parks a window at before minimizing it: whenever Chrome
 # un-minimizes a window on its own (a new tab or a tab select activates it) only the clamped strip
 # shows until the next call minimizes it again, never a full window over the user's work. Pages still
-# lay out at WINDOW_SIZE. The CAPTCHA wait un-minimizes it on-screen and in front, then minimizes it.
+# lay out at WINDOW_SIZE. Nothing un-minimizes it (E16.T1).
 OFFSCREEN_POSITION = (-32000, -32000)
 ONSCREEN_POSITION = (80, 60)
 WINDOW_SIZE = (1280, 900)
 WINDOW_SWITCHES = ("--window-position=%d,%d" % OFFSCREEN_POSITION, "--window-size=%d,%d" % WINDOW_SIZE)
-OFFSCREEN_WORDS = "Sidedoor's browser runs minimized in the Dock; it appears when it needs you."
-HEADLESS_WORDS = "Sidedoor's browser runs without a window; one appears only when a CAPTCHA needs you."
-MIXED_WORDS = ("Sidedoor's browser runs without a window (some jobs run it minimized in the Dock); "
-               "it appears when it needs you.")
+# E16.T1: no window appears for a human check; the job waits under Needs you (access_outcomes). Said
+# only of a check met before the application is sent. One met while confirming a sent application has
+# a card too (confirm_read), but a check that fires as Submit is pressed has none until a confirming
+# read meets it, so the sentence does not claim every state.
+CHECK_WORDS = "When a site asks for a human check before an application is sent, the job waits for you under Needs you."
+OFFSCREEN_WORDS = "Sidedoor's browser runs minimized in the Dock. " + CHECK_WORDS
+HEADLESS_WORDS = "Sidedoor's browser runs without a window. " + CHECK_WORDS
+MIXED_WORDS = "Sidedoor's browser runs without a window (some jobs run it minimized in the Dock). " + CHECK_WORDS
 # Headless (owner, 2026-10-24: "sometimes the browser still comes to the front and doesn't return me to my
 # last screen", option A): on macOS each operation named in config["browser_driver"]["headless_operations"]
 # (default: every one) runs Sidedoor's Chrome in Chrome's own headless mode (--headless=new) on the same
 # profile, so it has no window and cannot come to the front; the minimized window and the focus keeper
-# (FG2 = a) run only for the operations left out (the per-operation fallback) and for the CAPTCHA wait,
-# which reopens the same profile headed for the owner's tick (browser_guard.Proxy.show_headed). The page
+# (FG2 = a) run only for the operations left out (the per-operation fallback). No session is reopened in
+# a window (E16.T1: a human check ends the session; the reopen for the owner's tick is retired). The page
 # sees the installed Chrome's own headed user agent (`headed_user_agent`, from its version: new headless
 # would otherwise say "HeadlessChrome"), and navigator.webdriver stays false as in the headed launch
 # (Chrome sets it under --headless; Blink's documented AutomationControlled switch turns it off).
@@ -598,8 +621,26 @@ AUTOMATION_SWITCH = "--disable-blink-features=AutomationControlled"
 # by Chrome itself); only the major version comes from the installed Chrome.
 MAC_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/%s.0.0.0 Safari/537.36")
+# Chrome's reduced user agent on Windows (Chrome itself freezes the OS part at "Windows NT 10.0; Win64; x64"
+# on every Windows it runs on, and the minor versions at 0.0.0); only the major version is the installed one.
+WINDOWS_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/%s.0.0.0 Safari/537.36")
 # False in the test suite (tests/profile_home.py): a test's guard never starts a real Chrome.
 BACKGROUND_ALLOWED = True
+
+
+def windows_host(platform=None):
+    return (platform or sys.platform).startswith("win")
+
+
+def hidden_launch(config=None, platform=None):
+    """Windows (owner, 2026-11-12, option A): True when Sidedoor may start the session's Chrome itself,
+    without a window, as macOS does: the real profile, headed (tests' isolated or headless sessions keep
+    Playwright's own launch). Windows has no minimized mode: a session is hidden (`headless_user_agent`)
+    or Playwright starts Chrome in a window as before."""
+    driver = settings(config)
+    return (BACKGROUND_ALLOWED and windows_host(platform) and not driver.get("isolated")
+            and not driver.get("headless"))
 
 
 def background_launch(config=None, platform=None):
@@ -626,9 +667,12 @@ def headless_operations(config=None):
     return tuple(item for item in value if isinstance(item, str))
 
 
-def chrome_version(binary):
-    """The installed Chrome's version ("141.0.7390.123") from its bundle's Info.plist, or None. Read
-    from the file only: Chrome is never started for it."""
+def chrome_version(binary, platform=None):
+    """The installed Chrome's version ("141.0.7390.123") from its bundle's Info.plist (Windows: from
+    chrome.exe's own version resource), or None. Read from the file only: Chrome is never started for it."""
+    if windows_host(platform):
+        version = portable.file_version(binary) if binary else None
+        return version if isinstance(version, str) and version.split(".")[0].isdigit() else None
     import plistlib
     app = chrome_app(binary or "")
     if app is None:
@@ -641,16 +685,19 @@ def chrome_version(binary):
     return version if isinstance(version, str) and version.split(".")[0].isdigit() else None
 
 
-def headed_user_agent(binary):
-    """The user agent the installed Chrome sends headed (macOS), or None when its version is unknown."""
-    version = chrome_version(binary)
-    return MAC_USER_AGENT % version.split(".")[0] if version else None
+def headed_user_agent(binary, platform=None):
+    """The user agent the installed Chrome sends headed (this system's), or None when its version is unknown."""
+    version = chrome_version(binary, platform)
+    template = WINDOWS_USER_AGENT if windows_host(platform) else MAC_USER_AGENT
+    return template % version.split(".")[0] if version else None
 
 
 def headless_user_agent(config, operation, platform=None, binary=None):
     """The user agent a headless session of `operation` presents, or None when the operation runs headed:
     not macOS's background launch, not in `headless_operations`, or the installed Chrome's version cannot
     be read (then it runs headed and minimized as before, never as "HeadlessChrome")."""
+    if hidden_launch(config, platform):
+        return (windows_told(config, operation, platform, binary) or {}).get("user_agent")
     if operation in SHOWN_OPERATIONS:
         if not (background_launch(config, platform) and (config or {}).get(HEADLESS_PHASE)):
             return None
@@ -662,17 +709,43 @@ def headless_user_agent(config, operation, platform=None, binary=None):
     return headed_user_agent(binary)
 
 
+def windows_told(config, operation, platform=None, binary=None):
+    """Windows: what a hidden session of `operation` tells a page, read from this machine once:
+    {user_agent, client_hints, screen}; or None when the session is not hidden: not Windows' hidden launch,
+    the operation is left out (or is the user's draft window outside its first phase), or any of the three
+    cannot be read. Playwright then starts Chrome in a window as before. `guard_command` decides with one
+    call, so the guard and @playwright/mcp can never disagree about who opens the profile (V10)."""
+    if not hidden_launch(config, platform):
+        return None
+    if operation in SHOWN_OPERATIONS:
+        if not (config or {}).get(HEADLESS_PHASE):   # the user's draft window; its first phase is hidden
+            return None
+    elif operation not in headless_operations(config):
+        return None
+    if binary is None:
+        import setup_steps
+        binary = setup_steps.chrome_path(platform)
+    if not binary:
+        return None
+    user_agent, hints, screen = headed_user_agent(binary, "win32"), windows_client_hints(binary), windows_display()
+    if not (user_agent and hints and screen):
+        return None
+    return {"user_agent": user_agent, "client_hints": hints, "screen": screen}
+
+
 def minimized(config=None, operation=None, platform=None):
     """True when the session's Chrome is headed and kept minimized with the focus keeper (FG2 = a): macOS's
     background launch for an operation that does not run headless (the per-operation fallback)."""
     return background_launch(config, platform) and headless_user_agent(config, operation, platform) is None
 
 
-def headless_switches(user_agent, scale=None):
+def headless_switches(user_agent, scale=None, window=None):
     """Chrome's switches for a headless session: new headless at the normal window size, presenting
     `user_agent`, with navigator.webdriver false as headed, and (given `scale`) the real display's
-    device pixel ratio (--force-device-scale-factor: the CSS viewport stays WINDOW_SIZE wide)."""
-    switches = (HEADLESS_SWITCH, "--window-size=%d,%d" % WINDOW_SIZE, "--user-agent=" + user_agent, AUTOMATION_SWITCH)
+    device pixel ratio (--force-device-scale-factor: the CSS viewport stays WINDOW_SIZE wide).
+    `window` (Windows, `hidden_window`): a window that fits the real display."""
+    switches = (HEADLESS_SWITCH, "--window-size=%d,%d" % (window or WINDOW_SIZE), "--user-agent=" + user_agent,
+                AUTOMATION_SWITCH)
     return switches + (("--force-device-scale-factor=%s" % _number(scale),) if scale else ())
 
 
@@ -707,6 +780,25 @@ def screen_metrics(value=None):
     """The headless session's screen: {width, height, scale}, the display never smaller than the window."""
     width, height, scale = value or display()
     return {"width": max(width, WINDOW_SIZE[0]), "height": max(height, WINDOW_SIZE[1]), "scale": scale}
+
+
+def windows_display(read=None):
+    """Windows: {width, height, scale} of the real primary display as a Chrome window on it reports them
+    (portable.primary_display), or None when it cannot be read. Never a fallback size and never enlarged
+    to the window: on a display smaller than WINDOW_SIZE the hidden window is made to fit (`hidden_window`),
+    as a visible window would be."""
+    value = (read or portable.primary_display)()
+    if not value:
+        return None
+    width, height, scale = value
+    return {"width": int(width), "height": int(height), "scale": scale}
+
+
+def hidden_window(screen):
+    """Windows: the hidden Chrome's window size, WINDOW_SIZE or the real display where that is smaller."""
+    if not screen:
+        return WINDOW_SIZE
+    return min(WINDOW_SIZE[0], int(screen["width"])), min(WINDOW_SIZE[1], int(screen["height"]))
 
 
 def window_words(config=None, binary=None):
@@ -795,6 +887,77 @@ def client_hints(binary, mac_version=None, machine=None):
             "mobile": False, "wow64": False}
 
 
+def visible_window(screen, platform=None, area=None):
+    """(left, top, width, height) of the window a person is shown. Windows: wholly inside the display's
+    work area (`area`, portable.work_area: the screen less the taskbar; when that cannot be read, the whole
+    display `screen`): WINDOW_SIZE at ONSCREEN_POSITION where that fits, else made smaller and moved up and
+    left. macOS, or nothing read: the usual ONSCREEN_POSITION and WINDOW_SIZE."""
+    if not windows_host(platform):
+        return (*ONSCREEN_POSITION, *WINDOW_SIZE)
+    area = area or portable.work_area() or ((0, 0, int(screen["width"]), int(screen["height"])) if screen else None)
+    if not area:
+        return (*ONSCREEN_POSITION, *WINDOW_SIZE)
+    left, top, wide, high = area
+    width, height = min(WINDOW_SIZE[0], wide), min(WINDOW_SIZE[1], high)
+    return (left + max(0, min(ONSCREEN_POSITION[0], wide - width)),
+            top + max(0, min(ONSCREEN_POSITION[1], high - height)), width, height)
+
+
+def windows_client_hints(binary, contract=None, machine=None):
+    """Windows: CDP userAgentMetadata for the installed Chrome in a window on this machine, or None when any
+    part cannot be read (the session then is not hidden). Brands and versions from chrome.exe's own version;
+    platformVersion as Chrome derives it on Windows 10 1809 and later, the UniversalApiContract version from
+    the registry ("19.0.0" on Windows 11 24H2; never the kernel's "10.0"); architecture from the machine
+    Windows itself runs on (`machine`, portable.native_machine: ARM64 "arm", x64 "x86", so the x64 Chrome on
+    Windows-on-ARM says "arm"; owner, V8); bitness "64". A chrome.exe that is not a 64-bit program (its
+    header) is not answered for."""
+    version = chrome_version(binary, "win32")
+    contract = contract if contract is not None else portable.api_contract_version()
+    machine = machine if machine is not None else portable.native_machine()
+    architecture = {portable.PE_AMD64: "x86", portable.PE_ARM64: "arm"}.get(machine)
+    if portable.pe_machine(binary) not in (portable.PE_AMD64, portable.PE_ARM64):
+        return None
+    if not version or not contract or architecture is None:
+        return None
+    major = version.split(".")[0]
+    return {"brands": brand_list(major, major), "fullVersionList": brand_list(major, version),
+            "fullVersion": version, "platform": "Windows", "platformVersion": "%d.%d.0" % tuple(contract),
+            "architecture": architecture, "bitness": "64", "model": "", "mobile": False, "wow64": False,
+            "formFactors": ["Desktop"]}   # what Chrome in a window on a PC sends (sec-ch-ua-form-factors)
+
+
+def local_open(url, timeout):
+    """Open `url` on this computer (Chrome's own DevTools port) with no proxy: never the system proxy or
+    HTTP_PROXY, which do not exempt 127.0.0.1 and would send the request off this computer and fail it."""
+    import urllib.request
+    return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout)
+
+
+def running_version(endpoint, opener=None):
+    """The version the Chrome on DevTools `endpoint` (this computer's, http://127.0.0.1:<port>) reports
+    itself (`/json/version`, its "Browser" value: "Chrome/157.0.8103.51"), or None when it cannot be read."""
+    import re
+    if not re.fullmatch(r"http://127\.0\.0\.1:\d{1,5}", endpoint or ""):
+        return None
+    try:
+        with (opener or local_open)(endpoint + "/json/version", timeout=5) as answer:
+            value = json.loads(answer.read(65536))
+    except (OSError, ValueError):
+        return None
+    product = value.get("Browser") if isinstance(value, dict) else None
+    match = re.fullmatch(r"[A-Za-z]+/(\d+\.\d+\.\d+\.\d+)", product) if isinstance(product, str) else None
+    return match.group(1) if match else None
+
+
+def windows_retold(hints, version):
+    """Windows: (user agent, client hints) for Chrome `version`, everything else of `hints` kept: what a
+    hidden session tells a page when the running Chrome is not the version read from chrome.exe before
+    the launch (an update that took effect as it started)."""
+    major = version.split(".")[0]
+    return WINDOWS_USER_AGENT % major, dict(hints, brands=brand_list(major, major),
+                                            fullVersionList=brand_list(major, version), fullVersion=version)
+
+
 def chrome_app(binary):
     """The .app bundle a Chrome binary path lives in (`.../Google Chrome.app/Contents/MacOS/...`), or None."""
     path = Path(binary)
@@ -804,23 +967,22 @@ def chrome_app(binary):
     return None
 
 
-def background_command(app, path, port=0, onscreen=False, url=None):
-    """`open -g -n -a <Chrome.app> --args ...`: Chrome on `path`, never activated, DevTools on a free port
-    (or on `port`: the CAPTCHA wait reopens a headless session's profile headed on the port
-    @playwright/mcp is attached to). `onscreen` (SHOWN_OPERATIONS): the window opens at
+def background_command(app, path, onscreen=False, url=None):
+    """`open -g -n -a <Chrome.app> --args ...`: Chrome on `path`, never activated, DevTools on a free port.
+    `onscreen` (SHOWN_OPERATIONS): the window opens at
     ONSCREEN_POSITION instead of the off-screen one. `url` (support_email's saved draft) is the first page
     instead of about:blank."""
     position = ("--window-position=%d,%d" % ONSCREEN_POSITION, WINDOW_SWITCHES[1]) if onscreen else WINDOW_SWITCHES
     return ["/usr/bin/open", "-g", "-n", "-a", str(app), "--args", "--user-data-dir=" + str(path),
             # Live parity (CK3, accepted): Playwright's own launch also opens a local DevTools port.
-            "--remote-debugging-port=%d" % port, *BACKGROUND_SWITCHES, *position, url or "about:blank"]
+            "--remote-debugging-port=0", *BACKGROUND_SWITCHES, *position, url or "about:blank"]
 
 
-def headless_command(binary, path, user_agent, scale=None):
+def headless_command(binary, path, user_agent, scale=None, window=None):
     """Chrome's own binary, headless, on `path` with DevTools on a free port. Started directly (no
     LaunchServices): a windowless Chrome has nothing to activate."""
     return [str(binary), "--user-data-dir=" + str(path), "--remote-debugging-port=0", *BACKGROUND_SWITCHES,
-            *headless_switches(user_agent, scale), "about:blank"]
+            *headless_switches(user_agent, scale, window), "about:blank"]
 
 
 def _fresh_port_file(path):
@@ -863,21 +1025,35 @@ def windows_launch(config=None, operation=None):
             and not driver.get("isolated") and not driver.get("headless"))
 
 
-def windows_command(binary, path, url=None):
-    """chrome.exe on `path`, on-screen at the normal size, DevTools on a free port (Playwright's switches,
-    as background_command)."""
+def windows_command(binary, path, url=None, screen=None):
+    """chrome.exe on `path`, on-screen at the normal size, DevTools on a free port, with Playwright's
+    switches, as background_command. `screen` (the real display): the window is made to lie wholly inside
+    its work area (`visible_window`)."""
+    left, top, width, height = visible_window(screen, "win32")
     return [str(binary), "--user-data-dir=" + str(path), "--remote-debugging-port=0", *BACKGROUND_SWITCHES,
-            "--window-position=%d,%d" % ONSCREEN_POSITION, WINDOW_SWITCHES[1], url or "about:blank"]
+            RESTORE_BUBBLE_SWITCH,
+            "--window-position=%d,%d" % (left, top), "--window-size=%d,%d" % (width, height), url or "about:blank"]
 
 
-def launch_windows(binary, path, popen=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, url=None):
+# Chrome's own switch for its "Restore pages? Chrome didn't shut down correctly" bubble: a window Sidedoor
+# shows a person never carries it (the Chrome before it on this profile was Sidedoor's own, ended by
+# Sidedoor). It changes nothing a site can see.
+RESTORE_BUBBLE_SWITCH = "--hide-crash-restore-bubble"
+
+
+def launch_windows(binary, path, popen=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, url=None,
+                   command=None, screen=None):
     """Windows: start Chrome on profile `path` from this process, in a Job Object of its own (never the
     worker's); return its DevTools endpoint (DevToolsActivePort, as launch_background). Raises OSError when
-    it cannot start or writes no port within `timeout` (that Chrome is then stopped)."""
+    it cannot start or writes no port within `timeout` (that Chrome is then stopped). `command`: the
+    command line instead of `windows_command` (launch_hidden_windows)."""
     import subprocess
     path = Path(path)
     port_file = _fresh_port_file(path)
-    chrome = (popen or subprocess.Popen)(windows_command(binary, path, url), stdin=subprocess.DEVNULL,
+    if command is None:   # a window: fitted to the real display (given, or read now)
+        command = windows_command(binary, path, url, screen if screen is not None else windows_display())
+    chrome = (popen or subprocess.Popen)(command,
+                                         stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                          **portable.worker_spawn_options(core=False))
     portable.contain(chrome)
@@ -886,6 +1062,18 @@ def launch_windows(binary, path, popen=None, timeout=BACKGROUND_LAUNCH_SECONDS, 
         portable.kill_tree(previous)   # an earlier one's job (that Chrome is gone: prepare_profile checked)
     _STARTED[str(path)] = chrome.pid
     return _await_port(port_file, path, timeout, sleep, clock)
+
+
+def launch_hidden_windows(binary, path, user_agent, screen=None, popen=None, timeout=BACKGROUND_LAUNCH_SECONDS,
+                          sleep=None, clock=None):
+    """Windows (owner, 2026-11-12, option A): start Chrome without a window on profile `path`
+    (`headless_command`, the window fitted to the real display), from this process and in a Job Object of
+    its own, as `launch_windows`: it ends with `end_session` here, when this process ends (the job's handle
+    closes: kill-on-close), and, started by a session's guard, with that session's own job. Returns its
+    DevTools endpoint; raises OSError as launch_windows does."""
+    command = headless_command(binary, Path(path), user_agent, (screen or {}).get("scale"),
+                               hidden_window(screen) if screen else None)
+    return launch_windows(binary, path, popen=popen, timeout=timeout, sleep=sleep, clock=clock, command=command)
 
 
 def chrome_running(path):
@@ -898,7 +1086,7 @@ def chrome_running(path):
 
 
 def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sleep=None, clock=None, stop=None,
-                      port=0, onscreen=False, url=None):
+                      onscreen=False, url=None):
     """Start Chrome on profile `path` without activating it; return its DevTools endpoint
     (`http://127.0.0.1:<port>`, from the DevToolsActivePort file Chrome writes into the profile).
     Raises OSError when `open` fails or no port appears within `timeout`; before that last raise the
@@ -907,11 +1095,211 @@ def launch_background(app, path, run=None, timeout=BACKGROUND_LAUNCH_SECONDS, sl
     import subprocess
     path = Path(path)
     port_file = _fresh_port_file(path)
-    done = (run or subprocess.run)(background_command(app, path, port, onscreen, url), stdin=subprocess.DEVNULL,
+    done = (run or subprocess.run)(background_command(app, path, onscreen, url), stdin=subprocess.DEVNULL,
                                    capture_output=True, text=True, timeout=timeout)
     if done.returncode != 0:
         raise OSError("open -g failed: " + (done.stderr or "").strip()[:200])
     return _await_port(port_file, path, timeout, sleep, clock, stop)
+
+
+CLOSE_WAIT_SECONDS = 10.0   # how long a Chrome asked to close itself is given before it is stopped
+
+
+def wait_chrome_gone(path, wait_seconds=CLOSE_WAIT_SECONDS, poll_seconds=0.1, clock=None, sleep=None):
+    """macOS and Linux: wait up to `wait_seconds` for the Chrome on profile `path` to exit by itself (it was
+    asked to close). True when none holds the profile any more. Never raises."""
+    import time
+    clock, sleep = clock or time.monotonic, sleep or time.sleep
+    deadline = clock() + wait_seconds
+    try:
+        while chrome_running(path):
+            if clock() >= deadline:
+                return False
+            sleep(poll_seconds)
+    except Exception:
+        return False
+    return True
+
+
+CLEAN_CLOSE_VARIABLE = "SIDEDOOR_GUARD_CLEAN_CLOSE"   # set for a guard whose own exit may wait for Chrome (the live view's)
+
+
+def launched_endpoint(directory):
+    """The DevTools endpoint of the Chrome this session's guard started (its BACKGROUND_LAUNCHED record), or None."""
+    try:
+        lines = (Path(directory) / GUARD_AUDIT).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("decision") == "BACKGROUND_LAUNCHED" and isinstance(row.get("endpoint"), str):
+            return row["endpoint"]
+    return None
+
+
+def close_wait(deadline, clock=None):
+    """How long a session's starter waits for Chrome to close itself: up to CLOSE_WAIT_SECONDS, but only out
+    of the time the session did not use (`deadline` is its own, on the monotonic clock). A session that
+    ended at its time limit gets no wait, so everything the caller does next (handing in the result under
+    its lease) is no later than it was before this wait existed."""
+    import time
+    return max(0.0, min(CLOSE_WAIT_SECONDS, deadline - (clock or time.monotonic)()))
+
+
+def close_cleanly(config, directory, wait_seconds=CLOSE_WAIT_SECONDS):
+    """macOS and Linux, after a browser session has ended and its outcome is decided: ask the Chrome that
+    session's guard started to close itself and wait up to `wait_seconds` for it to exit, so what the site
+    set in the session's last seconds (a sign-in, a new account) is written to the profile for the next
+    session. The caller then stops whatever is left exactly as before (`end_session`). The guard has
+    normally asked already, without waiting and without signalling (it leaves Chrome to this process);
+    asking again is harmless, and a guard that was stopped before it could ask is covered here.
+
+    It is called from a session's `finally`, outside its time limit and after the engine's exit was judged,
+    and it never raises and returns nothing a caller acts on: it cannot turn a finished session into a
+    timeout or a failure (a submission the site accepted is never retried because of it). Not for the
+    user's draft window (SHOWN_OPERATIONS), a test's isolated profile, or Windows (there the guard asks
+    before its Job Object ends Chrome). True when Chrome exited by itself."""
+    try:
+        operation = (config or {}).get("_browser_operation") or (config or {}).get("_application_operation")
+        if windows_host() or settings(config).get("isolated") or operation in SHOWN_OPERATIONS:
+            return False
+        path = profile(config)
+        if not chrome_running(path):
+            return False
+        # Asked here too, whatever the answer: the guard has normally asked already, and a Chrome that is
+        # shutting down may no longer take the request (its DevTools port closes first). Chrome is still
+        # running, so it is waited for either way: one that was asked by anyone is writing its cookies, and
+        # one nobody managed to ask simply gets the old stop after the wait.
+        endpoint = launched_endpoint(directory)
+        if endpoint:
+            # The session's last site-session capture, BEFORE the request to close (after it Chrome no
+            # longer answers). Its time comes out of the same wait.
+            import time
+            began = time.monotonic()
+            if last_capture(config, directory, endpoint, wait_seconds):
+                wait_seconds = max(0.0, wait_seconds - (time.monotonic() - began))
+            try:
+                close_browser(endpoint)
+            except Exception:
+                pass
+        return wait_chrome_gone(path, wait_seconds)
+    except Exception:
+        return False
+
+
+LAST_CAPTURE_SECONDS = 3.0   # at most this long, out of the starter's wait for Chrome to close
+
+
+def devtools_cookies(endpoint, seconds=LAST_CAPTURE_SECONDS, connect=None, opener=None):
+    """The cookies the Chrome on DevTools `endpoint` holds (CDP Storage.getCookies on its own browser
+    socket, no proxy), as Chrome gives them. Raises when Chrome does not answer in `seconds`. The values
+    are in the answer only: the connection's logger can never write, and nothing here logs."""
+    import logging
+    import re
+    import time
+    if not re.fullmatch(r"http://127\.0\.0\.1:\d{1,5}", endpoint or ""):
+        raise ValueError("endpoint")
+    deadline = time.monotonic() + seconds
+    with (opener or local_open)(endpoint + "/json/version", timeout=max(0.1, seconds)) as answer:
+        url = json.loads(answer.read(65536)).get("webSocketDebuggerUrl")
+    if not isinstance(url, str) or not url.startswith("ws://127.0.0.1:"):
+        raise ValueError("endpoint")
+    if connect is None:
+        from websockets.sync.client import connect as dial
+        silent = logging.getLogger("sidedoor-devtools-wire")   # the library logs every frame at DEBUG: never
+        silent.disabled, silent.propagate = True, False
+        connect = lambda address: dial(address, proxy=None, open_timeout=max(0.1, deadline - time.monotonic()),   # noqa: E731
+                                       close_timeout=1, max_size=64 * 1024 * 1024, logger=silent)
+    socket = connect(url)
+    try:
+        socket.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+        while True:
+            answer = json.loads(socket.recv(timeout=max(0.1, deadline - time.monotonic())))
+            if isinstance(answer, dict) and answer.get("id") == 1:
+                cookies = (answer.get("result") or {}).get("cookies")
+                if not isinstance(cookies, list):
+                    raise ValueError("cookies")
+                return cookies
+    finally:
+        try:
+            socket.close()
+        except Exception:
+            pass
+
+
+def last_capture(config, directory, endpoint, seconds, read=None):
+    """A session that restores and captures a site's session (site_sessions.CONFIG_KEY), at its end: what
+    Chrome holds for that site now is kept as the session's capture (site_sessions.save_last), by this
+    process, because the guard's own last capture does not run when its engine ends the guard first. The
+    result is written to the session's guard audit as the guard writes its own captures (a count of sites,
+    or the kind of failure; never a value). No capture when the session left no time (`seconds`). True
+    when Chrome was asked. Never raises."""
+    try:
+        import time
+        import site_sessions
+        site = (config or {}).get(site_sessions.CONFIG_KEY)
+        if not isinstance(site, str) or not site_sessions.SITE.fullmatch(site) or seconds <= 0:
+            return False
+        failed, asked = [], []
+
+        def cookies():
+            asked.append(True)
+            try:
+                return (read or devtools_cookies)(endpoint, min(seconds, LAST_CAPTURE_SECONDS))
+            except Exception as error:
+                failed.append(type(error).__name__)   # the kind only: never the text
+                return []
+        kept = site_sessions.save_last(site, cookies)
+        if failed:
+            row = {"decision": "SITE_SESSION_FAILED", "step": "capture", "reason": failed[0]}
+        elif isinstance(kept, str):
+            row = {"decision": "SITE_SESSION_FAILED", "step": "capture", "reason": kept}
+        elif kept:
+            row = {"decision": "SITE_SESSION_CAPTURED", "site": site, "sites": kept, "final": True}
+        else:
+            return bool(asked)   # nothing to keep is not recorded (as the guard)
+        try:
+            with open(Path(directory) / GUARD_AUDIT, "a", encoding="utf-8") as audit:
+                audit.write(json.dumps(dict(row, by="starter", at=time.time())) + "\n")
+        except OSError:
+            pass
+        return bool(asked)
+    except Exception:
+        return False
+
+
+def close_browser(endpoint, connect=None, opener=None):
+    """Ask the Chrome on DevTools `endpoint` to close itself (CDP Browser.close on its own browser socket,
+    no proxy), the way a person closing it ends it: its profile then records a clean exit. True when asked."""
+    import re
+    if not re.fullmatch(r"http://127\.0\.0\.1:\d{1,5}", endpoint or ""):
+        return False
+    try:
+        with (opener or local_open)(endpoint + "/json/version", timeout=5) as answer:
+            url = json.loads(answer.read(65536)).get("webSocketDebuggerUrl")
+        if not isinstance(url, str) or not url.startswith("ws://127.0.0.1:"):
+            return False
+        if connect is None:
+            from websockets.sync.client import connect as dial
+            connect = lambda address: dial(address, proxy=None, open_timeout=5, close_timeout=1)   # noqa: E731
+        socket = connect(url)
+        try:
+            socket.send(json.dumps({"id": 1, "method": "Browser.close"}))
+            try:
+                socket.recv(timeout=2)   # its answer, or the socket closing: either way Chrome has the call
+            except Exception:
+                pass
+        finally:
+            try:
+                socket.close()
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
 
 
 def _await_port(port_file, path, timeout, sleep=None, clock=None, stop=None):
@@ -932,9 +1320,12 @@ def _await_port(port_file, path, timeout, sleep=None, clock=None, stop=None):
     raise OSError("Chrome wrote no DevTools port within %d s" % timeout)
 
 
-def mcp_command(config, directory, operation=None):
+def mcp_command(config, directory, operation=None, hidden=None):
     """The @playwright/mcp command line (bundled Node, absolute paths: no npx shim). In background
-    mode it carries no profile: the guard starts Chrome and adds `--cdp-endpoint` (browser_guard)."""
+    mode it carries no profile: the guard starts Chrome and adds `--cdp-endpoint` (browser_guard).
+    `hidden` (Windows): guard_command's one decision that the guard starts Chrome; None: decided here."""
+    if hidden is None:
+        hidden = bool(hidden_launch(config) and headless_user_agent(config, operation))
     directory = Path(directory)
     output = directory / OUTPUT_FOLDER
     output.mkdir(parents=True, exist_ok=True)
@@ -945,7 +1336,7 @@ def mcp_command(config, directory, operation=None):
         command.append("--isolated")  # tests only: an in-memory profile
     elif (config or {}).get(CDP_ENDPOINT):
         command.extend(["--cdp-endpoint", str(config[CDP_ENDPOINT])])   # Windows: the Chrome Sidedoor started
-    elif not background_launch(config):
+    elif not background_launch(config) and not hidden:
         command.extend(["--user-data-dir", str(profile(config))])
     if settings(config).get("headless"):
         command.append("--headless")  # tests only: the product runs headed
@@ -962,20 +1353,52 @@ def guard_command(config, directory, operation, claim=None, human_check=None):
         command.extend(["--claim", str(claim)])
     if human_check:
         command.extend(["--human-check", str(human_check)])
-    if background_launch(config):
+        start = (config or {}).get(START_URL_CONFIG_KEY)
+        if operation == "submit" and claim and isinstance(start, str) and start.startswith(("http://", "https://")) \
+                and not any(mark.isspace() for mark in start):
+            # E16.T2: an attended submit's guard opens the application's own address itself, at once.
+            command.extend(["--start-url", start])
+    import site_sessions
+    site = (config or {}).get(site_sessions.CONFIG_KEY)
+    if isinstance(site, str) and site_sessions.SITE.fullmatch(site):
+        # E15.T4: the site whose saved session the guard restores and captures (a host name, never a secret).
+        command.extend(["--site-session", site])
+    import browser_guard
+    if (config or {}).get(browser_guard.NO_CODE_CONFIG_KEY) is True:
+        command.append("--no-page-code")   # Sidedoor's own steps: the tool that ends a session is not offered
+    import saved_sign_ins
+    site = (config or {}).get(saved_sign_ins.CONFIG_KEY)
+    if isinstance(site, str) and site_sessions.SITE.fullmatch(site):
+        # E15.T7: the session holds the guard's fill tool for this site's saved sign-in (a host name only).
+        command.extend(["--saved-sign-in", site])
+        email = (config or {}).get(saved_sign_ins.CREATE_CONFIG_KEY)
+        if isinstance(email, str) and email.strip() and not email.startswith("-"):
+            command.extend(["--create-account", email.strip()])   # E15.T8: this session may create the account
+        recorded = (config or {}).get(saved_sign_ins.RESET_CONFIG_KEY)
+        if isinstance(recorded, str) and recorded.strip() and not recorded.startswith("-"):
+            command.extend(["--reset-recorded", recorded.strip()])   # the step record permits a reset here
+        if (config or {}).get(saved_sign_ins.ACCESS_CONFIG_KEY) is True:
+            command.append("--access-step")
+            import browser_guard
+            if (config or {}).get(browser_guard.SSO_CONFIG_KEY) is True:
+                command.append("--single-sign-on")   # E15.T9: the step may press the provider's button
+    # Windows: one read of the machine decides hidden or not, for the guard and for @playwright/mcp (V10).
+    told = windows_told(config, operation)
+    hidden = told is not None
+    user_agent = told["user_agent"] if hidden else None if hidden_launch(config) else headless_user_agent(config, operation)
+    if background_launch(config) or hidden:
         command.extend(["--background-chrome", str(profile(config))])
-    user_agent = headless_user_agent(config, operation)
     if user_agent:
         command.extend(["--headless-user-agent", user_agent])   # headless (owner, 2026-10-24, option A)
         import setup_steps
-        hints = client_hints(setup_steps.chrome_path())
+        hints = told["client_hints"] if hidden else client_hints(setup_steps.chrome_path())
         if hints:
             command.extend(["--headless-client-hints", json.dumps(hints, sort_keys=True, separators=(",", ":"))])
-        screen = screen_metrics()
+        screen = told["screen"] if hidden else screen_metrics()
         command.extend(["--headless-screen", "%dx%d@%s" % (screen["width"], screen["height"], _number(screen["scale"]))])
     elif offscreen(config) and operation not in SHOWN_OPERATIONS:
         command.append("--offscreen")
-    return command + ["--"] + mcp_command(config, directory, operation)
+    return command + ["--"] + mcp_command(config, directory, operation, hidden=hidden)
 
 
 def encoded(value):
@@ -988,13 +1411,26 @@ def encoded(value):
 # the keychain and asks on every launch. Values come from this (the parent) process; never a secret.
 SESSION_VARIABLES = ("HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "__CF_USER_TEXT_ENCODING",
                      "USERPROFILE", "USERNAME", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
-                     "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT")
+                     "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT",
+                     # Windows: where programs are installed (Chrome is looked for there, by Sidedoor's guard
+                     # and by @playwright/mcp's own launch).
+                     "SYSTEMDRIVE", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432")
+
+
+STARTER_VARIABLE = "SIDEDOOR_SESSION_STARTER"   # the pid of the process that started a session and stops its Chrome
 
 
 def session_environment(environ=None):
     """The parent's values of SESSION_VARIABLES that are set (an explicit allow-list: no keys pass)."""
     environ = os.environ if environ is None else environ
     return {name: environ[name] for name in SESSION_VARIABLES if environ.get(name)}
+
+
+def guard_environment(environ=None):
+    """What every engine starts the browser guard with: `session_environment`, and this process's own pid as
+    STARTER_VARIABLE. This process starts the session and stops its Chrome at the end; the guard leaves
+    Chrome to it while it is alive (browser_guard.Proxy.stop_background_chrome)."""
+    return dict(session_environment(environ), **{STARTER_VARIABLE: str(os.getpid())})
 
 
 def codex_options(config, directory, operation, claim=None, human_check=None):
@@ -1007,12 +1443,13 @@ def codex_options(config, directory, operation, claim=None, human_check=None):
         tools.append(browser_guard.ARM_TOOL)
     if human_check:
         tools.append(browser_guard.HUMAN_CHECK_TOOL)
+    tools.extend(browser_guard.held_step_tools(argv))   # E15.T7 to T9: the access step's tools this guard holds
     options = ["mcp_servers." + SERVER + ".command=" + encoded(argv[0]),
                "mcp_servers." + SERVER + ".args=" + encoded(argv[1:]),
                "mcp_servers." + SERVER + ".enabled=true",
                "mcp_servers." + SERVER + ".startup_timeout_sec=" + str(STARTUP_TIMEOUT_SECONDS),
-               # Codex has one timeout per server. It is long enough for the CAPTCHA wait when that tool
-               # is there; every forwarded browser tool is answered within browser_guard.CALL_TIMEOUT
+               # Codex has one timeout per server. It is long enough for support_email's sign-in wait when that
+               # tool is there; every forwarded browser tool is answered within browser_guard.CALL_TIMEOUT
                # by the guard itself (review fix 6), so only the wait can take longer.
                "mcp_servers." + SERVER + ".tool_timeout_sec="
                + str(HUMAN_CHECK_TOOL_TIMEOUT_SECONDS if human_check else TOOL_TIMEOUT_SECONDS),
@@ -1021,7 +1458,7 @@ def codex_options(config, directory, operation, claim=None, human_check=None):
                # The user's session variables go with it, so Chrome finds the real login keychain.
                "mcp_servers." + SERVER + ".env={" + ",".join(
                    encoded(name) + "=" + encoded(value) for name, value in sorted(
-                       dict(session_environment(), **{user_profile.HOME_VARIABLE: str(user_profile.home())}).items()))
+                       dict(guard_environment(), **{user_profile.HOME_VARIABLE: str(user_profile.home())}).items()))
                + "}"]
     options.extend("mcp_servers." + SERVER + ".tools." + tool + '.approval_mode="approve"' for tool in tools)
     return options

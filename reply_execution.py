@@ -17,6 +17,7 @@ import outreach_agent
 import outreach_provider
 import pipeline_routing as routing
 import reply_resume
+import reply_tools
 import reply_worker
 from orchestrator import name_key, profile_key
 
@@ -557,6 +558,12 @@ class Adapter(outreach_agent.Adapter):
         result = {"reply_context": request, "reply_decision": handoff,
                   "decision_time": now.isoformat()}
         result["application_referral_policy"] = champion_composition.INDEPENDENT_REFERRAL_INSTRUCTIONS
+        # The notes this reply's own decision left for the owner (owner, 2026-11-12: a reply may promise
+        # an owner action only "while sending me a note ... to take it"). The judge cannot tell a
+        # promise with its note from one without unless it sees them. Absent when there are none.
+        notes = reply_tools.task_flags(self.database, action["reply_task_id"])
+        if notes:
+            result["owner_notes"] = notes
         result["current_application_context"] = [champion_composition.application_context(self.database, scope)
                                                   for scope in request.get("job_scope", [])]
         return result
@@ -706,7 +713,8 @@ class Adapter(outreach_agent.Adapter):
         if not isinstance(result, dict):
             result = {"previous_result": result}
         retries = result.get("reply_retries", [])
-        attempts = ([result["provider_request"]] if isinstance(result.get("provider_request"), dict) else []) + retries
+        # E18 B8: a first send held before any request is not one of the tries (outreach.request_made).
+        attempts = ([result["provider_request"]] if outreach.request_made(result.get("provider_request")) else []) + retries
         started = [engagement.timestamp(attempt["started_at"]) for attempt in attempts if attempt.get("started_at")]
         last = max(started) if started else engagement.timestamp(claim["claimed_at"])
         due = last + (RETRY_DELAYS[min(len(attempts), MAX_SEND_ATTEMPTS) - 1] if attempts else dt.timedelta(0))
@@ -865,6 +873,14 @@ class Adapter(outreach_agent.Adapter):
                          raw=outreach_provider._snapshot(raw))
             state = "ACKNOWLEDGED_UNCONFIRMED"
         except Exception as error:
+            if outreach.never_forwarded(error):
+                # E18 B8: held before any request. Not one of the 3 tries: the row returns as it was read.
+                result["reply_retries"] = retries
+                outreach.held_write_note(result, error, "send_message")
+                with database:
+                    database.execute("UPDATE outreach_actions SET state=?,result=? WHERE action_id=? AND state='REQUEST_STARTED'",
+                                     (row["state"], json.dumps(result, sort_keys=True), row["action_id"]))
+                return {"state": row["state"], "blocker": "REPLY_HELD_BEFORE_SEND", "attempts": len(attempts)}
             entry.update(status="ERROR", finished_at=outreach_provider._now(), error_type=type(error).__name__,
                          diagnostic=str(error)[:300])
             state = "UNCERTAIN_NO_RETRY"
@@ -960,7 +976,12 @@ class Adapter(outreach_agent.Adapter):
             self.database.rollback()
             raise
         sent = outreach_provider._snapshot(request["arguments"])
-        raw = self.port.send_message(sent["conversationId"], sent["message"]).raw
+        try:
+            raw = self.port.send_message(sent["conversationId"], sent["message"]).raw
+        except Exception as error:
+            if outreach.never_forwarded(error):   # E18 B8: held, nothing sent: no try spent
+                outreach.unwrite_held_request(self.database, action_id, error, keep=True)
+            raise
         return {**request, "finished_at": outreach_provider._now(), "status": "ACKNOWLEDGED_UNCONFIRMED",
                 "raw": outreach_provider._snapshot(raw)}
 
@@ -1041,8 +1062,11 @@ def repair_rejected(root, database, config, adapter, action, proof, now=None):
         objection = outreach_agent.pending_objection(database, action["profile"], "REPLY")
         if not objection:
             return None
+        # The rewrite has no tools, so it is shown the notes the original decision left the owner: it
+        # keeps a promise that has its note and adds none (owner, 2026-11-12: no note, no promise).
         packet = dict(request, repair_feedback=objection,
-                      previous_reply_proposal={"text": action["message"], "rejected_by": "fresh send judge"})
+                      previous_reply_proposal={"text": action["message"], "rejected_by": "fresh send judge"},
+                      owner_notes=reply_tools.task_flags(database, action["reply_task_id"]))
         template = resources.read_text("reply-prompt.md")
         schema = resources.read_text("reply-schema.json")
         prompt = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + json.dumps(packet, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

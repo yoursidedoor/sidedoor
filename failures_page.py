@@ -36,7 +36,7 @@ Sources (why each is a real failure):
   not listed.
 - applications (`application_jobs`, F4): the Applications page's own classification. Owner holds
   (`overview_page._blocked`, Applications' "Blocked, needs you", minus jobs with a question on Approvals)
-  are Needs you; a job with a question on Approvals, and an answered job waiting for its next run
+  are Needs you; a job with a question on Approvals, and an answered job waiting for its next round
   (UNKNOWN_REQUIRED_ANSWERS with no open card), are calm items there, not failures (owner 2026-10-24,
   `needs_calm`); a BLOCKED/RETRY_WAIT job not on route OWNER or RECONCILE (`applications.job_route`)
   is a failure only when its blocker is one of applications.py's failure sets
@@ -152,6 +152,7 @@ EXTRA_FAILURE_CODES = {"SUBMISSION_REPORTED_FAILED", "CONDITIONAL_QUESTION_UNANS
                        # application at the site (the guard never armed, or the reconcile read's authoritative
                        # absence). APPLICATION_TOOL_LIMIT is kept for the rows recorded before the limit went.
                        "APPLICATION_BROWSER_EXECUTOR_FAILED", "APPLICATION_BROWSER_FAILED", "RECONCILED_ABSENT",
+                       "APPLICATION_BROWSER_SETUP_STOPPED",
                        "FORM_UNAVAILABLE", "APPLICATION_TOOL_LIMIT"}
 
 
@@ -192,7 +193,7 @@ def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=Non
     REASON_LIMIT distinct ones, newest first, each {"words", "code", "count", "at", "where", "error",
     "log_href"}, plus `reasons_more` and `reasons_href` (the Logs view of that component). `calm` ("question",
     "waiting" or "info") marks an item that is not a failure: a question waiting on Approvals, a job whose
-    answers are in and that waits for its next run, or information such as a finished research day's
+    answers are in and that waits for its next round, or information such as a finished research day's
     skipped entries (questions and waits under Needs you, info in its own section; never red, never counted).
     A cause whose words or place the headline already says shows without them. `refs` are
     the item's own ids (task, research run, finder run, job key, round slot) and `log_href` opens that
@@ -233,6 +234,8 @@ CAUSE_WORDS = {
     "FOLLOWUP_REASON_REQUIRED": "The AI's follow-up answer gave no reason.",
     "FOLLOWUP_OUTPUT_TOO_LARGE": "The AI's follow-up answer was too long.",
     "FOLLOWUP_OUTPUT_INVALID": "The AI's follow-up answer could not be read.",
+    # followup_execution.repair_rejected: each rejection of a follow-up is one failed try of its writing.
+    "FOLLOWUP_JUDGE_REJECTED": "Sidedoor's check rejected the follow-up before it was sent. Nothing went out.",
     "LINKEDIN_CONTACTS_INTERRUPTED": "The search was interrupted (Sidedoor was closed or restarted).",
     "LINKEDIN_CONTACTS_RESULT_BINDING_INVALID": "The search's answer did not match what was asked.",
     "LINKEDIN_CONTACTS_LIMITS_INVALID": "The search went past its limits.",
@@ -940,9 +943,9 @@ def application_failures(reader, now, fmt, secrets=()):
                                code="AWAITING_APPLICATION_APPROVAL", refs={"job_key": key}, calm="question"))
             continue
         if key in owner_keys and not overview.blocked_on_owner(True, False, row["blocker"]):
-            # Answered (no open question): not a failure, it waits for its next run (owner 2026-10-24).
+            # Answered (no open question): not a failure, it waits for its next round (owner 2026-10-24).
             found.append(_item("applications", "%s: your answers are in." % name,
-                               "Waiting for its next run. Nothing you need to do; Sidedoor asks on Approvals if "
+                               "Waiting for its next round. Nothing you need to do; Sidedoor asks on Approvals if "
                                "anything is still open.", at, href=_job_link(key), code="ANSWERS_IN",
                                refs={"job_key": key}, calm="waiting"))
             continue
@@ -965,7 +968,9 @@ def application_failures(reader, now, fmt, secrets=()):
         if not causes.found:
             causes.add(row["blocker"] or code, at, log_href=extra["log_href"])
         if view["needs_you"]:
-            found.append(_item("applications", "%s: %s" % (name, view["problem"]), view["todo"], at, you=True,
+            # One sentence, once: a job whose line is its own sentence has no second line under it.
+            said = view["problem"] or view["todo"]
+            found.append(_item("applications", "%s: %s" % (name, said), view["todo"] if view["problem"] else "", at, you=True,
                                fix={"label": view["todo_label"], "href": view["todo_href"]} if view["todo_href"] else link,
                                href=_job_link(key), code=code, **extra))
         else:
@@ -1038,8 +1043,9 @@ def given_up_failures(reader, now, fmt, secrets=()):
                                                   applications_page.closing_reason(reader, key, row["state"]))
             if not why:
                 causes.add(row["blocker"] or "APPLICATION_" + str(row["state"]), at, log_href=log_link)
-        todo = " ".join(part for part in (why, "Nothing was sent." if nothing_sent(reader, key) else None,
-                                          view["todo"] or "Sidedoor will not try this one again.") if part)
+        # "Sidedoor will not try this one again." only where that is true: never for a job with Try again.
+        last = view["todo"] or (None if view["try_again"] else "Sidedoor will not try this one again.")
+        todo = " ".join(part for part in (why, "Nothing was sent." if nothing_sent(reader, key) else None, last) if part)
         found.append(_item("applications", "%s: %s" % (name, view["closed"]), todo, at, max(1, tries),
                            fix={"label": "Open application", "href": _job_link(key)}, href=_job_link(key),
                            code=_code(row["blocker"]) or "APPLICATION_" + str(row["state"]), reasons=causes,
@@ -1056,7 +1062,8 @@ def reply_retry_state(result):
     ("UNCERTAIN_NO_RETRY")."""
     import reply_execution
     retries = result.get("reply_retries")
-    attempts = (1 if isinstance(result.get("provider_request"), dict) else 0) + (len(retries) if isinstance(retries, list) else 0)
+    import outreach
+    attempts = (1 if outreach.request_made(result.get("provider_request")) else 0) + (len(retries) if isinstance(retries, list) else 0)
     streak = result.get("reply_unreadable_streak")
     stopped = (result.get("reply_no_more_sends") is True
                or (isinstance(streak, int) and streak >= reply_execution.MAX_UNREADABLE_CHECKS))
@@ -1329,6 +1336,32 @@ def browser_failures(reader, now, fmt):
     return found
 
 
+# --- A step for the user that could not be shown (E15.T5, R12) -----------------------------------------------------
+
+def live_view_failures(reader, now, fmt):
+    """The live view could not open Sidedoor's browser for a sign-in or a human check, after its one retry
+    (live_view.record_failure). One item per site, under Needs you. A busy browser is a wait, never listed."""
+    import live_view
+    import confirm_read
+    import linkedin_connection
+    import linkedin_contacts
+    rows = _recent(reader.rows("SELECT at,reason,domain,job_key FROM live_view_failures ORDER BY at", (), "live_view_failures"),
+                   _since(now), "at")
+    sites, no_link = {}, set()
+    for row in rows:
+        if row["reason"] in live_view.FAILURE_REASONS:
+            sites.setdefault(row["domain"] or "", []).append(overview._utc(row["at"]))
+            if confirm_read.job_of(row["job_key"]) or row["job_key"] in (linkedin_connection.CARD_KEY,
+                                                                         linkedin_contacts.CARD_KEY):
+                # The step of an application that may already have reached the employer, or the LinkedIn
+                # card's, which has no posting: never "apply yourself".
+                no_link.add(row["domain"] or "")
+    return [_item("applications", live_view.FAILURE_WORDS + (" Site: %s." % site if site else ""),
+                  live_view.FAILURE_TODO_NO_LINK if site in no_link else live_view.FAILURE_TODO,
+                  moments[-1], count=len(moments), you=True, code="LIVE_VIEW_NOT_SHOWN")
+            for site, moments in sites.items()]
+
+
 # --- Gathering ----------------------------------------------------------------------------------------------------
 
 def explain_exits(sections, loop_items, reader=None, config=None):
@@ -1418,6 +1451,7 @@ def gather(database, config, loop, now=None, log_tail=None, secrets=(), home=Non
     add(finder_failures, now, fmt, secrets, groups=("outreach",))
     add(notification_failures, now, fmt, secrets, groups=("connections",))
     add(browser_failures, now, fmt, groups=("applications", "outreach"))
+    add(live_view_failures, now, fmt, groups=("applications",))
     for entry in codex_failures(home, finished):
         sections[entry["group"]]["entries"].append(entry)
     explain_exits(sections, scheduler_failures(loop if isinstance(loop, dict) else {}, config, now, fmt, log_tail, secrets),

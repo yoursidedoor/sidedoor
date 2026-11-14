@@ -123,6 +123,41 @@ class Dashboard:
         return self.receipt(row)
 
 
+class Desktop:
+    """The desktop provider (E15.T3, R2): a system notification on macOS and Windows, beside `Dashboard`
+    (which only marks a row as shown in the dashboard). Its rows come from `desktop_alerts`, never from
+    the outbox: {"event_key", "message", "title", "href"}, where `href` is the dashboard page a click
+    opens. The OS call itself is `post(title, text, href)`: by default the one the running tray
+    registered (`set_desktop_post`, `tray.Tray.notify`); tests pass their own. Nothing leaves the
+    machine. Without a tray there is nothing to post through: Unavailable."""
+
+    PROVIDER = "desktop"
+
+    def __init__(self, post=None):
+        self.post = post
+
+    def available(self):
+        """True while there is a way to post (a running tray, or the test's own function)."""
+        return (self.post or _desktop_post) is not None
+
+    def send_notification(self, row):
+        post = self.post or _desktop_post
+        if post is None:
+            raise Unavailable("DESKTOP_NOTIFICATION_UNAVAILABLE")
+        if not post(row.get("title") or "", row["message"], row.get("href")):
+            raise Unavailable("DESKTOP_NOTIFICATION_NOT_SHOWN")
+        return {"provider": self.PROVIDER, "message_id": row["event_key"], "chat_id": "local"}
+
+
+_desktop_post = None
+
+
+def set_desktop_post(post):
+    """The running tray's `notify` (or None when it stops): how `Desktop` reaches the OS."""
+    global _desktop_post
+    _desktop_post = post
+
+
 TELEGRAM_FIELDS = ("keychain_service", "keychain_account", "chat_id")
 
 
@@ -215,21 +250,26 @@ def _one_dispatcher(database, wait_seconds=DISPATCH_LOCK_WAIT_SECONDS):
         os.close(descriptor)
 
 
-def dispatch(database, config, transport=None, now=None, lock_wait_seconds=DISPATCH_LOCK_WAIT_SECONDS):
+def dispatch(database, config, transport=None, now=None, lock_wait_seconds=DISPATCH_LOCK_WAIT_SECONDS, key_prefix=None):
+    """`key_prefix` (E18, review round 3): only notices whose event key starts with it are read, sent,
+    reconciled or marked; every other row is left exactly as it is (the LinkedIn notice is delivered from
+    the Sidedoor process while the rounds are paused, and nothing else may run then)."""
     with _one_dispatcher(database, lock_wait_seconds) as turn:
         if not turn:
             return {"state": "DEFERRED_ANOTHER_DISPATCHER_ACTIVE"}
-        return _dispatch(database, config, transport, now)
+        return _dispatch(database, config, transport, now, key_prefix)
 
 
-def _dispatch(database, config, transport=None, now=None):
+def _dispatch(database, config, transport=None, now=None, key_prefix=None):
     now = now or applications.stamp()
     initialize(database)
     transport = transport or transport_for(config)
+    prefix = key_prefix or ""
+    ours = " AND substr(event_key,1,%d)=?" % len(prefix)   # every row when there is no prefix
     with database:
-        database.execute("UPDATE notification_outbox SET state='UNCERTAIN',next_at=NULL,last_error='INTERRUPTED_SEND_REQUIRES_RECONCILIATION',next_action='Reconcile the existing notification before any resend' WHERE state='SENDING'")
+        database.execute("UPDATE notification_outbox SET state='UNCERTAIN',next_at=NULL,last_error='INTERRUPTED_SEND_REQUIRES_RECONCILIATION',next_action='Reconcile the existing notification before any resend' WHERE state='SENDING'" + ours, (prefix,))
     if hasattr(transport, "reconcile_notification"):
-        for row in list(database.execute("SELECT * FROM notification_outbox WHERE state='UNCERTAIN' AND reconcile_attempts<5 AND (next_at IS NULL OR next_at<=?) LIMIT 20", (now,))):
+        for row in list(database.execute("SELECT * FROM notification_outbox WHERE state='UNCERTAIN' AND reconcile_attempts<5 AND (next_at IS NULL OR next_at<=?)" + ours + " LIMIT 20", (now, prefix))):
             with database:
                 database.execute("UPDATE notification_outbox SET reconcile_attempts=reconcile_attempts+1 WHERE event_key=?", (row["event_key"],))
             try:
@@ -251,7 +291,7 @@ def _dispatch(database, config, transport=None, now=None):
                                       "NOTIFICATION_RECONCILIATION_EXHAUSTED" if exhausted else "NOTIFICATION_RECONCILIATION_UNAVAILABLE",
                                       "Reconcile delivery evidence manually before any resend" if exhausted else "Reconcile the same notification after backoff",
                                       error_code(error), row["event_key"]))
-    rows = list(database.execute("SELECT * FROM notification_outbox WHERE state='PENDING' AND (next_at IS NULL OR next_at<=?) ORDER BY updated_at, rowid LIMIT 20", (now,)))
+    rows = list(database.execute("SELECT * FROM notification_outbox WHERE state='PENDING' AND (next_at IS NULL OR next_at<=?)" + ours + " ORDER BY updated_at, rowid LIMIT 20", (now, prefix)))
     for row in rows:
         if row["attempts"] >= 5:
             with database:

@@ -101,7 +101,32 @@ PACKAGE_FILES = ("package.json", "package-lock.json")
 # Modules the product imports by string at run time (uvicorn's loop/protocol choices, anyio's backend).
 STRING_IMPORTS = ("uvicorn.loops.auto", "uvicorn.loops.asyncio", "uvicorn.protocols.http.auto",
                   "uvicorn.protocols.http.h11_impl", "uvicorn.protocols.websockets.auto",
-                  "uvicorn.lifespan.on", "uvicorn.lifespan.off", "anyio._backends._asyncio")
+                  "uvicorn.protocols.websockets.websockets_sansio_impl",   # the live view's socket (E15.T5)
+                  "uvicorn.lifespan.on", "uvicorn.lifespan.off", "anyio._backends._asyncio",
+                  # The DevTools clients (pyproject: websockets): the live view's, in the dashboard, and the
+                  # browser guard's own (`sidedoor browser-guard`: browser_guard.TabDetails,
+                  # browser_runtime.close_browser), both imported inside functions.
+                  "websockets.asyncio.client", "websockets.sync.client")
+# Modules a build must be able to import before it starts (a venv without one built an app whose guard could
+# not start Chrome hidden: Windows VM, 2026-11-13). Checked by `check_build_packages` in both builds.
+REQUIRED_MODULES = ("websockets.asyncio.client", "websockets.sync.client")
+
+
+def check_build_packages(find=None):
+    """Fail the build now, by name, when the build's Python lacks a module the product needs at run time."""
+    import importlib.util
+    find = find or importlib.util.find_spec
+    missing = []
+    for name in REQUIRED_MODULES:
+        try:
+            found = find(name)
+        except (ImportError, ValueError):
+            found = None
+        if found is None:
+            missing.append(name)
+    if missing:
+        raise SystemExit("this build's Python cannot import %s; install the pinned packages (pyproject.toml, "
+                         "tools/build-requirements-macos.txt)" % ", ".join(missing))
 # HTTPS trust (hotfix 2026-10-28, tls_setup.py): truststore (the OS trust store) and certifi with its
 # cacert.pem (the fallback), compiled in whole on both builds; tools/check_release_tls.py gates the result.
 TLS_ARGUMENTS = ("--include-package=truststore", "--include-package=certifi")   # certifi's cacert.pem comes with it (Nuitka's package config)
@@ -529,6 +554,7 @@ def main(argv=None):
     parser.add_argument("--sign", metavar="IDENTITY", help="Developer ID Application identity (tools/sign_macos.py)")
     parser.add_argument("--notarize", metavar="PROFILE", help="notarytool keychain profile; needs --sign")
     args = parser.parse_args(argv)
+    check_build_packages()
     if args.notarize and not args.sign:
         raise SystemExit("--notarize needs --sign")
     if sys.platform != "darwin":

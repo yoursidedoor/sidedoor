@@ -889,6 +889,8 @@ def apply_reply_decision(database, task_id, config, now):
             workflow_tasks.instant(decision["review_at"])
         previous = json.loads(stored["result"]) if stored["result"] else {}
         consumed = previous.get("reply_decisions", {})
+        # The first decision on this message, as against a dated re-review of one already decided.
+        first_decision = not consumed
         if task_id in consumed:
             if consumed[task_id] != result["output_sha256"]:
                 raise ValueError("REPLY_DECISION_REPLAY_CONFLICT")
@@ -897,32 +899,57 @@ def apply_reply_decision(database, task_id, config, now):
             raise ValueError("REPLY_DECISION_SOURCE_ALREADY_ROUTED")
         bindings = _bindings(database, rows(database, "SELECT * FROM rw_results"), profile, now)
         consumed = dict(consumed, **{task_id: result["output_sha256"]})
-        critical_unknowns = set(decision["unknown_factual_requirements"]) - {"CANDIDATE_FACTS", "ROLE_ASSOCIATION"}
-        if (decision["label"] not in {"AGREEMENT", "DECLINE"} or critical_unknowns
-                or not champion_composition.direct_intent(decision, request)
-                or handoff.get("can_advance_conversion") is not True):
-            if decision["review_at"] is None:
-                return _close_review(database, stored, decision, consumed, now)
-            return _reply_review(database, stored, task, handoff, consumed, now)
-        blocker = _reply_exclusion(database, profile, bindings)
-        if blocker:
-            return _reply_review(database, stored, task, handoff, consumed, now, blocker)
-        state = "AGREED" if decision["label"] == "AGREEMENT" else "DECLINED"
-        # A referral is recorded on the person, never on a job (owner, 2026-09-25: "Referral
-        # should be tracked independetly, same as job applications"). This wrote REFERRAL_AGREED
-        # or REFERRAL_DECLINED evidence and a conversion event against the one researched job the
-        # reply was tied to, and before 2026-09-24 it refused to record anything without one.
-        import referrals
-        referrals.record(database, snapshot["identity"], state, stored["source_key"], inbox["text"],
-            decision["next_action"], decision["review_at"], now,
-            {"literal_quote": decision["literal_quote"], "quote_span": decision["quote_span"],
-             "speaker_context": decision.get("speaker_context"), "provider_source": source,
-             "provider_source_id": source_id, "classification": "reply-decision-v2",
-             "decision_provenance": {**handoff["model_provenance"], "task_id": task_id,
-                                     "input_sha256": handoff["input_sha256"], "output_sha256": handoff["output_sha256"]}})
-        return _finish(database, stored, {"contact_id": snapshot["identity"], "referral_state": state,
-            "reply_decisions": consumed, "next_action": decision["next_action"],
-            "review_at": decision["review_at"], "can_send": False}, now)
+        # The model's structured judgment of this message records or lifts the person's opt-out in the
+        # existing store (owner, 2026-11-12). A lift happens BEFORE the decision is routed, so the message
+        # that lifts it is handled as any other reply. A stop request is recorded AFTER routing: it blocks
+        # only what is sent, so the decision that carries it is routed as it would be without it (a
+        # decline is still recorded, and no review is queued because of the stop itself).
+        import engagement
+        asks = decision.get("asks_to_stop_contact")
+
+        def stop_request():
+            outcome = engagement.apply_stop_request(database, profile, snapshot["identity"], asks, source, source_id)
+            if outcome:
+                workflow_tasks.record(database, task_id, "REPLY_CONTACT_STOP_" + outcome,
+                                      now.isoformat() if hasattr(now, "isoformat") else now,
+                                      {"identity": snapshot["identity"], "source_key": stored["source_key"]})
+
+        def route():
+            critical_unknowns = set(decision["unknown_factual_requirements"]) - {"CANDIDATE_FACTS", "ROLE_ASSOCIATION"}
+            if (decision["label"] not in {"AGREEMENT", "DECLINE"} or critical_unknowns
+                    or not champion_composition.direct_intent(decision, request)
+                    or handoff.get("can_advance_conversion") is not True):
+                if decision["review_at"] is None:
+                    return _close_review(database, stored, decision, consumed, now)
+                return _reply_review(database, stored, task, handoff, consumed, now)
+            blocker = _reply_exclusion(database, profile, bindings)
+            if blocker:
+                return _reply_review(database, stored, task, handoff, consumed, now, blocker)
+            state = "AGREED" if decision["label"] == "AGREEMENT" else "DECLINED"
+            # A referral is recorded on the person, never on a job (owner, 2026-09-25: "Referral
+            # should be tracked independetly, same as job applications"). This wrote REFERRAL_AGREED
+            # or REFERRAL_DECLINED evidence and a conversion event against the one researched job the
+            # reply was tied to, and before 2026-09-24 it refused to record anything without one.
+            import referrals
+            referrals.record(database, snapshot["identity"], state, stored["source_key"], inbox["text"],
+                decision["next_action"], decision["review_at"], now,
+                {"literal_quote": decision["literal_quote"], "quote_span": decision["quote_span"],
+                 "speaker_context": decision.get("speaker_context"), "provider_source": source,
+                 "provider_source_id": source_id, "classification": "reply-decision-v2",
+                 "decision_provenance": {**handoff["model_provenance"], "task_id": task_id,
+                                         "input_sha256": handoff["input_sha256"], "output_sha256": handoff["output_sha256"]}})
+            return _finish(database, stored, {"contact_id": snapshot["identity"], "referral_state": state,
+                "reply_decisions": consumed, "next_action": decision["next_action"],
+                "review_at": decision["review_at"], "can_send": False}, now)
+
+        # Only a newly arrived message lifts an opt-out (owner: "if the person starts replying again").
+        # A re-review of a message already decided is not the person replying again, so it never lifts.
+        if asks is False and first_decision:
+            stop_request()
+        routed = route()
+        if asks is True:
+            stop_request()
+        return routed
 
 
 def _upgrade_reply_reviews(database, config, now, limit):

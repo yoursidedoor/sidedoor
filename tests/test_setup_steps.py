@@ -521,8 +521,12 @@ class SetupStepsTest(unittest.TestCase):
         self.licensed()
         self.assertEqual(self.accounts(403, {"error": "LICENSE_NOT_LINKED"})["offer"], "connect")
         self.assertEqual(self.accounts(200, {"items": []})["offer"], "connect")
+        import linkedin_session   # E18: a disconnect is asked of the user once the browser has no sign-in to send
+        setup_steps.save_sender(self.home, "acct-1", "https://www.linkedin.com/in/alex")   # it was connected before
+        self.addCleanup(linkedin_session.set_reader, linkedin_session.set_reader(lambda home: None))
         listed = self.accounts(200, {"items": [{"type": "LINKEDIN", "name": "Alex", "status": "CREDENTIALS"}]})
-        self.assertEqual((listed["status"], listed["offer"]), ("needs_you", "reconnect"))
+        self.assertEqual((listed["status"], listed["offer"]), ("needs_you", "signin"))   # B6: a read only says so
+        self.assertIn("LinkedIn is disconnected.", listed["message"])
         ok = self.accounts(200, {"items": [{"type": "LINKEDIN", "name": "Alex", "sources": [{"status": "OK"}]}]})
         self.assertEqual((ok["status"], ok["message"]), ("done", "LinkedIn connected: Alex."))
         self.assertIn("subscription", self.accounts(401, {"error": "LICENSE_INVALID"})["message"])
@@ -531,19 +535,12 @@ class SetupStepsTest(unittest.TestCase):
         # Owner, 2026-10-22: step 7 showed "answered HTTP 503, try again" and no Reconnect button
         # when Unipile said the linked account had no session.
         self.licensed()
+        import linkedin_session
+        setup_steps.save_sender(self.home, "acct-1", "https://www.linkedin.com/in/alex")   # a session can only be lost after one
+        self.addCleanup(linkedin_session.set_reader, linkedin_session.set_reader(lambda home: None))
         lost = self.accounts(503, {"status": 503, "type": "errors/no_client_session", "title": "No client session"})
-        self.assertEqual((lost["status"], lost["offer"]), ("needs_you", "reconnect"))
+        self.assertEqual((lost["status"], lost["offer"]), ("needs_you", "signin"))   # E18 B6: the sign-in buttons
         self.assertEqual(self.accounts(503, {"error": "UPSTREAM"})["offer"], "retry")
-
-    def test_linkedin_link_waits_and_never_stores_the_link(self):
-        self.licensed()
-        made = []
-        state, url = setup_steps.linkedin_link("create", self.home, make_link=lambda relay, key, kind: made.append(kind) or "https://unipile.test/secret-dsn")
-        self.assertEqual((made, url, state["steps"]["linkedin"]["offer"]), (["create"], "https://unipile.test/secret-dsn", "waiting"))
-        self.assertNotIn("secret-dsn", (self.home / setup_steps.STATE_FILE).read_text())
-        self.assertEqual(self.accounts(403, {"error": "LICENSE_NOT_LINKED"})["offer"], "waiting")
-        setup_steps.update_state(lambda value: value.update(linkedin_link_started_at="2000-01-01T00:00:00Z"), self.home)
-        self.assertIn("not linked to your license yet", self.accounts(403, {"error": "LICENSE_NOT_LINKED"})["message"])
 
     # --- step 8: the email check (B4) ---
     def test_email_check_compares_after_lowercasing_only(self):
@@ -575,21 +572,6 @@ class SetupStepsTest(unittest.TestCase):
         self.assertEqual(setup_steps.webmail_choice("Outlook.com", "", self.home)["webmail"]["label"], "Gmail")
 
     # --- review round 1 ---
-    def test_reconnect_keeps_waiting_while_the_account_is_listed_but_not_ok(self):
-        self.licensed()
-        state, url = setup_steps.linkedin_link("reconnect", self.home, make_link=lambda relay, key, kind: "https://u.test/r")
-        self.assertEqual(state["steps"]["linkedin"]["kind"], "reconnect")
-        listed = {"items": [{"type": "LINKEDIN", "name": "Alex", "status": "CREDENTIALS"}]}
-        waiting = self.accounts(200, listed)
-        self.assertEqual((waiting["status"], waiting["offer"], waiting["kind"]), ("checking", "waiting", "reconnect"))
-        setup_steps.update_state(lambda value: value.update(linkedin_link_started_at="2000-01-01T00:00:00Z"), self.home)
-        late = self.accounts(200, listed)
-        self.assertEqual(late["offer"], "reconnect")
-        self.assertIn("LinkedIn still needs you to sign in. Click Reconnect again", late["message"])
-        # A reconnect wait never turns into a create wait when the account is gone.
-        setup_steps.update_state(lambda value: value.update(linkedin_link_started_at=setup_steps.now_iso()), self.home)
-        self.assertEqual(self.accounts(200, {"items": []})["offer"], "connect")
-
     def test_authorization_answers_follow_the_current_picks_only(self):
         setup_steps.save_profile(valid_form(), self.home)
         _, errors = setup_steps.save_profile(valid_form(work_authorization=["Germany: not allowed to work, needs sponsorship"]), self.home)
@@ -709,8 +691,10 @@ class SetupStepsTest(unittest.TestCase):
 
     def test_a_first_connect_succeeds_once_the_account_is_listed(self):
         self.licensed()
-        setup_steps.linkedin_link("create", self.home, make_link=lambda relay, key, kind: "https://u.test/c")
+        # E18 review B5: listed is not connected, whatever link came before; only an OK status is.
         listed = self.accounts(200, {"items": [{"type": "LINKEDIN", "name": "Alex", "status": "CONNECTING"}]})
+        self.assertNotEqual(listed["status"], "done")
+        listed = self.accounts(200, {"items": [{"type": "LINKEDIN", "name": "Alex", "status": "OK"}]})
         self.assertEqual((listed["status"], listed["message"]), ("done", "LinkedIn connected: Alex."))
 
     def test_step_3_prefills_from_an_existing_profile(self):

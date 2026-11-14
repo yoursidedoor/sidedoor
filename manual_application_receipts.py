@@ -187,7 +187,9 @@ def check_blocker():
         assert fixture.job()["blocker"] == "CAPTCHA_REQUIRED"
         assert fixture.database.execute("SELECT owner FROM application_blockers").fetchone()[0] == "user"
         assert fixture.database.execute("SELECT count(*) FROM notification_outbox").fetchone()[0] == 1
-        assert fixture.database.execute("SELECT state FROM application_attempts").fetchone()[0] == "SUBMITTING"
+        # A never-armed wall sent nothing: the attempt is closed and the job waits on the user (E15.T1).
+        assert fixture.job()["state"] == "BLOCKED"
+        assert fixture.database.execute("SELECT state FROM application_attempts").fetchone()[0] == "CONFIRMED_NOT_SUBMITTED"
     finally:
         fixture.close()
 
@@ -210,10 +212,14 @@ def check_submission_blocker_handoff():
 
             applications.process(fixture.database, fixture.job(), Consumer(), fixture.policy, fixture.root, fixture.now)
             assert fixture.job()["blocker"] == code
-            assert fixture.job()["state"] == "RECONCILE"
+            # A never-armed sign-in or human-check wall waits on the user at once (E15.T1); any other
+            # pre-arm blocker still goes to reconcile.
+            wall = code in applications.ACCESS_BLOCK_CODES
+            assert fixture.job()["state"] == ("BLOCKED" if wall else "RECONCILE")
             assert fixture.database.execute("SELECT owner FROM application_blockers").fetchone()[0] == "user"
             assert fixture.database.execute("SELECT count(*) FROM notification_outbox").fetchone()[0] == 1
-            assert fixture.database.execute("SELECT state FROM application_attempts").fetchone()[0] == "SUBMITTING"
+            assert fixture.database.execute("SELECT state FROM application_attempts").fetchone()[0] == (
+                "CONFIRMED_NOT_SUBMITTED" if wall else "SUBMITTING")
         finally:
             fixture.close()
 
@@ -239,11 +245,13 @@ def check_blocked_reconciliation():
                     assert fixture.job()["reconcile_attempts"] == 0
                 applications.reconcile(fixture.database, fixture.job(), fixture.adapter, fixture.policy, fixture.now)
                 assert fixture.job()["blocker"] == code
-                # An access-blocked read counts toward the 10-read limit (owner, 2026-09-30).
+                # An access-blocked read counts toward the 10-read limit (owner, 2026-09-30); the job then
+                # waits for the user's step (confirm_read, 2026-11-13).
                 assert fixture.job()["reconcile_attempts"] == repetition + 1
                 assert fixture.job()["attempts"] == 1
                 assert fixture.job()["state"] == "RECONCILE"
-                assert fixture.job()["next_at"] == desktop_adapter.later(fixture.now, 900)
+                import access_outcomes
+                assert fixture.job()["next_at"] == desktop_adapter.later(fixture.now, access_outcomes.WAIT_SECONDS)
                 assert fixture.database.execute("SELECT owner FROM application_blockers").fetchone()[0] == "user"
                 assert fixture.database.execute("SELECT count(*) FROM notification_outbox").fetchone()[0] == 1
                 assert fixture.database.execute("SELECT state FROM desktop_requests WHERE request_id=?", (request["request_id"],)).fetchone()[0] == "CONSUMED"

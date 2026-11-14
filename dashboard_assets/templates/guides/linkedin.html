@@ -12,14 +12,22 @@
   <li>Click <strong>Check again</strong>.</li>
 </ol>
 {% else %}
+{% if guide_platform == "windows" %}
 <ol>
-  {% if guide_button %}<li>Click <strong>{{ guide_button }}</strong>.</li>{% endif %}
-  <li>Click <strong>Open the LinkedIn sign-in page</strong>.</li>
-  <li>Sign in with your LinkedIn email and password.</li>
-  <li>When the page says you are connected, close that tab.</li>
+  <li>Click <strong>Open Sidedoor's browser</strong>.</li>
+  <li>In that window, sign in to <a href="https://www.linkedin.com" target="_blank" rel="noopener noreferrer">linkedin.com</a> with your LinkedIn email and password.</li>
+  <li>Come back to this page and click <strong>I'm signed in</strong>.</li>
 </ol>
+{% else %}
+<ol>
+  <li>Click <strong>Open Sidedoor's browser</strong>. LinkedIn opens on this page.</li>
+  <li>Sign in there with your LinkedIn email and password.</li>
+  <li>Press <strong>Done</strong>.</li>
+</ol>
+{% endif %}
 <details class="guide-trouble"><summary>If something goes wrong</summary>
   <p>If LinkedIn asks for a code or to confirm on your phone, do it, then go on.</p>
-  <p>The sign-in link works for one hour. If it expired, click <strong>Get a new link</strong>.</p>
+  {% if guide_platform == "windows" %}<p>If Sidedoor says its browser is not signed in to LinkedIn, sign in to LinkedIn in that window, then click <strong>I'm signed in</strong> again.</p>
+  {% else %}<p>If Sidedoor says its browser is not signed in to LinkedIn, click <strong>Open Sidedoor's browser</strong>, sign in to LinkedIn, then press <strong>Done</strong>.</p>{% endif %}
 </details>
 {% endif %}
