@@ -174,6 +174,14 @@ CODE_WORDS = {
     "ACCESS_WAITED_7_DAYS": "Sidedoor waited 7 days for you and closed this application.",
     "ACCESS_SKIPPED_BY_SETTING": "Closed by your setting.",
     "ACCESS_POSTING_CLOSED": "The posting closed while this application waited for you.",
+    # Closed with no sign-in or check behind it (owner, 2026-11-14; access_outcomes.PLAIN_CLOSE_REASONS).
+    "POSTING_CLOSED": "The posting has closed.",
+    "ABANDONED_BY_YOU": "You abandoned this application.",
+    # The AI marked the read's stop final (owner's pick Z1 a, 2026-11-14). The fixed sentence is all the
+    # page shows; the AI's own sentence stays in the record (Y2 b).
+    "POSTING_CANNOT_TAKE_APPLICATION": "Sidedoor's AI found this posting cannot take your application.",
+    # Seen by the submit session before Submit (Y1 a): closed with no Try again.
+    "SITE_SHOWS_ALREADY_APPLIED": "The site shows you already applied.",
     "APPLICATION_RECOVERY_ABANDONED": "Sidedoor looked into a problem and decided it cannot apply.",
     # Closed by the old rule after failed AI calls, and parked for the user (owner, 2026-11-13, G2, G4).
     # The same sentences as application_recovery.NOT_DECIDED_WORDS and NEEDS_YOU_WORDS (a test holds them equal).
@@ -457,8 +465,10 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
     """(text, href, label): what happens next, or what the user does, in plain words. Only a sign-in or
     human check that made Sidedoor stop ever tells the user to apply by hand (owner 2026-10-24)."""
     state, code = row["state"], code_root(row["blocker"])
-    if state in ("EXHAUSTED", "ABANDONED") and code == "ACCESS_POSTING_CLOSED":
+    if state in ("EXHAUSTED", "ABANDONED") and code in ("ACCESS_POSTING_CLOSED", "POSTING_CLOSED"):
         return (POSTING_CLOSED_TODO, None, None)
+    if state == "ABANDONED" and code == "ABANDONED_BY_YOU":
+        return (PARKED_TODO, None, None)   # abandoned while parked: no wall to apply past, Try again is beside it
     if state in ("EXHAUSTED", "ABANDONED") and code == "ACCESS_SKIPPED_BY_SETTING":
         return (SKIPPED_TODO, None, None)
     if state in ("EXHAUSTED", "ABANDONED") and (code == "ACCESS_BLOCKED_3_TIMES" or code in ACCESS_CLOSE_CODES):
@@ -632,19 +642,21 @@ def job_view(row, owner_keys, asked, live_reading, fmt, waits=None):
             # also ask `applications.uncertain_submission`, `_no_try_again_when_uncertain`).
             "try_again": access_cards.TRY_AGAIN_LABEL if not unsure and (
                 access_cards.can_try_again(state, code)
-                or access_cards.access_outcomes.recovery_try_again(state, code)) else None}
+                or access_cards.access_outcomes.recovery_try_again(state, code)) else None,
+            # Abandon, beside Try again, on a job parked for the user (owner, 2026-11-14): never a dead end.
+            "abandon": access_cards.ABANDON_LABEL if not unsure and access_cards.access_outcomes.parked_for_user(state, code) else None}
 
 
 def _no_try_again_when_uncertain(reader, view):
     """Try again is never shown on a job whose submission may have reached the employer (hard line: the
     button would be refused, `access_outcomes.try_again`). Asked only for a row that would show it."""
-    if view.get("try_again") and reader.database is not None:
+    if (view.get("try_again") or view.get("abandon")) and reader.database is not None:
         import applications
         try:
             if applications.uncertain_submission(reader.database, view["key"]):
-                view["try_again"] = None
+                view["try_again"] = view["abandon"] = None
         except Exception:
-            view["try_again"] = None
+            view["try_again"] = view["abandon"] = None
     return view
 
 
@@ -781,6 +793,9 @@ RAW_TEXT = re.compile(r"\b[A-Z]+_[A-Z0-9_]+\b|/|\\")
 # Closed after waiting on the user (E15.T1): the closed card keeps the apply-by-hand line.
 ACCESS_CLOSE_CODES = frozenset({"ACCESS_ABANDONED_BY_YOU", "ACCESS_WAITED_7_DAYS", "ACCESS_SKIPPED_BY_SETTING",
                                 "ACCESS_POSTING_CLOSED"})
+# Closed with no wall behind it (access_outcomes.PLAIN_CLOSE_CODES): the headline and the to-do line say it all.
+PLAIN_CLOSE_CODES = frozenset({"POSTING_CLOSED", "ABANDONED_BY_YOU", "POSTING_CANNOT_TAKE_APPLICATION",
+                               "SITE_SHOWS_ALREADY_APPLIED"})
 ACCESS_NOUNS = {"AUTHENTICATION_REQUIRED": "a sign-in", "MFA_REQUIRED": "a sign-in code", "CAPTCHA_REQUIRED": "a human check"}
 GEOGRAPHY_POINTER = "/facts/hiring_geography_includes_candidate"
 
@@ -863,7 +878,7 @@ def closed_reason(reader, key, state, code, closing=None):
             nouns = sorted({ACCESS_NOUNS.get(block.get("code"), "a sign-in or a human check") for block in blocks})
             return ("The application site asked for %s each of the %d times Sidedoor tried, so nothing was submitted."
                     % (" or ".join(nouns), len(blocks)))
-    if root in ACCESS_CLOSE_CODES:
+    if root in ACCESS_CLOSE_CODES or root in PLAIN_CLOSE_CODES:
         return None   # the headline already says why and the to-do line says to apply by hand: once each
     if root == applications.UPLOAD_GIVE_UP_CODE:
         detail = overview._json(_latest(reader, "SELECT detail FROM application_events WHERE job_key=? AND event='%s' "

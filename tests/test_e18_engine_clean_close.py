@@ -106,12 +106,14 @@ class Order(unittest.TestCase):
         # the starter's own ask is refused. Chrome is still running: the starter waits before any signal.
         self.platform("darwin")
         self.second_ask_refused = True
-        self.guard_ends(self.guard(os.getpid()))
+        proxy = self.guard(os.getpid())
+        self.guard_ends(proxy)
         self.starter_ends()
         self.assertEqual(self.events, ["request", "request refused", "wait 10", "signals"])
         # Nobody managed to ask (no record of the endpoint at all): the wait, then the old stop.
         del self.events[:]
         self.running = True
+        proxy.audit.close()   # the guard's process has ended (its record closed with it); Windows deletes no open file
         (self.directory / browser_runtime.GUARD_AUDIT).unlink()
         self.starter_ends()
         self.assertEqual(self.events, ["wait 10", "signals"])

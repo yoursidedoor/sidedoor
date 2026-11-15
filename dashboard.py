@@ -666,6 +666,21 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             return HTMLResponse(templates.get_template("access_note.html").render(f=flash))
         return await run_in_threadpool(applications_view, request, job=job_key, tried=flash)
 
+    @app.post("/applications/abandon")
+    async def applications_abandon(request: Request):
+        """Abandon, beside Try again, on a job parked for the user (owner, 2026-11-14)."""
+        import access_cards
+        import applications
+        import approvals_page
+        form = await request.form()
+        job_key = form.get("job_key") if isinstance(form.get("job_key"), str) else ""
+        flash = await run_in_threadpool(access_write, lambda database: access_cards.abandon_parked(database, job_key, applications.stamp()))
+        if flash is None:
+            flash = {"tone": "error", "text": approvals_page.BUSY}
+        if request.headers.get("hx-request") == "true":
+            return HTMLResponse(templates.get_template("access_note.html").render(f=flash))
+        return await run_in_threadpool(applications_view, request, job=job_key, tried=flash)
+
     # --- Overview (E6.T3; E6.T0 section 5): "not running" with [Start], then the day's numbers ------
 
     def overview(request, message=None, message_at="health", needs_flash=None):

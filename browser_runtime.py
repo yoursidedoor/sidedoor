@@ -24,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 
 import log
@@ -196,16 +197,26 @@ def seal(directory):
     return folder
 
 
+def _remove_read_only(function, path, _error):
+    """shutil.rmtree's error handler: clear the read-only mark `seal` set and retry the one call that
+    failed. Windows refuses to delete a read-only file (WinError 5); elsewhere the mark never blocks it."""
+    os.chmod(path, stat.S_IRWXU)
+    function(path)
+
+
 def unstage(directory):
-    """Delete the session's staged copies when it ends (review fix 10). Never raises."""
+    """Delete the session's staged copies when it ends (review fix 10). Never raises; a folder it
+    could not delete is logged, never silently left behind."""
     folder = upload_folder(directory)
     try:
         if folder.is_dir() and not folder.is_symlink():
             os.chmod(folder, 0o700)
-            shutil.rmtree(folder)
+            # `onexc` from Python 3.12, `onerror` before it; both hand the handler (function, path, _).
+            handler = {"onexc" if sys.version_info >= (3, 12) else "onerror": _remove_read_only}
+            shutil.rmtree(folder, **handler)
             return True
-    except OSError:
-        pass
+    except Exception as error:   # never raises: it runs in a session's `finally` (a retried os.open raises TypeError)
+        LOG.warning("STAGED_UPLOADS_NOT_REMOVED (%s, errno %s)", type(error).__name__, getattr(error, "errno", None))
     return False
 
 

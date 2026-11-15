@@ -7,6 +7,7 @@ import ctypes
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import platform
 import plistlib
@@ -136,7 +137,10 @@ class Readers(unittest.TestCase):
         self.assertEqual(portable.native_machine(MachineApi(portable.PE_ARM64)), portable.PE_ARM64)   # also for an x64 program
         self.assertIsNone(portable.native_machine(MachineApi(works=False)))
         self.assertIsNone(portable.native_machine(object()))                                 # Windows without the call
-        self.assertIsNone(portable.native_machine())                                         # not Windows
+        if os.name == "nt":   # the real reader, on a real Windows machine (the public check's, the test VM's)
+            self.assertIn(portable.native_machine(), (portable.PE_AMD64, portable.PE_ARM64))
+        else:
+            self.assertIsNone(portable.native_machine())                                     # not Windows
 
     def test_the_platform_version_is_the_api_contract_never_the_kernels_ten(self):
         self.assertEqual(portable.api_contract_version(lambda: 0x00130000), (19, 0))         # Windows 11 24H2
@@ -147,7 +151,11 @@ class Readers(unittest.TestCase):
             raise FileNotFoundError("no such key")
         for read in (missing, lambda: 0, lambda: "19", lambda: None):
             self.assertIsNone(portable.api_contract_version(read))
-        self.assertIsNone(portable.api_contract_version())                                   # not Windows
+        if os.name == "nt":   # the real reader, on a real Windows machine
+            major, minor = portable.api_contract_version()
+            self.assertTrue(1 <= major <= 99 and 0 <= minor <= 99, (major, minor))
+        else:
+            self.assertIsNone(portable.api_contract_version())                               # not Windows
 
     def test_the_display_is_the_real_one_in_every_dpi_awareness_mode(self):
         # A 1366x768 laptop at 100% is 1366x768, never a 1920x1080 or a 1280x900 it does not have.
@@ -163,7 +171,11 @@ class Readers(unittest.TestCase):
         self.assertEqual(portable.primary_display(DisplayApi((1920, 1080), 1920, 168)), (1098, 618, 1.75))
         for broken in (DisplayApi(fail="mode"), DisplayApi(fail="dpi"), DisplayApi((0, 0)), DisplayApi(told=0)):
             self.assertIsNone(portable.primary_display(broken))
-        self.assertIsNone(portable.primary_display())                                        # not Windows
+        if os.name == "nt":   # the real reader, on a real Windows machine
+            width, height, scale = portable.primary_display()
+            self.assertTrue(width >= 640 and height >= 480 and 1.0 <= scale <= 5.0, (width, height, scale))
+        else:
+            self.assertIsNone(portable.primary_display())                                    # not Windows
 
 
 class WindowsCase(unittest.TestCase):
@@ -676,6 +688,7 @@ class MacUnchanged(unittest.TestCase):
             out["background_command"] = browser_runtime.background_command(Path("/x.app"), Path("/p"))
         return out
 
+    @unittest.skipIf(os.name == "nt", "macOS: the golden text holds POSIX paths (a Windows path's separators change it)")
     def test_the_mac_guard_and_chrome_arguments_are_byte_for_byte_what_they_were(self):
         out = self.build()
         self.assertEqual(hashlib.sha256(json.dumps(out, sort_keys=True).encode()).hexdigest(), MAC_GOLDEN)

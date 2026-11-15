@@ -290,7 +290,7 @@ def _banner(home):
         found = {"tone": "info", "text": "Sidedoor %s is available." % available["latest"], "update_phase": "available",
                  "action_label": "Download", "action_href": available["download_url"], "external": True,
                  "notes": notes[:MAX_NOTES] or None, "dismiss": available["latest"]}
-        return _with_update_now(found, available)
+        return _with_update_now(found, available, home)
     except Exception:
         return None
 
@@ -320,22 +320,29 @@ def _required_banner(home):
         return None
 
 
-def _with_update_now(found, available):
+def _with_update_now(found, available, home=None):
     """B (owner, 2026-10-23): [Update now] beside [Download] on the built Mac app in Applications when
     version.json names a zip for this Mac; while it runs, or after it failed, the banner says so.
-    Anywhere else, or without the zip, the banner is unchanged."""
+    Anywhere else, or without the zip, the banner is unchanged. While a swap helper is alive (this
+    process's or an earlier one's, `mac_update.helper_running`) there is no button, so a second press
+    has nothing to start: `mac_update.UPDATING_LINE` in the copy that started it, and
+    `mac_update.QUIT_TO_FINISH_LINE` in a copy opened again meanwhile (the helper waits for that copy)."""
     try:
         import mac_update
         if not mac_update.can_install() or mac_update.asset_for(available) is None:
             return found
         state = mac_update.status()
         found = dict(found, download_href=found["action_href"])
+        replacing = state.get("version") == available["latest"] and state.get("state") == "replacing"
+        waiting = mac_update.helper_running(_home(home))
+        if waiting and not replacing and not mac_update.started_helper():
+            return dict(found, update_phase="working", dismiss=None, poll=True, text=mac_update.QUIT_TO_FINISH_LINE)
+        if replacing or waiting:
+            return dict(found, update_phase="restarting", tone="success", dismiss=None, poll=True,
+                        text=mac_update.UPDATING_LINE)
         if state.get("version") == available["latest"] and state.get("state") in ("working", "replacing"):
             # poll: the banner re-reads itself (GET /update/banner, every 3 s) until the state ends.
             # owner, 2026-10-24: no buttons while it runs; a short "Updating to X…", then "Restarting…".
-            if state["state"] == "replacing":
-                return dict(found, update_phase="restarting", tone="success", dismiss=None, poll=True,
-                            text="Sidedoor opens again by itself on %s." % available["latest"])
             return dict(found, update_phase="working", text="Updating to %s…" % available["latest"], dismiss=None, poll=True)
         label = "Update now"
         if state.get("version") == available["latest"] and state.get("state") == "failed":

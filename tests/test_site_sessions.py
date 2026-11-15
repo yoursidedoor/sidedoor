@@ -215,7 +215,8 @@ class Store(Home):
         self.assertFalse((self.home / site_sessions.STORE_FILE).exists())              # reading makes nothing
         self.signed_in(chrome)
         path = self.home / site_sessions.STORE_FILE
-        self.assertEqual(os.stat(path).st_mode & 0o077, 0)
+        if os.name != "nt":   # POSIX mode bits (Windows has none: os.stat reports 0o666 for any writable file)
+            self.assertEqual(os.stat(path).st_mode & 0o077, 0)
         blob = path.read_bytes()
         path.write_bytes(blob[:-5] + b"XXXXX")                                         # tampered / corrupt, key readable
         self.assertFalse(site_sessions.has(SITE))

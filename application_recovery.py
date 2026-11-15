@@ -537,6 +537,34 @@ def relabel_failed_closures(database, now):
     return done
 
 
+def close_parked_closed_postings(database, now):
+    """Jobs parked with their reads spent (BLOCKED on CLAIMS_EXHAUSTED_BLOCKER) whose last inconclusive
+    read stopped on the declared closed-posting code (`applications.ROLE_CLOSED_CODE`), parked before
+    such a read closed its job at once: closed now as that read would close them
+    (`access_outcomes.close_plain`). Only a read of the job's current scope counts: one taken before the
+    user's last Try again says nothing about the reads after it. Never a job whose submission may have
+    reached the employer. A closed job is no longer parked, so a second run finds nothing. Call inside
+    a transaction. Returns the closed job keys."""
+    import access_outcomes
+    done = []
+    for job in database.execute("SELECT * FROM application_jobs WHERE state='BLOCKED' AND blocker=?",
+                                (CLAIMS_EXHAUSTED_BLOCKER,)).fetchall():
+        last = database.execute("SELECT id,detail FROM application_events WHERE job_key=? AND event=? ORDER BY id DESC LIMIT 1",
+                                (job["job_key"], applications.INCONCLUSIVE_EVENT)).fetchone()
+        try:
+            stopped = json.loads(last[1]).get("blocker") if last else None
+        except (TypeError, ValueError, AttributeError):
+            stopped = None
+        if stopped != applications.ROLE_CLOSED_CODE:
+            continue
+        if database.execute("SELECT 1 FROM application_events WHERE job_key=? AND event='APPLICATION_REOPENED' AND id>? LIMIT 1",
+                            (job["job_key"], last[0])).fetchone():
+            continue
+        if access_outcomes.close_plain(database, dict(job), "POSTING_CLOSED", now, read_code=stopped):
+            done.append(job["job_key"])
+    return done
+
+
 def investigate_claims(database, key, started_at, attempt=None):
     """(requests, claims) of this lifecycle's investigate reads, excluding provider refusals."""
     rows = [row for row in database.execute("""SELECT claims,result FROM desktop_requests

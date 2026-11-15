@@ -153,6 +153,7 @@ NOT_OFFERED = "Sidedoor cannot do that for this application yet."
 PRESS_FAILED = "That did not go through. Reload the page and try again."
 STEP_UNAVAILABLE_HERE = "This step can't be done inside Sidedoor on this computer yet."   # a LinkedIn card: no posting to point at
 TRY_AGAIN_LABEL = "Try again"
+ABANDON_LABEL = "Abandon"
 
 
 def kind(card):
@@ -526,6 +527,24 @@ def abandon(database, job_key, now):
         if not access_outcomes.abandon(database, job_key, now):
             return {"tone": "error", "text": NOT_CLOSED}
         _free_site(database, wait["host"], now)
+        return {"tone": "success", "text": ABANDONED}
+
+
+def abandon_parked(database, job_key, now):
+    """Abandon on the Applications page, beside Try again, for a job parked for the user
+    (`access_outcomes.parked_for_user`): the job closes as abandoned by the user and keeps Try again.
+    Never a job whose submission may have reached the employer."""
+    job_key = str(job_key or "")
+    with database:
+        _locked(database)
+        job = database.execute("SELECT state,blocker FROM application_jobs WHERE job_key=?", (job_key,)).fetchone()
+        if not job or not access_outcomes.parked_for_user(job["state"], job["blocker"]):
+            return {"tone": "warning", "text": GONE}
+        import applications
+        if applications.uncertain_submission(database, job_key):
+            return {"tone": "warning", "text": NOT_ABANDONED}
+        if not access_outcomes.abandon_parked(database, job_key, now):
+            return {"tone": "error", "text": NOT_CLOSED}
         return {"tone": "success", "text": ABANDONED}
 
 

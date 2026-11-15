@@ -132,6 +132,26 @@ CLOSE_REASONS = {
 }
 CLOSE_CODES = frozenset(code for code, _ in CLOSE_REASONS.values())
 CLOSE_WORDS = {code: words for code, words in CLOSE_REASONS.values()}
+# Closes with no wall behind them (owner, 2026-11-14), siblings of the two above: a read found the
+# posting closed, and the user's Abandon on a job parked for them. Their own codes, because the codes
+# above mean "closed while it waited behind a sign-in or a check" (`try_again` asks for that wait, and
+# the closed card of one says to apply yourself past the wall). The job is ABANDONED and keeps Try again.
+PLAIN_CLOSE_REASONS = {
+    "POSTING_CLOSED": ("POSTING_CLOSED", "The posting has closed."),
+    "ABANDONED": ("ABANDONED_BY_YOU", CLOSE_REASONS["ABANDONED"][1]),
+    # A read stopped on a code Python has no rule for and the AI marked the stop final (its structured
+    # `final` true, owner's pick Z1 a, 2026-11-14): closed at once. The AI's own sentence is kept in the
+    # close's event for the record only; these words are all the page shows (owner's pick Y2 b).
+    "FINAL_STOP": ("POSTING_CANNOT_TAKE_APPLICATION", "Sidedoor's AI found this posting cannot take your application."),
+    # The submit session, before Submit, found the site saying this candidate already applied (owner's
+    # pick Y1 a, 2026-11-14): closed at once, with no retry and no Try again (`NO_TRY_AGAIN_CLOSE_CODES`).
+    # Never SUBMITTED and no receipt: Sidedoor saw the site's statement, not a submission.
+    "ALREADY_APPLIED": ("SITE_SHOWS_ALREADY_APPLIED", "The site shows you already applied."),
+}
+NO_TRY_AGAIN_CLOSE_CODES = frozenset({PLAIN_CLOSE_REASONS["ALREADY_APPLIED"][0]})
+# The plain closes that keep Try again (`recovery_try_again`).
+PLAIN_CLOSE_CODES = frozenset(code for code, _ in PLAIN_CLOSE_REASONS.values()) - NO_TRY_AGAIN_CLOSE_CODES
+PLAIN_CLOSED_EVENT = "APPLICATION_CLOSED_PLAIN"
 
 WAITING, RESOLVED, CLOSED = "WAITING", "RESOLVED", "CLOSED"
 RECORDED_EVENT = "ACCESS_WAIT_RECORDED"
@@ -1080,6 +1100,38 @@ def close(database, job, why, now, wall=None, reason=None):
     return True
 
 
+def close_plain(database, job, why, now, read_code=None, reason=None):
+    """Close a job no wall holds, with its reason (`PLAIN_CLOSE_REASONS`): POSTING_CLOSED (a read found
+    the posting closed), FINAL_STOP (a read stopped and the AI marked the stop final; `reason` is the
+    AI's own sentence, recorded as given and never read here) or ABANDONED (the user's Abandon on a
+    parked job), or ALREADY_APPLIED (the site said so before Submit; the one close here with no Try
+    again). As `close`: the job is ABANDONED under the reason's code and keeps Try again, and never
+    with a submission that may have reached the employer. Call inside a transaction. Returns True when
+    closed."""
+    import applications
+    _lock(database)
+    code, words = PLAIN_CLOSE_REASONS[why]
+    if applications.uncertain_submission(database, job["job_key"]):
+        return False
+    previous = database.execute("SELECT state,blocker FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()
+    if not applications.hold(database, job, code, words, now, "ABANDONED"):
+        return False
+    applications.event(database, job["job_key"], PLAIN_CLOSED_EVENT,
+                       {"why": why, "code": code, "read_code": read_code,
+                        # "ai_reason", never "reason": the log page prints a detail's "reason" (failures_page._error_text).
+                        **({"ai_reason": reason.strip()[:2000]} if isinstance(reason, str) and reason.strip() else {}),
+                        "previous_state": {"state": previous["state"], "blocker": previous["blocker"]},
+                        "submission_status": "NOT_SUBMITTED"}, now)
+    return True
+
+
+def abandon_parked(database, job_key, now):
+    """The user's Abandon on a job parked for them with Try again (`parked_for_user`). Returns True when closed."""
+    _lock(database)
+    job = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (job_key,)).fetchone()
+    return bool(job) and parked_for_user(job["state"], job["blocker"]) and close_plain(database, dict(job), "ABANDONED", now)
+
+
 def abandon(database, job_key, now):
     """The user's Abandon (the card button is T2)."""
     _lock(database)
@@ -1179,8 +1231,18 @@ def recovery_try_again(state, code):
     the AI itself decided to abandon: that one keeps its code and is not here."""
     import application_recovery
     code = str(code or "")
-    return ((state == "BLOCKED" and code in (application_recovery.NEEDS_YOU_BLOCKER, application_recovery.CLAIMS_EXHAUSTED_BLOCKER))
-            or (state == "ABANDONED" and code == application_recovery.NOT_DECIDED_BLOCKER))
+    # Also a job closed with no wall behind it (`close_plain`: the posting had closed, or the user
+    # abandoned it while it was parked): it keeps Try again as a wall's close does (owner, 2026-11-14).
+    return (parked_for_user(state, code)
+            or (state == "ABANDONED" and (code == application_recovery.NOT_DECIDED_BLOCKER or code in PLAIN_CLOSE_CODES)))
+
+
+def parked_for_user(state, code):
+    """True for a job still open but parked for the user, never retried on its own: the Applications
+    page offers Try again and Abandon on it (owner, 2026-11-14)."""
+    import application_recovery
+    return state == "BLOCKED" and str(code or "") in (application_recovery.NEEDS_YOU_BLOCKER,
+                                                      application_recovery.CLAIMS_EXHAUSTED_BLOCKER)
 
 
 def try_again(database, job_key, now):

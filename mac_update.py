@@ -33,6 +33,16 @@ quarantine flag on it, and opens it. On any failure it puts the old app back, re
 a notice (`NOTICE_FILE`) that pages show until dismissed (`read_notice`). Every step goes to
 logs/updater.log.
 
+One helper at a time (owner's Mac, 2026-11-13: an update held for 3 minutes, Update pressed twice,
+two helpers). `swap` records the helper it started (`HELPER_FILE`: its pid and script path) and the
+helper removes its own record when it ends. While that helper is alive (`helper_running`: the pid
+still runs that script; a record of a dead helper is removed and never blocks), `start_install` and
+`offer_move` start nothing and the banner has no button: `UPDATING_LINE` in the copy that started
+the helper (`started_helper`, for the moment before it quits), `QUIT_TO_FINISH_LINE` in any other
+copy (one opened again meanwhile, which is itself what the helper waits for). The helper's "still
+running" check (`busy`) reads each process's program path (`ps -o comm=`) and matches only one that
+starts with a bundle's Contents folder, never a command line that merely mentions it.
+
 Every OS command goes through `runner` (argv -> (exit code, output)); tests inject fakes and never
 run codesign, spctl, ditto, open or the swap against a real app.
 """
@@ -60,6 +70,12 @@ LOG = log.get(__name__)
 APP_NAME = "Sidedoor.app"
 APPLICATIONS = Path("/Applications")
 NOTICE_FILE = "update-notice"
+HELPER_FILE = "update-helper"   # <home>/update-helper: the running swap helper's pid, script, version (one per line)
+# The one line shown where the update button is while a helper waits or works (owner to confirm the words).
+UPDATING_LINE = "Updating. Sidedoor restarts when it is ready."
+# The line in a Sidedoor opened again while a helper it did not start is waiting: this very copy is
+# what the helper waits for (owner, 2026-11-14, pick V1 a).
+QUIT_TO_FINISH_LINE = "Updating. Quit Sidedoor to finish."
 LOG_NAME = "updater.log"
 PREVIOUS_VERSIONS = "previous-versions"
 ARCHES = ("arm64", "x86_64")
@@ -82,7 +98,7 @@ PLATFORM = None
 FROZEN = None
 PROGRAM = None
 USER_HOME = None
-SPAWN = None      # (argv, env) -> None: starts the helper detached
+SPAWN = None      # (argv, env) -> the helper's pid (or None): starts the helper detached
 QUIT_SELF = None  # () -> None: this Sidedoor's normal stop
 KILL = None       # (pid, signal) -> None
 
@@ -357,6 +373,10 @@ def _job_names(pids, runner=None):
 # newline-separated. SD_OPEN is /usr/bin/open (tests point it at a recorder).
 HELPER = r'''#!/bin/sh
 cleanup() {
+  if [ -n "$SD_RECORD" ] && [ -f "$SD_RECORD" ]; then   # this helper's own record only
+    first=""; read -r first <"$SD_RECORD" 2>/dev/null
+    if [ "$first" = "$$" ]; then /bin/rm -f "$SD_RECORD"; fi
+  fi
   case "$SD_CLEANUP" in */sidedoor-download-*) /bin/rm -rf "$SD_CLEANUP" ;; esac
   case "$0" in */sidedoor-update-*/swap.sh) /bin/rm -rf "$(/usr/bin/dirname "$0")" ;; esac
 }
@@ -421,11 +441,13 @@ alive() {
   return 1
 }
 busy() {
-  procs=$(/bin/ps -axww -o command= 2>/dev/null) || return 0
+  # comm is each process's own program path, one per line (spaces kept, not cut short with -ww): only
+  # a line that STARTS with a bundle's Contents folder counts, never a command line that mentions it.
+  procs=$(/bin/ps -axww -o comm= 2>/dev/null) || return 0
   saved=$IFS; IFS='
 '
   for b in $SD_BUNDLES; do
-    case "$procs" in *"$b/Contents/"*) IFS=$saved; return 0 ;; esac
+    case "$IFS$procs" in *"$IFS$b/Contents/"*) IFS=$saved; return 0 ;; esac
   done
   IFS=$saved; return 1
 }
@@ -495,8 +517,38 @@ def _writable(target, has_old):
 
 
 def _spawn(argv, env):
-    subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, close_fds=True)
+    return subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True).pid
+
+
+_started = []   # this process started a swap helper (`swap`); never reset: the process quits next
+
+
+def started_helper():
+    """True in the Sidedoor that started a swap helper itself; False in a copy opened again later."""
+    return bool(_started)
+
+
+def helper_running(home, runner=None):
+    """True while the swap helper recorded in `HELPER_FILE` is alive: its pid still runs that very
+    script (so a reused pid never counts). A record of a helper that is gone is removed, so it never
+    blocks a later update. Never raises."""
+    record = Path(home) / HELPER_FILE
+    try:
+        lines = record.read_text().splitlines()
+    except (OSError, ValueError):
+        return False
+    try:
+        pid, script = lines[0].strip(), lines[1].strip()
+        if pid.isdigit() and script.endswith("/swap.sh") and script in command_of(int(pid), runner):
+            return True
+    except Exception:
+        pass
+    try:
+        record.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
 
 
 def swap(home, new_app, target, old_version, new_version, pids, bundles, spawn=None, open_command="/usr/bin/open",
@@ -518,9 +570,15 @@ def swap(home, new_app, target, old_version, new_version, pids, bundles, spawn=N
            "SD_HAD_OLD": "1" if Path(target).exists() else "0", "SD_PIDS": " ".join(str(pid) for pid in pids),
            "SD_BUNDLES": "\n".join(str(bundle) for bundle in bundles if bundle),
            "SD_WAIT": str(WAIT_SECONDS), "SD_JOB_WAIT": str(JOB_WAIT_SECONDS), "SD_OPEN": open_command,
-           "SD_CLEANUP": str(cleanup or "")}
+           "SD_CLEANUP": str(cleanup or ""), "SD_RECORD": str(home / HELPER_FILE)}
     LOG.warning("mac update: starting the swap helper for %s -> %s", target, new_version)
-    (spawn or SPAWN or _spawn)(["/bin/sh", str(script)], env)
+    pid = (spawn or SPAWN or _spawn)(["/bin/sh", str(script)], env)
+    _started.append(True)
+    if isinstance(pid, int):
+        try:
+            (home / HELPER_FILE).write_text("%d\n%s\n%s\n" % (pid, script, new_version or ""))
+        except OSError as error:
+            LOG.warning("mac update: the helper could not be recorded: %s", type(error).__name__)
     return script
 
 
@@ -646,8 +704,12 @@ def install(version, home, runner=None, fetch=None, spawn=None, quit_self=None, 
 
 
 def start_install(version, home, **options):
-    """[Update now]: `install` in a background thread (a download can take minutes). False when one
-    is already going. A retry clears an earlier failure's notice first."""
+    """[Update now]: `install` in a background thread (a download can take minutes). False, and
+    nothing started, when one is already going in this process or a swap helper is still alive
+    (`helper_running`: e.g. Sidedoor opened again while the helper waits). A retry clears an earlier
+    failure's notice first."""
+    if helper_running(home, options.get("runner")):
+        return False
     with _lock:
         if _state.get("state") in ("working", "replacing"):
             return False
@@ -739,6 +801,9 @@ def offer_move(home, running=None, port=None, runner=None, spawn=None, kill=None
     if login_item.app_location_problem(program=program, platform="darwin", frozen=True) is None:
         return False
     run = _runner(runner)
+    if helper_running(home, run):   # an update is already on its way: say so, start nothing, step aside
+        tell(UPDATING_LINE, run)
+        return True
     here = bundle_of(program)
     source = (translocated or original_path)(here) if here is not None else None
     if source is None or not (source / "Contents" / "Info.plist").is_file():

@@ -50,7 +50,9 @@ def switches(command):
 class VisibleWindow(unittest.TestCase):
     def setUp(self):
         for patcher in (mock.patch.object(browser_runtime, "BACKGROUND_ALLOWED", True),
-                        mock.patch.object(browser_runtime.sys, "platform", "win32")):
+                        mock.patch.object(browser_runtime.sys, "platform", "win32"),
+                        # Not this machine's work area (read on a real Windows machine): each test's own screen.
+                        mock.patch.object(portable, "work_area", lambda api=None: None)):
             patcher.start()
             self.addCleanup(patcher.stop)
 

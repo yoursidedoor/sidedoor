@@ -13,7 +13,19 @@
 {% macro try_again(j, where="") %}
   {# E15.T2: a job closed while it waited on a sign-in or a human check can be reopened (access_cards.try_again).
      On the list it sits on the collapsed row (owner, 2026-11-14): the row's line says to press it. #}
-  {% if j.try_again %}
+  {% if j.try_again and j.abandon %}
+  {# A job parked for the user (owner, 2026-11-14): Try again, and Abandon beside it. Either answer replaces both. #}
+  <span class="app-try app-actions{{ ' ' + where if where }}">
+    <form method="post" action="/access/try-again" hx-post="/access/try-again" hx-target="closest .app-actions" hx-swap="outerHTML">
+      <input type="hidden" name="job_key" value="{{ j.key }}">
+      <button class="button button-quiet" type="submit">{{ j.try_again }}</button>
+    </form>
+    <form method="post" action="/applications/abandon" hx-post="/applications/abandon" hx-target="closest .app-actions" hx-swap="outerHTML">
+      <input type="hidden" name="job_key" value="{{ j.key }}">
+      <button class="button button-quiet" type="submit">{{ j.abandon }}</button>
+    </form>
+  </span>
+  {% elif j.try_again %}
   <form class="app-try{{ ' ' + where if where }}" method="post" action="/access/try-again" hx-post="/access/try-again" hx-target="this" hx-swap="outerHTML">
     <input type="hidden" name="job_key" value="{{ j.key }}">
     <button class="button button-quiet" type="submit">{{ j.try_again }}</button>

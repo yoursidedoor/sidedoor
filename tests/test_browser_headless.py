@@ -5,6 +5,7 @@ launches and CDP are fakes; no Chrome, no Node."""
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
 import sys
@@ -207,6 +208,7 @@ class HeadlessGuard(unittest.TestCase):
         self.assertIsNone(proxy.start_focus_keeper())          # no focus keeper for a windowless Chrome
         self.assertTrue(self.audit(proxy)[0]["headless"])
 
+    @unittest.skipIf(os.name == "nt", "macOS: `open -g` and the minimized mode (Windows has no minimized mode: test_windows_hidden)")
     def test_a_failed_headless_launch_runs_the_session_headed_and_minimized(self):
         # H2: `open -g` headed first, then Playwright's own launch; both by the --offscreen rules.
         directory = scratch(self)
@@ -243,6 +245,7 @@ class HeadlessGuard(unittest.TestCase):
 class ClientHints(unittest.TestCase):
     """H3: the installed Chrome's client hints, on every page and every page opened later."""
 
+    @unittest.skipIf(os.name == "nt", "macOS: the version in the Chrome app's bundle and the Mac's client hints (Windows: test_windows_hidden)")
     def test_metadata_comes_from_the_installed_chrome_and_this_mac(self):
         binary = fake_chrome(self)
         hints = browser_runtime.client_hints(binary, mac_version="15.6.0", machine="arm64")
@@ -341,6 +344,7 @@ class ScreenMetrics(unittest.TestCase):
         self.assertEqual(browser_guard.parse_screen("1728x1117@2"), {"width": 1728, "height": 1117, "scale": 2.0})
         self.assertIsNone(browser_guard.parse_screen("nonsense"))
 
+    @unittest.skipIf(os.name == "nt", "macOS: the guard's headless launch at the display's scale (Windows: launch_hidden_windows, test_windows_hidden)")
     def test_the_guard_gets_the_screen_and_uses_it_for_launch_and_every_page(self):
         directory = scratch(self)
         with mock.patch.object(browser_runtime, "BACKGROUND_ALLOWED", True), \

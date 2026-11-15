@@ -5,6 +5,7 @@ import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one
 import importlib.util
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -421,6 +422,7 @@ class HeadlessFirstTest(unittest.TestCase):
     def visible_open(self):
         return {"draft_open": True, "needs_sign_in": False, "draft_url": None, "reason": "Open."}
 
+    @unittest.skipIf(os.name == "nt", "macOS: the draft reopens with `open -g` (Windows reopens with launch_windows: WindowsLaunchTest)")
     def test_signed_in_already_the_saved_draft_reopens_behind_then_comes_forward(self):
         status, hold, calls = self.run_with([self.saved()])
         self.assertEqual(calls, [{"headless": True, "wait_offered": False, "prompt": "headless", "hold_released": False}])
@@ -429,6 +431,7 @@ class HeadlessFirstTest(unittest.TestCase):
         self.assertEqual([value["state"] for value in status.seen], ["open", "idle"])
         self.assertTrue(hold.released)
 
+    @unittest.skipIf(os.name == "nt", "macOS: the draft reopens with `open -g` (Windows reopens with launch_windows: WindowsLaunchTest)")
     def test_outlook_drafts_reopen_too(self):
         url = "https://outlook.live.com/mail/0/drafts/id/AQMkADAw"
         self.run_with([self.saved(url)], provider="Outlook.com")
@@ -680,7 +683,10 @@ class WindowsLaunchTest(unittest.TestCase):
                                           lambda core=True: {"creationflags": 0x08000204}),
                         mock.patch.object(browser_runtime.portable, "contain", self.contained.append),
                         mock.patch.object(browser_runtime.portable, "kill_tree", self.killed.append),
-                        mock.patch.object(browser_runtime.portable, "profile_busy", lambda path: False)):
+                        mock.patch.object(browser_runtime.portable, "profile_busy", lambda path: False),
+                        # Not this machine's screen (on a real Windows machine both are read): the usual place.
+                        mock.patch.object(browser_runtime, "windows_display", lambda read=None: None),
+                        mock.patch.object(browser_runtime.portable, "work_area", lambda api=None: None)):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(browser_runtime._STARTED.clear)
@@ -719,7 +725,18 @@ class WindowsLaunchTest(unittest.TestCase):
         command = browser_runtime.mcp_command(config, self.root / "session", "support_email")
         self.assertEqual(command[command.index("--cdp-endpoint") + 1], "http://127.0.0.1:53999")
         self.assertNotIn("--user-data-dir", command)
-        plain = browser_runtime.mcp_command({"browser_driver": {"profile": str(self.profile)}}, self.root / "s2", "submit")
+        # Windows' hidden launch (owner, 2026-11-12, option A: browser_runtime.hidden_launch / windows_told): a
+        # session that can be hidden is started by the guard, so the browser server is given no profile (the
+        # guard adds --cdp-endpoint itself). One that cannot be hidden (this computer's Chrome or display could
+        # not be read) keeps Playwright's own launch on the profile, as before.
+        told = {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0.0.0", "client_hints": {"brands": []},
+                "screen": {"width": 1366, "height": 768, "scale": 1.0}}
+        with mock.patch.object(browser_runtime, "windows_told", lambda config, operation, platform=None, binary=None: told):
+            hidden = browser_runtime.mcp_command({"browser_driver": {"profile": str(self.profile)}}, self.root / "s2", "submit")
+        self.assertNotIn("--cdp-endpoint", hidden)
+        self.assertNotIn("--user-data-dir", hidden)
+        with mock.patch.object(browser_runtime, "windows_told", lambda config, operation, platform=None, binary=None: None):
+            plain = browser_runtime.mcp_command({"browser_driver": {"profile": str(self.profile)}}, self.root / "s3", "submit")
         self.assertNotIn("--cdp-endpoint", plain)
         self.assertIn("--user-data-dir", plain)
 

@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -1028,7 +1029,9 @@ class Profile(Case):
                          {"email": EMAIL, "full_name": "Alex Example", "phone": "+1 206 555 0100",
                           "linkedin": "https://www.linkedin.com/in/alex-example"})
         self.assertEqual(request["candidate"]["resume"], "Alex Example. Staff engineer, eight years of distributed systems.")
-        self.assertEqual(self.during, (b"Synthetic resume, never uploaded", True, "uploads", "0o400"))
+        # Read-only: the owner's alone on POSIX; Windows keeps only the read-only bit of a mode (0o444).
+        self.assertEqual(self.during, (b"Synthetic resume, never uploaded", True, "uploads",
+                                       "0o444" if os.name == "nt" else "0o400"))
         self.assertTrue(request["candidate"]["resume_file"].endswith("Alex Example CV.pdf"))    # the name the user uploaded it under
         for promised in ("request.context.policy.answers", "request.candidate.resume", "request.candidate.resume_file"):
             self.assertIn(promised, self.prompts[-1])

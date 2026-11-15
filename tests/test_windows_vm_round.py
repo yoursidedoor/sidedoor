@@ -11,6 +11,7 @@ Also: Chrome is found without any Program Files variable in the environment."""
 import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one)
 import io
 import json
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -109,7 +110,13 @@ class WorkArea(unittest.TestCase):
         self.assertEqual(portable.work_area(self.Api((1920, 1080), 1280, 96, (0, 0, 1280, 672))), (0, 0, 1280, 672))
         self.assertEqual(portable.work_area(self.Api((1366, 768), 1366, 96, (0, 40, 1366, 768))), (0, 40, 1366, 728))
         self.assertIsNone(portable.work_area(self.Api((1024, 768), 1024, 96, None)))
-        self.assertIsNone(portable.work_area())                        # not Windows
+        if os.name == "nt":   # the real reader, on a real Windows machine: inside the display it reports
+            left, top, width, height = portable.work_area()
+            wide, high, _ = portable.primary_display()
+            self.assertTrue(left >= 0 and top >= 0 and width > 0 and height > 0
+                            and left + width <= wide and top + height <= high, ((left, top, width, height), (wide, high)))
+        else:
+            self.assertIsNone(portable.work_area())                    # not Windows
 
     def test_a_shown_window_lies_inside_the_work_area_not_under_the_taskbar(self):
         screen = {"width": 1024, "height": 768, "scale": 1.0}
@@ -291,14 +298,24 @@ class ChromesPlace(unittest.TestCase):
             self.assertEqual(setup_steps.chrome_path("win32", exists=lambda path: path == registered), registered)
         self.assertEqual(portable.app_path("chrome.exe", lambda name: '"D:\\Apps\\Chrome\\chrome.exe"'.strip('"')), registered)
         self.assertIsNone(portable.app_path("chrome.exe", lambda name: None))
-        self.assertIsNone(portable.app_path("chrome.exe"))             # not Windows
+        if os.name == "nt":   # the real reader, on a real Windows machine: its registered Chrome, when it has one
+            found = portable.app_path("chrome.exe")
+            self.assertTrue(found is None or found.lower().endswith("chrome.exe"), found)
+        else:
+            self.assertIsNone(portable.app_path("chrome.exe"))         # not Windows
 
 
 class GuardsPackages(unittest.TestCase):
     """VM pass 2: the build venv had no `websockets`, which the guard's own DevTools client needs."""
 
     def test_both_builds_name_the_guards_socket_modules_and_refuse_a_venv_without_them(self):
+        import importlib.util
         import sys
+        # The Windows build command lists what the tray and PDF packages import, so it needs them installed.
+        # A machine without them (the public Linux check) cannot ask for that command line: skip, not error.
+        absent = [name for name in ("pystray", "fpdf") if importlib.util.find_spec(name) is None]
+        if absent:
+            self.skipTest("needs the packaged libraries installed: " + ", ".join(absent))
         tools = str(Path(browser_guard.__file__).resolve().parent / "tools")
         if tools not in sys.path:
             sys.path.insert(0, tools)

@@ -622,6 +622,8 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 .overview-sign-ins .access-flash { margin: 0 0 12px; }
 .app-try { margin: 4px 0 12px; }
 .app-try-row { margin: 0; }
+.app-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.app-actions form { margin: 0; }
 .app-try-row .button { padding: 4px 14px; font-size: 0.875rem; }
 
 /* The live view (E15.T5): the page in Sidedoor's browser, for a step only the user can do. */

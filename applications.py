@@ -93,6 +93,16 @@ UPLOAD_RESET_REOPEN_CLASS = "EMBEDDED_FRAME_UPLOAD_20261002"
 # (RECONCILE_ACCESS_BLOCKED). ACCESS_GIVE_UP_* name the rows the old rule closed; the dashboard still
 # reads them.
 ACCESS_BLOCK_CODES = frozenset({"AUTHENTICATION_REQUIRED", "CAPTCHA_REQUIRED", "MFA_REQUIRED"})
+# The code an inspect read returns for a posting that has closed (declared in the inspect prompt,
+# `application_browser`). The job closes at that first read (owner, 2026-11-14): matched on this exact
+# code only, never on the read's own words.
+ROLE_CLOSED_CODE = "ROLE_CLOSED"
+# The code a submit session returns when, before Submit, the site shows this candidate already applied
+# (declared in the submit prompt; owner's pick Y1 a, 2026-11-14). Submit-time only: a read never stops
+# on it (the read's own already-applied signals were deleted on 2026-09-27). Exact code only.
+ALREADY_APPLIED_CODE = "ALREADY_APPLIED"
+# Pre-arm submit stops that close the job at once, and the close each makes (`access_outcomes.close_plain`).
+PREARM_CLOSES = {ROLE_CLOSED_CODE: "POSTING_CLOSED", ALREADY_APPLIED_CODE: "ALREADY_APPLIED"}
 ACCESS_GIVE_UP_CODE = "ACCESS_BLOCKED_3_TIMES"
 ACCESS_GIVE_UP_EVENT = "APPLICATION_ACCESS_BLOCKS_SPENT"
 EARLIEST_START_SEMANTICS = frozenset({"earliest_start_date", "earliest_available_start_date",
@@ -2643,6 +2653,25 @@ def hold_submission_blocker(database, job, result, now, config=None):
         if not give_up_on_uploads(database, job, now):
             hold_access_block(database, job, blocker["code"], blocker["next_action"], now, config, result)
         return
+    if submit and blocker["code"] in PREARM_CLOSES:
+        # The submit session found, before Submit, the posting closed (owner's pick Z2 a, 2026-11-14) or
+        # the site saying this candidate already applied (Y1 a). The binding above proved this session
+        # never armed, so nothing was sent: the attempt is closed as `reconcile` closes a never-armed
+        # one, and the job closes at once (it used to wait, spend the try and submit again from the
+        # saved read). An already-applied close keeps no Try again and is never SUBMITTED: only the
+        # site's statement was seen. Matched on the exact code only. `close_plain` still refuses a job
+        # with anything else on record that may have reached the employer; that one takes the
+        # reconcile hold below, as before.
+        import access_outcomes
+        database.execute("UPDATE application_attempts SET state='CONFIRMED_NOT_SUBMITTED',result=? "
+                         "WHERE job_key=? AND state='SUBMITTING' AND attempt_id=?",
+                         (json.dumps({"status": "NOT_SUBMITTED", "basis": "GUARD_NEVER_ARMED",
+                                      "request_id": submit["request_id"], "request_state": "CONSUMED"}),
+                          job["job_key"], submit["attempt_id"]))
+        event(database, job["job_key"], "RECONCILED_GUARD_NEVER_ARMED",
+              {"request_id": submit["request_id"], "request_state": "CONSUMED"}, now)
+        if access_outcomes.close_plain(database, job, PREARM_CLOSES[blocker["code"]], now, read_code=blocker["code"]):
+            return
     next_at = (dt.datetime.fromisoformat(now) + dt.timedelta(seconds=900)).isoformat()
     hold(database, job, blocker["code"], blocker["next_action"], now, "RECONCILE", next_at)
 
@@ -3061,11 +3090,13 @@ BLOCKING_FACTS = tuple(field for field in REQUIRED_FACTS if field not in INFORMA
 # a read, so a read recorded as inconclusive under the old contract says nothing about this one.
 # 2026-10-23: bumped with per-location authorization verdicts (J1 A), so a saved read without
 # them is not reused and every job is read again with one verdict per location option.
-READ_CONTRACT_REVISION = "inspect-contract-2026-10-23-per-location-authorization"
+# 2026-11-14: bumped with the declared ROLE_CLOSED code (a closed posting closes the job at the first
+# read), so a read recorded as inconclusive under the old contract does not suppress the next one.
+READ_CONTRACT_REVISION = "inspect-contract-2026-11-14-role-closed-code"
 # When READ_CONTRACT_REVISION last changed (at or before its install). Inspect claims made
 # before it were read under a superseded contract and do not count toward the per-scope
 # inspect cap (`application_connection.inspect_scope_start`). Bump both together.
-READ_CONTRACT_REVISION_AT = "2026-10-23T00:00:00+00:00"
+READ_CONTRACT_REVISION_AT = "2026-11-14T00:00:00+00:00"
 # Seven days, deliberately (owner, 2026-09-22, after trying two). This is how long an
 # inconclusive read suppresses the next one. Shortening it treats the symptom: the suppression
 # is keyed on the job's INPUT and cannot see that the reading code changed, so a shorter window
@@ -4606,6 +4637,23 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
             with database:
                 hold_access_block(database, job, code, action, now, config, review)
             return
+        if code == ROLE_CLOSED_CODE:
+            # The posting has closed: the job closes now, with no further read and nothing asked of the
+            # user (owner, 2026-11-14). Never a job whose submission may have reached the employer:
+            # that one is left to the ordinary path below.
+            with database:
+                if access_outcomes.close_plain(database, job, "POSTING_CLOSED", now, read_code=code):
+                    return
+        elif stated.get("final") is True and job_route(code, "BLOCKED") == "ORDINARY":
+            # A stop Python has no rule for (not a user hold, not recoverable, never a code Python sets
+            # itself) that the AI marked final: another read could not change it, so the job closes now
+            # with the AI's own sentence as the reason (owner's pick Z1 a, 2026-11-14). Only the
+            # structured boolean, exactly True, is read: never the code's or the reason's words. Anything
+            # else retries as before, and so does a job whose submission may have reached the employer.
+            with database:
+                if access_outcomes.close_plain(database, job, "FINAL_STOP", now, read_code=code,
+                                               reason=stated.get("reason")):
+                    return
         if (not application_recovery.user_hold(blocker["code"])
                 and blocker["code"] != "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED"
                 and (isinstance(review.get("partial_review"), dict) or review.get("observed_browser_calls"))):
@@ -5090,6 +5138,8 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
     import application_recovery
     with database:
         application_recovery.relabel_failed_closures(database, now)
+        # Jobs parked before a closed posting closed its job at the first read (owner, 2026-11-14).
+        application_recovery.close_parked_closed_postings(database, now)
     local_day = workflow_tasks.budget_day(now, config.get("timezone", "America/Los_Angeles"))
     try:
         budget_room = config.get("daily_compute_seconds", 10800) - workflow_tasks.compute_used(database, local_day)

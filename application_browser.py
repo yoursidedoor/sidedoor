@@ -297,8 +297,18 @@ request.job.requisition:
   shows a different id or none, it may be another posting: return blocked with code
   REQUISITION_MISMATCH naming what you found, and never submit there.
 In an inspect read, otherwise stop only for a real barrier: the role is closed, a login is
-required, human verification as above, or the page cannot be used. Submit adds its own stops
+required, human verification as above, or the page cannot be used. When the role is closed (the
+posting is closed, filled, removed or no longer takes applications): return blocked with code
+ROLE_CLOSED. Submit adds its own stops
 in its section; investigate reads follow their own section.
+Every blocked stop of an inspect read also says whether it is final: "blocked": {"code": "X",
+"final": true or false, "reason": "...", "next_action": "..."}. final is a JSON boolean. Set it true
+only when reading this posting again later could not change the outcome (the posting is gone, the
+form no longer exists, the page states it takes no applications at all). Set it false when a later
+read may work (the page failed to load, a site error, a timeout), and whenever you are not sure.
+reason is one plain sentence for the candidate saying what the page shows, with no codes,
+addresses or file paths. This gives no new reason to stop: stop only for the barriers above, and
+keep judging eligibility in facts as before, never as a stop.
 
 
 Return the outer schema with request_id, binding, result_json (a JSON object encoded
@@ -307,7 +317,7 @@ result_json uses the existing application adapter contract shown in the request'
 result_contract. Unknown optional values may be omitted or null. A blocked/error
 result may have empty evidence; it never establishes eligibility or delivery.
 "Return blocked with code X" means result_json carries "blocked": {"code": "X", "next_action": "..."}
-(an inspect keeps what it observed in partial_review); the contract's keys stay at the top level of
+(an inspect adds final and reason as above and keeps what it observed in partial_review); the contract's keys stay at the top level of
 result_json, never wrapped in another object.
 """
 
@@ -550,6 +560,11 @@ If the field does not make the day/month order clear (no format shown, no placeh
 cue such as a picker or a named month), do not guess: stop before arming with DATE_ORDER_UNCLEAR,
 a next_action, and "field": the exact field of that question from request.questions (copied
 verbatim).
+When, before arming, the page shows that the role is closed (the posting is closed, filled,
+removed or no longer takes applications), do not arm: return blocked with code ROLE_CLOSED and a
+next_action.
+When, before arming, the page shows that this candidate has already applied to this job, do not
+arm: return blocked with code ALREADY_APPLIED and a next_action.
 When the form refuses a supplied answer itself (it clears it, or shows a format or validation
 error for it) and re-entering it as above does not help, do not arm and do not change the answer:
 return blocked with code INVALID_SUPPLIED_ANSWER, a next_action, "field": the exact field of that
@@ -2264,6 +2279,15 @@ def normalize_stop(result, operation):
     if not stop and result.get("status") != "BLOCKED":
         return
     stop = dict(stop)
+    if operation == "inspect":
+        # The AI's own verdict on its stop (owner's pick Z1 a, 2026-11-14): `final` and its `reason`
+        # sentence travel with the stop. A stop stated outside a `blocked` object (a string, or status
+        # BLOCKED with a code) keeps the ones the result states at its top level. Structural keys only:
+        # the values are carried exactly as given, never coerced (`applications.process` closes a job
+        # only on `final` exactly True).
+        for key in ("final", "reason"):
+            if key not in stop and key in result:
+                stop[key] = result[key]
     if not (isinstance(stop.get("code"), str) and stop["code"].strip()):
         if operation != "inspect":
             raise ValueError("APPLICATION_BLOCKER_INVALID")

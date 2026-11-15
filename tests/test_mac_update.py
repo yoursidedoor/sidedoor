@@ -9,6 +9,7 @@ import os
 import plistlib
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -38,6 +39,22 @@ def make_app(folder, version="1.1.0", identifier="Sidedoor", name="Sidedoor.app"
         {"CFBundleIdentifier": identifier, "CFBundleShortVersionString": version, "CFBundleExecutable": "sidedoor"}))
     (app / "Contents" / "MacOS" / "sidedoor").write_text("binary")
     return app
+
+
+MAC = sys.platform == "darwin"   # `ps -o comm=` prints the program's whole path on macOS only
+FAKE_HELPER = "/tmp/sidedoor-update-abc123/swap.sh"
+
+
+def program_in(app, seconds):
+    """A process whose own program path is inside `app` (Contents/MacOS/job, a link to /bin/sleep)."""
+    program = Path(app) / "Contents" / "MacOS" / "job"
+    if not program.exists():
+        program.symlink_to("/bin/sleep")
+    return subprocess.Popen([str(program), str(seconds)])
+
+
+def record_helper(home, pid=4242, script=FAKE_HELPER):
+    (Path(home) / mac_update.HELPER_FILE).write_text("%d\n%s\n2.0.0\n" % (pid, script))
 
 
 class FakeMac:
@@ -83,6 +100,8 @@ class Base(unittest.TestCase):
         self.home.mkdir()
         mac_update._set()
         self.addCleanup(mac_update._set)
+        mac_update._started.clear()   # a fresh process: it has started no helper
+        self.addCleanup(mac_update._started.clear)
         patcher = mock.patch("version.__version__", "1.1.0")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -198,6 +217,64 @@ class BannerTest(Base):
                     break
                 time.sleep(0.01)
         self.assertEqual(self.banner()["text"], "new why")
+
+    def test_a_live_helper_shows_the_line_and_a_second_press_starts_nothing(self):
+        self.store()
+        record_helper(self.home)
+        alive = FakeMac(ps="/bin/sh %s\n" % FAKE_HELPER)   # e.g. Sidedoor opened again while the helper waits
+        with mock.patch.object(mac_update, "can_install", return_value=True), \
+                mock.patch.object(mac_update, "RUNNER", alive), \
+                mock.patch.object(mac_update, "install", side_effect=AssertionError("a second update started")):
+            self.assertFalse(mac_update.start_install("2.0.0", self.home))
+            banner = update_check.banner(self.home)
+        self.assertEqual(mac_update.status(), {})   # no thread, no download, no second helper
+        # This copy did not start the helper: it was opened again, and it is what the helper waits for.
+        self.assertEqual(banner["text"], "Updating. Quit Sidedoor to finish.")
+        self.assertEqual(banner["text"], mac_update.QUIT_TO_FINISH_LINE)
+        self.assertNotIn("forms", banner)   # no button to press again
+        self.assertEqual((banner["poll"], banner["dismiss"]), (True, None))
+
+    @unittest.skipIf(os.name == "nt", "a live stand-in helper is a POSIX shell (macOS only)")
+    def test_the_copy_that_started_the_helper_keeps_the_restart_line(self):
+        self.store()
+        app = make_app(self.tmp / "Applications")
+        started = []
+
+        def spawn(argv, env):   # a stand-in helper that only stays alive: the real script is never run
+            started.append(subprocess.Popen(["/bin/sh", "-c", "sleep 20; true", argv[1]]))
+            return started[0].pid
+        script = mac_update.swap(self.home, self.tmp / "new", app, "1.1.0", "2.0.0", [], [app], spawn=spawn)
+        self.addCleanup(__import__("shutil").rmtree, script.parent, True)
+        self.addCleanup(started[0].wait)
+        self.addCleanup(started[0].kill)
+        with mock.patch.object(mac_update, "can_install", return_value=True), \
+                mock.patch.object(mac_update, "machine_arch", return_value="arm64"):   # the real ps sees the helper
+            banner = update_check.banner(self.home)
+            self.assertEqual(banner["text"], "Updating. Sidedoor restarts when it is ready.")
+            self.assertEqual(banner["text"], mac_update.UPDATING_LINE)
+            self.assertNotIn("forms", banner)
+            mac_update._started.clear()   # the same live record, seen from a copy that did not start it
+            banner = update_check.banner(self.home)
+            self.assertEqual(banner["text"], mac_update.QUIT_TO_FINISH_LINE)
+            self.assertNotIn("forms", banner)
+
+    def test_a_dead_helpers_record_does_not_block(self):
+        self.store()
+        for ps in ("", "/usr/bin/vim notes.txt\n"):   # the pid is gone, or now belongs to something else
+            record_helper(self.home)
+            dead = FakeMac(ps=ps)
+            with mock.patch.object(mac_update, "can_install", return_value=True), \
+                    mock.patch.object(mac_update, "RUNNER", dead):
+                self.assertEqual(update_check.banner(self.home)["forms"][0]["label"], "Update now")
+                self.assertFalse((self.home / mac_update.HELPER_FILE).exists())   # the stale record is removed
+                record_helper(self.home)
+                with mock.patch.object(mac_update, "install", return_value={"state": "declined", "message": None}) as install:
+                    self.assertTrue(mac_update.start_install("2.0.0", self.home))
+                    for _ in range(200):
+                        if install.called and not mac_update.status():
+                            break
+                        time.sleep(0.01)
+                install.assert_called_once()
 
     def test_helper_notice_goes_once_that_version_is_installed(self):
         (self.home / mac_update.NOTICE_FILE).write_text("Sidedoor 1.1.0 didn't install: why.\n")
@@ -387,8 +464,56 @@ class HelperTest(Base):
         self.assertFalse((self.home / mac_update.NOTICE_FILE).exists())
         self.assertIn("opened the new Sidedoor 2.0.0", self.log())
 
+    def busy(self, bundle):
+        """The helper's own `busy` function, alone, against the real `ps`."""
+        text = mac_update.HELPER
+        function = text[text.index("busy() {"):text.index('log "waiting for Sidedoor to quit')]
+        done = subprocess.run(["/bin/sh", "-c", function + "\nif busy; then echo busy; else echo free; fi"],
+                              env={"PATH": "/usr/bin:/bin", "SD_BUNDLES": "%s\n%s" % (self.tmp / "Other.app", bundle)},
+                              capture_output=True, text=True, timeout=30)
+        return done.stdout.strip()
+
+    @unittest.skipUnless(MAC, "the busy check reads macOS ps (comm is the program's whole path)")
+    def test_busy_is_a_program_from_the_bundle_never_a_command_line_that_mentions_it(self):
+        bundle = make_app(self.tmp / "A folder with a long name and spaces in it", name="Fake Sidedoor.app")
+        inside = str(bundle / "Contents" / "MacOS" / "job")
+        mention = subprocess.Popen(["/bin/sh", "-c", "/bin/sleep 20; true", inside])   # 2026-11-13: held 3 minutes
+        self.addCleanup(mention.wait)
+        self.addCleanup(mention.kill)
+        time.sleep(0.3)
+        self.assertIn(inside, subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(mention.pid)],
+                                             capture_output=True, text=True).stdout)   # the path IS in its command line
+        self.assertEqual(self.busy(bundle), "free")
+        job = program_in(bundle, 20)
+        self.addCleanup(job.wait)
+        self.addCleanup(job.kill)
+        time.sleep(0.3)
+        self.assertEqual(self.busy(bundle), "busy")
+
+    def test_swap_records_its_helper_and_the_helper_removes_its_own_record(self):
+        record = self.home / mac_update.HELPER_FILE
+        script = mac_update.swap(self.home, self.new, self.old, "1.1.0", "2.0.0", [], [self.old],
+                                 spawn=lambda argv, env: 4242, open_command=str(self.recorder))
+        self.addCleanup(__import__("shutil").rmtree, script.parent, True)   # this helper never runs, so never cleans up
+        self.assertEqual(record.read_text().splitlines(), ["4242", str(script), "2.0.0"])
+        self.assertTrue(mac_update.helper_running(self.home, FakeMac(ps="/bin/sh %s\n" % script)))
+        started = []
+
+        def spawn(argv, env):   # the real helper, on the temporary folders, with the recorders
+            started.append(subprocess.Popen(argv, env=dict(env, SD_DIALOG=str(self.dialog))))
+            return started[0].pid
+        mac_update.swap(self.home, self.new, self.old, "1.1.0", "2.0.0", [], [self.old], spawn=spawn,
+                        open_command=str(self.recorder))
+        self.assertEqual(record.read_text().splitlines()[0], str(started[0].pid))
+        self.assertEqual(started[0].wait(timeout=60), 0)
+        self.assertFalse(record.exists())   # ended: its record is gone
+        record_helper(self.home, pid=1)     # another helper's record is never removed by this one
+        self.assertEqual(self.run_helper(), 1)   # (the new app is gone now: it gives up)
+        self.assertTrue(record.exists())
+
+    @unittest.skipUnless(MAC, "the busy check reads macOS ps (comm is the program's whole path)")
     def test_waits_for_jobs_running_from_the_bundle(self):
-        job = subprocess.Popen(["/bin/sh", "-c", "sleep 3; true", str(self.old / "Contents" / "MacOS" / "sidedoor")])
+        job = program_in(self.old, 3)
         self.addCleanup(job.wait)
         self.addCleanup(job.kill)
         started = time.monotonic()
@@ -396,8 +521,9 @@ class HelperTest(Base):
         self.assertGreaterEqual(time.monotonic() - started, 1.5)
         self.assertEqual(mac_update.bundle_version(self.old), "2.0.0")
 
+    @unittest.skipUnless(MAC, "the busy check reads macOS ps (comm is the program's whole path)")
     def test_a_job_that_outlasts_the_wait_leaves_the_old_app(self):
-        job = subprocess.Popen(["/bin/sh", "-c", "sleep 20; true", str(self.old / "Contents" / "MacOS" / "sidedoor")])
+        job = program_in(self.old, 20)
         self.addCleanup(job.wait)
         self.addCleanup(job.kill)
         self.assertEqual(self.run_helper(SD_JOB_WAIT="2"), 1)
@@ -650,6 +776,27 @@ class DashboardTest(Base):
         with mock.patch.object(mac_update, "can_install", return_value=True), \
                 mock.patch.object(mac_update, "RUNNER", FakeMac()):
             self.assertIn('name="next" value="/"', client.get("/update/banner", params={"next": "//evil"}).text)
+
+    def test_a_second_press_shows_the_waiting_line_where_the_button_was(self):
+        body = {"latest": "2.0.0", "download_url": "https://yoursidedoor.com/download", "notes": "",
+                "mac": {"arm64": {"url": ARM, "sha256": SHA}, "x86_64": {"url": INTEL, "sha256": SHA}}}
+        update_check.check(self.home, lambda _url: json.dumps(body).encode())
+        record_helper(self.home)
+        with mock.patch.object(mac_update, "can_install", return_value=True), \
+                mock.patch.object(mac_update, "RUNNER", FakeMac(ps="/bin/sh %s\n" % FAKE_HELPER)), \
+                mock.patch.object(mac_update, "install", side_effect=AssertionError("a second update started")):
+            client = self.client()
+            response = client.post("/update/install", data={"version": "2.0.0", "next": "/applications"},
+                                   headers={"origin": "http://127.0.0.1:54321"})
+            self.assertEqual((response.status_code, response.headers["location"]), (303, "/applications"))
+            page = client.get("/applications").text
+            fragment = client.get("/update/banner", params={"next": "/applications"}).text
+        for text in (page, fragment):
+            self.assertIn("Updating. Quit Sidedoor to finish.", text)
+            self.assertIn('id="update-banner"', text)
+            self.assertNotIn('action="/update/install"', text)
+            self.assertNotIn(">Update now</button>", text)
+        self.assertEqual(mac_update.status(), {})
 
     def test_install_route_does_nothing_off_the_mac_app(self):
         with mock.patch.object(mac_update, "start_install") as start:

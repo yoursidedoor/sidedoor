@@ -65,7 +65,8 @@ class InspectEvidenceBinding(unittest.TestCase):
 
     def test_string_blocked_and_a_wrapped_review_keep_their_stop(self):
         self.assertEqual(inspect({"blocked": "ROLE_CLOSED", "reason": "Closed"}, [])["blocked"],
-                         {"code": "ROLE_CLOSED", "next_action": "Closed"})
+                         # The stop keeps the result's own reason (and `final`) beside its code (2026-11-14).
+                         {"code": "ROLE_CLOSED", "next_action": "Closed", "reason": "Closed"})
         wrapped = inspect({"status": "BLOCKED", "review": {"verified": True, "facts": {"open": True}}}, [])
         self.assertEqual(wrapped["blocked"]["code"], "INSPECTION_INCOMPLETE")
 

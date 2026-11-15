@@ -869,6 +869,7 @@ class ReviewFixesTest(Case):
 
 @unittest.skipUnless(DEPENDENCIES, "the live view's packages (fastapi, httpx, websockets) are not installed")
 class CrashTest(Case):
+    @unittest.skipIf(os.name == "nt", "POSIX: the orphan is found with `ps` and Chrome's SingletonLock, and signalled")
     async def test_a_live_session_killed_midway_leaves_no_lock_and_no_chrome_after_the_next_start(self):
         """R14: Sidedoor is killed with a live session open (and its guard dies without closing Chrome). The
         lock goes with the process; the next start's check (browser_runtime.unavailable: close_orphan and the

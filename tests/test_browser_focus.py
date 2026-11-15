@@ -59,7 +59,19 @@ class LaunchIsNeverActivated(unittest.TestCase):
         guard, mcp = argv[:argv.index("--")], argv[argv.index("--") + 1:]
         self.assertEqual(guard[guard.index("--background-chrome") + 1], str(directory / "profile"))
         self.assertNotIn("--user-data-dir", mcp)
-        with mock.patch.object(browser_runtime.sys, "platform", "win32"):
+        # Windows' hidden launch (owner, 2026-11-12, option A: browser_runtime.hidden_launch / windows_told): a
+        # session that can be hidden is started by the guard there too. One that cannot (this computer's Chrome
+        # or display could not be read) keeps Playwright's own launch on the profile, as before.
+        told = {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0.0.0", "client_hints": {"brands": []},
+                "screen": {"width": 1366, "height": 768, "scale": 1.0}}
+        with mock.patch.object(browser_runtime.sys, "platform", "win32"), \
+                mock.patch.object(browser_runtime, "windows_told", lambda config, operation, platform=None, binary=None: told):
+            argv = browser_runtime.guard_command(config, directory, "inspect")
+        guard, mcp = argv[:argv.index("--")], argv[argv.index("--") + 1:]
+        self.assertEqual(guard[guard.index("--background-chrome") + 1], str(directory / "profile"))
+        self.assertNotIn("--user-data-dir", mcp)
+        with mock.patch.object(browser_runtime.sys, "platform", "win32"), \
+                mock.patch.object(browser_runtime, "windows_told", lambda config, operation, platform=None, binary=None: None):
             argv = browser_runtime.guard_command(config, directory, "inspect")
         self.assertNotIn("--background-chrome", argv)
         self.assertEqual(argv[argv.index("--user-data-dir") + 1], str(directory / "profile"))
