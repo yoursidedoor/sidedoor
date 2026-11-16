@@ -24,7 +24,7 @@ jobs:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
-    timeout-minutes: 45   # Windows takes ~28 min for the suite
+    timeout-minutes: 90   # Windows reached 45 min with the suite about half done (1.0.1, 2026-11-14)
     strategy:
       fail-fast: false
       matrix:

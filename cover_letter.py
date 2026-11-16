@@ -31,12 +31,14 @@ WIDTH = 468          # 6.5 inches at 72 dpi
 MAX_CHARACTERS = 6000
 
 
-def render(text, path, max_characters=MAX_CHARACTERS):
+def render(text, path, max_characters=MAX_CHARACTERS, links=()):
     """Write `text` as a PDF at `path`; returns its sha256.
 
     US Letter, 1-inch margins, 11 pt DejaVu Sans on 15 pt lines, 6.5-inch text width (the layout
     the previous built-in writer used). The ATS résumé (`resume_intake`, E4.T2) passes a larger
-    `max_characters` than a cover letter. fpdf2 is imported here, so the rest of the product
+    `max_characters` than a cover letter, and `links`: [(written, url)], each `written` a piece
+    of the text that opens `url` when clicked (the résumé file's own links; nothing else is made a
+    link). fpdf2 is imported here, so the rest of the product
     loads without it; without it no PDF can be written (PDF_WRITER_MISSING).
     """
     if not isinstance(text, str) or not text.strip():
@@ -58,12 +60,53 @@ def render(text, path, max_characters=MAX_CHARACTERS):
     pdf.add_page()
     # Left-aligned: justified lines are stretched with extra spaces, which a text extractor (and
     # so an applicant tracking system) reads as double spaces between words.
-    pdf.multi_cell(WIDTH, LEADING, text, align="L")
+    pieces = _pieces(text, links)
+    if len(pieces) == 1:
+        pdf.multi_cell(WIDTH, LEADING, text, align="L")
+    for piece, url in pieces if len(pieces) > 1 else ():
+        # The same left-aligned flow, piece by piece, so an address can carry its link.
+        pdf.write(LEADING, piece, link=url or "")
     output = bytes(pdf.output())
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(output)
     return hashlib.sha256(output).hexdigest()
+
+
+ADDRESS_CHARACTERS = "-._~/@:%?#=&+"
+
+
+def occurrences(text, written):
+    """[(start, end)] where `written` (an address) stands in the text on its own, capitals aside: not
+    as a part of a longer address ("x.com/a" inside "x.com/abc", a site inside an email address).
+    A full stop, comma or the like that only ends the sentence does not make it longer."""
+    found = []
+    low, want = text.lower(), written.lower()
+    if not want or len(low) != len(text):
+        low, want = text, written
+    start = low.find(want) if want else -1
+    while start != -1:
+        end = start + len(want)
+        before = text[start - 1] if start else " "
+        after = text[end:end + 2] + "  "
+        ends_sentence = after[0] in ".,;:!?" and not (after[1].isalnum() or after[1] in ADDRESS_CHARACTERS)
+        if (not (before.isalnum() or before in ADDRESS_CHARACTERS)
+                and (ends_sentence or not (after[0].isalnum() or after[0] in ADDRESS_CHARACTERS))):
+            found.append((start, end))
+        start = low.find(want, end)
+    return found
+
+
+def _pieces(text, links):
+    """[(piece, url or None)]: the text in order, cut at every place a link's written form stands."""
+    spans = [(start, end, url) for written, url in links or () for start, end in occurrences(text, written)]
+    pieces, at = [], 0
+    for start, end, url in sorted(spans, key=lambda span: (span[0], -span[1])):
+        if start < at:   # inside a longer address already taken
+            continue
+        pieces += [(text[at:start], None), (text[start:end], url)]
+        at = end
+    return [piece for piece in pieces + [(text[at:], None)] if piece[0]]
 
 
 def prepare(root, job_key, answers):

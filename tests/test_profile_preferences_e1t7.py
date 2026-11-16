@@ -29,8 +29,9 @@ def silent_us_read():
             "facts": {"country": "US", "work_mode": "remote", "stated_eligibility_requirements": ["NONE_STATED"]}}
 
 
-def ranked(policy, city, mode, home=None, country=None):
+def ranked(policy, city, mode, home=None, country=None, index=None):
     item = role()
+    item["policy_fit"]["location"]["priority_index"] = index
     if country:
         change(item, "country", country)
     change(item, "city", city)
@@ -45,8 +46,11 @@ class ProfilePreferencesTest(unittest.TestCase):
         self.assertIsNone(applications.scope_refusal(tokyo, BARE))
         self.assertIsNone(applications.location_exclusion({"country": "US", "city": "Seattle", "state": "WA",
                                                            "work_mode": "onsite"}, BARE))
-        self.assertEqual(ranked(BARE, "Seattle", "onsite"), 3)
-        self.assertEqual(ranked(BARE, "Arlington", "hybrid"), 3)
+        # Owner pick M3 a (2026-11-16): the rank follows the user's own place order, so a profile
+        # with no exclusions ranks Seattle like any other place its entry names.
+        self.assertEqual(ranked(BARE, "Seattle", "onsite", index=2), 4)
+        self.assertEqual(ranked(BARE, "Arlington", "hybrid", index=2), 4)
+        self.assertEqual(ranked(dict(BARE, location_priority=[]), "Arlington", "hybrid", index=2), 99)
         self.assertEqual(applications.target_specializations(BARE), [])
         self.assertIsNone(applications.us_authorization_label(BARE))
         read = applications.derive_silent_eligibility_facts(silent_us_read(), BARE)
@@ -69,10 +73,12 @@ class ProfilePreferencesTest(unittest.TestCase):
         # Owner, 2026-10-14: research's in_user_home_area ranks first; an excluded place stays 99.
         self.assertEqual(ranked(EXAMPLE, "Seattle", "onsite", home=True), 99)
         self.assertEqual(ranked(EXAMPLE, "Springfield", "hybrid", home=True), 1)
-        self.assertEqual(ranked(EXAMPLE, "Springfield", "hybrid", home=False), 3)
-        self.assertEqual(ranked(EXAMPLE, "Springfield", "hybrid", home=None), 3)
-        # True ranks 1 with no country condition (E1.T7 decision); other tiers unchanged.
+        # Not the home area: the rank is 2 + the position research matched (owner pick M3 a, 2026-11-16).
+        self.assertEqual(ranked(EXAMPLE, "Springfield", "hybrid", home=False, index=0), 2)
+        self.assertEqual(ranked(EXAMPLE, "Springfield", "hybrid", home=None, index=2), 4)
+        # True ranks 1 with no country condition (E1.T7 decision); no matched entry ranks last.
         self.assertEqual(ranked(EXAMPLE, "Berlin", "hybrid", home=True, country="DE"), 1)
+        self.assertEqual(ranked(EXAMPLE, "Berlin", "hybrid", home=None, country="DE", index=4), 6)
         self.assertEqual(ranked(EXAMPLE, "Berlin", "hybrid", home=None, country="DE"), 99)
         self.assertEqual(applications.target_specializations(EXAMPLE),
                          ["backend", "distributed systems", "infrastructure", "platform", "data engineering"])

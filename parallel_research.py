@@ -192,7 +192,12 @@ def research_policy(policy):
             answer = supplied[key]
             if isinstance(answer, dict) and answer.get("semantic") in RESEARCH_ANSWER_SEMANTICS:
                 answers.setdefault(answer["semantic"], []).append(answer.get("value"))
-    return {"criteria": {key: policy[key] for key in RESEARCH_CRITERIA if key in policy},
+    criteria = {key: policy[key] for key in RESEARCH_CRITERIA if key in policy}
+    if isinstance(criteria.get("resume_raw"), dict):
+        # The file's links (resume_intake, 2026-11-16) only reach the application résumé; reading them
+        # for a résumé already in use must not make research start over.
+        criteria["resume_raw"] = {key: value for key, value in criteria["resume_raw"].items() if key != "links"}
+    return {"criteria": criteria,
             "answers": answers,
             "unclassified": {key: value for key, value in policy.items()
                              if key not in RESEARCH_CRITERIA and key not in APPLICATION_ONLY_SETTINGS}}

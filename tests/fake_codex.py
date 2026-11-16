@@ -26,7 +26,7 @@ def opportunity(company, industry, observed_at):
     return {"company": company, "role": "Staff Software Engineer", "url": facts["official_destination"],
             "rationale": "SYNTHETIC test fixture only", "requisition_id": requisition, "people": [],
             "role_fit": {"fit": "STRONG", "reason": "SYNTHETIC fixture: Staff backend role matches target levels"},
-            "policy_fit": {"funding_stage": {"in_scope": True, "reason": "SYNTHETIC fixture"}, "location": {"in_scope": True, "reason": "SYNTHETIC fixture"}},
+            "policy_fit": {"funding_stage": {"in_scope": True, "reason": "SYNTHETIC fixture"}, "location": {"in_scope": True, "reason": "SYNTHETIC fixture", "priority_index": None}},
             "in_user_home_area": None,
             "evidence": [evidence(field, value, observed_at, destination) for field, value in facts.items()]}
 

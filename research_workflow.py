@@ -42,6 +42,10 @@ PROCESSOR_VERSION = 7
 #   public           agencies, staffing firms and scraped aggregators: corroboration only.
 MIRROR_RECENT_DAYS = 30
 ROLE_FITS = ("STRONG", "PARTIAL", "NONE")
+# A résumé sentence longer than this is not used in outreach. It was 240, which silently left out the long
+# sentences of a résumé that intake had saved (owner, 2026-11-16, M4 b: "raise the limit"); the note itself
+# is written by the composer from the whole résumé, so the sentence's length does not bound the note.
+CLAIM_MAX_CHARACTERS = 1000
 INVITATION_TEMPLATE_VERSION = 2
 
 
@@ -796,6 +800,32 @@ def open_proof(evidence, now):
     return "EMPLOYER_MIRROR_LIVE", record
 
 
+def scope_fit_of(role):
+    """The review's scope_fit verdicts a role's own AI verdicts stand for; {} when it carries none.
+
+    One function for research (`normalize_opportunity`) and for the judging again after the user's
+    picks changed (`pick_changes`), so both record a verdict the same way."""
+    scope_fit = {}
+    # Scope is judged by AI, never by comparing titles (owner decision, 2026-09-19). At
+    # research time that judgment is the qualification worker's role_fit (D-3), made against
+    # the candidate profile and the policy target levels; it stands in for both scope_fit
+    # dimensions here. Without one, `applications.assess` holds the role for scope review.
+    fit = role.get("role_fit")
+    if isinstance(fit, dict) and fit.get("fit") in ROLE_FITS and isinstance(fit.get("reason"), str) and fit["reason"].strip():
+        verdict = {"in_scope": fit["fit"] != "NONE", "reason": "research role_fit " + fit["fit"] + ": " + fit["reason"].strip()[:900]}
+        scope_fit = {dimension: dict(verdict) for dimension in applications.ROLE_FIT_DIMENSIONS}
+    # Funding stage and the owner's onsite location exclusions are research's own AI verdicts
+    # (owner, 2026-10-07, items 4/5), no longer Python's comparison of the reported text.
+    policy_fit = role.get("policy_fit") if isinstance(role.get("policy_fit"), dict) else {}
+    for dimension in ("funding_stage", "location"):
+        verdict = policy_fit.get(dimension)
+        if (isinstance(verdict, dict) and isinstance(verdict.get("in_scope"), bool)
+                and isinstance(verdict.get("reason"), str) and verdict["reason"].strip()):
+            scope_fit[dimension] = {
+                "in_scope": verdict["in_scope"], "reason": "research policy_fit: " + verdict["reason"].strip()[:900]}
+    return scope_fit
+
+
 def normalize_opportunity(role, *, now=None, policy=None):
     now = timestamp(now).isoformat()
     if not all(isinstance(role.get(field), str) and role[field].strip() for field in ("company", "role", "url", "rationale")):
@@ -834,23 +864,9 @@ def normalize_opportunity(role, *, now=None, policy=None):
               "employee_count_evidence": sourced.get("employee_count", {}),
               "country_authorization_evidence": sourced.get("country_authorization", {}),
               "compensation": {}, "fact_evidence": sourced}
-    # Scope is judged by AI, never by comparing titles (owner decision, 2026-09-19). At
-    # research time that judgment is the qualification worker's role_fit (D-3), made against
-    # the candidate profile and the policy target levels; it stands in for both scope_fit
-    # dimensions here. Without one, `applications.assess` holds the role for scope review.
-    fit = role.get("role_fit")
-    if isinstance(fit, dict) and fit.get("fit") in ROLE_FITS and isinstance(fit.get("reason"), str) and fit["reason"].strip():
-        verdict = {"in_scope": fit["fit"] != "NONE", "reason": "research role_fit " + fit["fit"] + ": " + fit["reason"].strip()[:900]}
-        review["scope_fit"] = {dimension: dict(verdict) for dimension in applications.ROLE_FIT_DIMENSIONS}
-    # Funding stage and the owner's onsite location exclusions are research's own AI verdicts
-    # (owner, 2026-10-07, items 4/5), no longer Python's comparison of the reported text.
-    policy_fit = role.get("policy_fit") if isinstance(role.get("policy_fit"), dict) else {}
-    for dimension in ("funding_stage", "location"):
-        verdict = policy_fit.get(dimension)
-        if (isinstance(verdict, dict) and isinstance(verdict.get("in_scope"), bool)
-                and isinstance(verdict.get("reason"), str) and verdict["reason"].strip()):
-            review.setdefault("scope_fit", {})[dimension] = {
-                "in_scope": verdict["in_scope"], "reason": "research policy_fit: " + verdict["reason"].strip()[:900]}
+    scope_fit = scope_fit_of(role)
+    if scope_fit:
+        review["scope_fit"] = scope_fit
     if review["country_authorization_evidence"].get("value") is not True:
         review["country_authorization_evidence"] = {}
     compensation = sourced.get("compensation", {})
@@ -877,26 +893,23 @@ def normalize_opportunity(role, *, now=None, policy=None):
     blocking = [unknown for unknown in unknowns if unknown != "compensation: unknown"]
     if not assessment and blocking:
         assessment = ("BLOCKED", "RESEARCH_EVIDENCE_UNRESOLVED", "Resolve conflicting or missing evidence")
-    country, mode = facts["country"], facts["work_mode"]
-    priority = 99
-    home_area = mode in {"hybrid", "onsite"} and role.get("in_user_home_area") is True
-    if home_area or (country == "US" and mode in {"hybrid", "onsite"}):
-        # Research's own judgment that the role is within commuting distance of the user's
-        # recorded location ranks first, in any country (owner, 2026-10-14); a US role judged
-        # false or null ranks 3.
-        priority = 1 if home_area else 3
-        # One shared rule, not a second copy of a city set: the profile's onsite/hybrid
-        # exclusions (none when it records none). The literal
-        # `{"seattle", "san francisco"}` that used to sit here let Bellevue, Redmond,
-        # Kirkland, Tacoma and Everett rank as ordinary US onsite roles. `facts["state"]` is
-        # already carried through from sourced evidence a few lines above, so where research
-        # recorded a state the rule is exact rather than a city list.
-        if applications.excluded_onsite_location(facts, resolved_policy):
-            priority = 99
-    elif country == "US" and mode == "remote":
-        priority = 2
-    elif facts.get("region") == "Europe" and mode == "remote":
-        priority = 4
+    # The order roles are worked in follows the user's own place order (owner pick M3 a, 2026-11-16):
+    # 1 for a role research judged within commuting distance of the user's recorded location
+    # (owner, 2026-10-14), then 2 + the position of the first `location_priority` entry the role
+    # matches, then 99 for everything else. Lower is sooner. Python never reads place text: the
+    # position is research's own `policy_fit.location.priority_index`.
+    mode = facts["work_mode"]
+    index = location_priority_index(role, resolved_policy)
+    if mode in {"hybrid", "onsite"} and role.get("in_user_home_area") is True:
+        priority = 1
+    elif index is not None:
+        priority = min(2 + index, 98)
+    else:
+        priority = 99
+    # One shared rule, not a second copy of a city set: the profile's onsite/hybrid exclusions
+    # (none when it records none) put an excluded place last, whatever research ranked it.
+    if mode in {"hybrid", "onsite"} and applications.excluded_onsite_location(facts, resolved_policy):
+        priority = 99
     interview = sourced.get("interview_at", {})
     upcoming = False
     if interview:
@@ -1104,7 +1117,7 @@ def _create_draft(database, person, opportunity, *, plan_id, now=None):
         return {"state": "BLOCKED", "reason": "TEAM_NEED_UNVERIFIED"}
     designated = database.execute("SELECT value FROM rw_meta WHERE key='designated_resume'").fetchone()
     claims = [(row[0], json.loads(row[1])) for row in database.execute("SELECT id,payload FROM rw_claims ORDER BY id")]
-    claims = [(claim_id, claim) for claim_id, claim in claims if designated and claim["source_sha256"] == designated[0] and len(claim["text"]) <= 240]
+    claims = [(claim_id, claim) for claim_id, claim in claims if designated and claim["source_sha256"] == designated[0] and len(claim["text"]) <= CLAIM_MAX_CHARACTERS]
     # The scaffold claim is only a source binding: the AI composer writes the note from the
     # full resume and job description and the AI send judge checks it (owner decisions
     # 2026-09-19 and 2026-10-21), so a role without a recorded specialization still gets a scaffold. A claim
@@ -1187,6 +1200,20 @@ def _dropped(entry, reason):
     # `source` says which posting or record this is (never shown): two different ones stay apart.
     return {"company": text(entry.get("company")), "role": text(entry.get("role")), "reason": reason,
             "source": source[:2048] if source else None}
+
+
+def location_priority_index(role, policy):
+    """Research's `policy_fit.location.priority_index` when it is usable: a position inside the
+    user's `location_priority`. Anything else is None: a result saved before the field existed,
+    a value that is not a whole number, or a position the list does not have."""
+    policy_fit = role.get("policy_fit") if isinstance(role.get("policy_fit"), dict) else {}
+    location = policy_fit.get("location") if isinstance(policy_fit.get("location"), dict) else {}
+    index = location.get("priority_index")
+    entries = (policy or {}).get("location_priority")
+    if (isinstance(index, int) and not isinstance(index, bool) and isinstance(entries, list)
+            and 0 <= index < len(entries)):
+        return index
+    return None
 
 
 def check_role(role, *, now=None, policy=None):

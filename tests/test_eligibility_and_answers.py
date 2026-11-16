@@ -615,8 +615,9 @@ class ApplicationGateTests(unittest.TestCase):
 class ResearchRankingTests(unittest.TestCase):
     """The research side must apply the same exclusion, not a second city list."""
 
-    def opportunity(self, city, mode, state=None):
+    def opportunity(self, city, mode, state=None, index=None):
         candidate = test_research_workflow.role()
+        candidate["policy_fit"]["location"]["priority_index"] = index
         test_research_workflow.change(candidate, "city", city)
         test_research_workflow.change(candidate, "work_mode", mode)
         if state:
@@ -631,9 +632,11 @@ class ResearchRankingTests(unittest.TestCase):
     def test_a_recorded_state_excludes_a_city_absent_from_the_list(self):
         self.assertEqual(self.opportunity("Issaquah", "hybrid", state="WA")["ranking"]["location_priority"], 99)
 
-    def test_us_remote_and_dc_onsite_keep_their_ranks(self):
-        self.assertEqual(self.opportunity("Bellevue", "remote")["ranking"]["location_priority"], 2)
-        self.assertEqual(self.opportunity("New York", "onsite")["ranking"]["location_priority"], 3)
+    def test_us_remote_and_other_onsite_rank_by_the_users_place_order(self):
+        # Owner pick M3 a (2026-11-16): 2 + the position research matched in location_priority.
+        self.assertEqual(self.opportunity("Bellevue", "remote", index=1)["ranking"]["location_priority"], 3)
+        self.assertEqual(self.opportunity("New York", "onsite", index=2)["ranking"]["location_priority"], 4)
+        self.assertEqual(self.opportunity("Seattle", "onsite", index=2)["ranking"]["location_priority"], 99)
 
 
 if __name__ == "__main__":

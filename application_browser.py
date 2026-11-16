@@ -215,7 +215,7 @@ map does not record authorization there - other entries keep their own status; n
 null or the map is absent; no page quote). Keep facts.country, facts.state, facts.city and
 facts.authorization for the first (or only) place, as before. In scope_fit, judge against
 context.scope_targets whether the role's level is one of the owner's target levels (or its
-equivalent at this employer) and whether its specialization is one of the target
+equivalent at this employer; the level rule below) and whether its specialization is one of the target
 specializations (an empty list means the user named none: any specialization within the
 user's target roles in context.scope_targets.levels, in any field, is in scope): in_scope true or false with a one-sentence reason, or null with a reason
 when the posting does not let you tell. scope_fit needs no page quote; say false only
@@ -237,13 +237,46 @@ context.role.policy_fit (funding stage and location), with context.role.evidence
 those verdicts rather than starting over: where the page agrees, keep research's verdict; where
 the page states something research did not have or contradicts it, judge from the page and say
 in the reason what changed.
-A posting often states a YEARS requirement instead of a title. context.scope_targets
-carries minimum_years_experience for that case: when the posting states a minimum years of
-experience at or above it, level is in_scope TRUE on that basis alone - say so in the
-reason and do not answer null merely because no title is given. When it states a minimum
-clearly below that figure, that is a role below the owner's band: in_scope FALSE. Judge the
-requirement the posting actually makes, not a range you inferred; a posting naming neither
-a title nor a years figure is still null.
+Place rule (context.scope_targets.location_priority are the places and work modes the user picked,
+as they are NOW: one entry per place, each naming a place and the work modes the user accepts
+there; they are a limit, not a preference; an empty or missing list means the user named none:
+no limit from this rule): a way of doing the role is one place it can be done from together
+with one work mode it offers there (remote, hybrid or onsite). It matches an entry when the
+place is inside the entry's place and the work mode is one the entry names; a remote way
+matches a remote entry only when someone based in the entry's place may do the role remotely.
+The role is kept only when at least one way of doing it matches at least one entry and is not
+excluded above. A role clearly outside every entry is location in_scope FALSE; when the list has
+entries and none of them names hybrid or onsite, that is every role that can only be done hybrid or onsite, wherever it
+is. A role whose every place is clearly outside every entry's place is FALSE too (for example
+a remote role open only to people in a country no entry covers, or an onsite role in a city no
+entry covers). An entry whose work modes include hybrid or onsite means the user is open to
+relocating there: a hybrid or onsite role in that place matches it, wherever the user lives
+now. The user's current location never excludes anything. Judge from the whole posting, never
+from the title or one location label alone. When the posting does not state the work mode, or
+does not let you tell the place, it is not clearly outside: under this rule it is kept
+(in_scope true), and the reason says what is not stated. Research's policy_fit location may
+have been made under an older rule or before the user changed their places: for location, this
+rule and the current entries decide, not research's verdict.
+Level rule (context.scope_targets.levels are the levels the user picked, as they are NOW; they are a
+limit, not a preference): a role clearly above the highest target level is level in_scope
+FALSE; when the targets stop below Senior (for example Intern, Entry-level, Junior, Associate or
+Mid-level) that is every Senior, Staff, Principal, Lead, Manager or Director role. One
+allowance: when the highest target level is Senior or higher, a role one level above it is
+still in scope (for example Staff for a Senior target); two or more levels above is FALSE. A
+role clearly below the lowest target level is FALSE. Judge the level from the whole posting
+(its scope, the years it asks for, the people it manages, how this employer uses the title),
+never from the title alone. Research's role_fit may have been made under an older rule or
+before the user changed their levels: for level, this rule and the current targets decide, not
+research's verdict.
+A posting often states a YEARS requirement instead of a title: judge which level that many
+years means for this kind of role and apply the level rule to it, in both directions (a
+posting asking 8+ years is above an entry-level target; one asking 0 to 1 is below a Senior
+target). When context.scope_targets.minimum_years_experience is set, a stated minimum clearly
+below it is below the owner's band: in_scope FALSE; a stated minimum at or above it is in
+scope only while the level it means is not above what the level rule allows (the highest
+target level, or one level above it when that is Senior or higher). Do not answer null merely
+because no title is given. Judge the requirement the posting actually makes, not a range you
+inferred; a posting naming neither a title nor a years figure is still null.
 Investigate gaps through supported official browser links within the remaining
 budget before returning an orchestrator-owned blocker and specific next action;
 do not automatically ask the user for facts a bounded investigation may resolve.

@@ -1690,6 +1690,63 @@ def close_replaced_rejections(database, now):
     return closed
 
 
+REJECTED_BY_OWNER = "DRAFT_REJECTED_BY_OWNER"
+
+
+def owner_rejected_draft(database, row):
+    """The owner rejected this exact draft on Approvals and it was never sent: an unsent, owner-rejected
+    action (approvals.rejected_unsent_ids) queued from this same row (the `source` promotion stored in its
+    payload; outreach_promotion.cycle finds its `preserved` row by the same test and leaves it as the owner
+    left it). Such a draft can never go out, so it is not checked again (owner, 2026-11-15: the check ran
+    on 40 rejected notes every hour until its 7 tries were gone, and each showed on Failures). A newer
+    version for the same person is another row and is checked as usual (owner, 2026-10-22)."""
+    source = outreach_promotion._source(row)
+    identities = engagement.identity_keys(database, research.canonical(database, "contact", row["identity"]))
+    rejected = sorted(approvals.rejected_unsent_ids(database, set(identities)))
+    for action_id in rejected:
+        found = database.execute("SELECT payload FROM outreach_actions WHERE action_id=?", (action_id,)).fetchone()
+        try:
+            if found and json.loads(found[0]).get("source") == source:
+                return True
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return False
+
+
+def close_rejected_checks(database, draft_id, now):
+    """End every check of a draft the owner rejected (caller commits): CANCELLED, so none waits, retries or
+    later shows as given up. One that is running now is left to finish and is closed on the next pass.
+    Returns the closed task ids."""
+    return _close_draft_tasks(database, INSPECTION_WORKER, "outreach-draft:" + draft_id, now, REJECTED_BY_OWNER,
+                              "None: this note was rejected on Approvals and is not sent")
+
+
+def close_ruled_out_tasks(database, draft_id, now):
+    """End the writing and the check of a draft whose role was judged out after the user's picks changed
+    (`outreach_promotion.role_ruled_out`; caller commits), as `close_rejected_checks` does for a rejected
+    draft: none waits, retries or later shows as given up. Returns the closed task ids."""
+    words = "None: this role is now outside the search, so its note is not sent"
+    return (_close_draft_tasks(database, COMPOSE_WORKER, "outreach-compose:" + draft_id, now,
+                               outreach_promotion.ROLE_RULED_OUT, words)
+            + _close_draft_tasks(database, INSPECTION_WORKER, "outreach-draft:" + draft_id, now,
+                                 outreach_promotion.ROLE_RULED_OUT, words))
+
+
+def _close_draft_tasks(database, worker, parent, now, reason, next_action):
+    closed = []
+    for task in database.execute("""SELECT task_id,status,blocker FROM workflow_tasks WHERE worker=? AND parent_run_id=?
+            AND status!='CANCELLED' AND token_hash IS NULL""", (worker, parent)).fetchall():
+        changed = database.execute("""UPDATE workflow_tasks SET status='CANCELLED',blocker=?,next_action=?,next_at=NULL,
+            lease_until=NULL,updated_at=? WHERE task_id=? AND status=? AND token_hash IS NULL""",
+            (reason, next_action, now.isoformat(), task["task_id"], task["status"]))
+        if changed.rowcount:
+            workflow_tasks.record(database, task["task_id"], "CANCELLED", now.isoformat(),
+                                  {"reason": reason, "previous_status": task["status"],
+                                   "previous_blocker": task["blocker"]})
+            closed.append(task["task_id"])
+    return closed
+
+
 def enqueue_inspection(database, row, draft, source, now):
     """The first guarded step for a draft: bounded local-records history inspection."""
     grant = reinspection_grant(database, source["draft_id"])
@@ -1746,6 +1803,18 @@ def prepare_drafts(root, database, config, client, execute=None, now=None, *, hi
         item = {"draft_id": outreach_promotion._source(row)["draft_id"]}
         output["items"].append(item)
         try:
+            if owner_rejected_draft(database, row):
+                with database:
+                    close_rejected_checks(database, item["draft_id"], now)
+                item["state"] = "REJECTED_BY_OWNER"
+                continue
+            if outreach_promotion.role_ruled_out(database, json.loads(row["payload"])):
+                # The role was judged out after the user's picks changed (owner, 2026-11-16): no note is
+                # written or checked for it, and nothing waits or retries.
+                with database:
+                    close_ruled_out_tasks(database, item["draft_id"], now)
+                item["state"] = "ROLE_OUT_OF_SEARCH"
+                continue
             if compose and not ({"composition", "owner_approval"} & set(json.loads(row["payload"]))):
                 # Template text is a research scaffold only: the AI writes the outreach.
                 if attempts >= limit:

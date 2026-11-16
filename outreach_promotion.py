@@ -428,6 +428,17 @@ def _bound_opportunity(database, origin, need, claim, *, require_topic=False):
                 yield opportunity
 
 
+ROLE_RULED_OUT = "RESEARCH_INELIGIBLE_ROLE"
+
+
+def role_ruled_out(database, draft):
+    """Was the role this draft was written for judged out after the user's picks changed
+    (`pick_changes.ruled_out`, owner 2026-11-16)? Its note is then not written, checked, queued or
+    sent. Research never drafts for a role it rules out itself, so nothing else makes this true."""
+    import pick_changes
+    return isinstance(draft, dict) and pick_changes.ruled_out(database, draft.get("job_key"))
+
+
 def _scaffold(database, row, draft):
     """The research draft an AI/owner version supersedes; it carries the source binding."""
     previous = database.execute("SELECT version,content_hash,payload FROM rw_drafts WHERE identity=? AND version<? ORDER BY version DESC",
@@ -626,6 +637,8 @@ def _validate(database, row, now, *, require_composition=False):
         if (draft["message"] == draft["first_message"] == message
                 and draft["invitation"] == (invitation if len(invitation) <= 300 else None)):
             break
+    # A role judged out after the user's picks changed (owner, 2026-11-16): its note does not go out.
+    _require(not role_ruled_out(database, origin), ROLE_RULED_OUT)
     if kind != "TEMPLATE":
         # Neither size nor dashes refuse a composed note any more (owner, 2026-09-23:
         # "remove every single piece of code that can cause the outreach to fail after AI

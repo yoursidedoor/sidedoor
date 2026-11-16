@@ -426,7 +426,7 @@ def _claims(database):
     for unused, payload in database.execute("SELECT id,payload FROM rw_claims ORDER BY id"):
         claim = json.loads(payload)
         if designated and claim.get("source_sha256") == designated[0] and claim.get("verified") is True \
-                and len(claim.get("text", "")) <= 240:
+                and len(claim.get("text", "")) <= research.CLAIM_MAX_CHARACTERS:
             claims.append(claim)
     return claims
 
@@ -479,12 +479,15 @@ def schedule(database, config, now=None):
         return {"due": [], "skipped": [], "held": [], "held_settled": [], "blocker": "NOT_WATCHING_RESEARCH_YET"}
     claims = _claims(database)
     latest = {}
+    # A role judged again after the user's picks changed is read with that verdict (owner, 2026-11-16).
+    import pick_changes
+    verdicts = pick_changes.stored_verdicts(database)
     for result_id, plan_id, observed_at, raw, processed in database.execute(
             "SELECT id,plan_id,observed_at,raw,processed FROM rw_results ORDER BY observed_at,id"):
         if not plan_id or plan_id.startswith("linkedin-contacts-plan:"):
             continue                    # the finder's own results are not research runs
         try:
-            processed, raw = json.loads(processed), json.loads(raw)
+            processed, raw = pick_changes.with_verdicts(json.loads(processed), observed_at, verdicts, plan_id), json.loads(raw)
         except ValueError:
             continue
         people = {}

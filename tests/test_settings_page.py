@@ -230,6 +230,31 @@ class SettingsPageTest(unittest.TestCase):
         database.commit()
         return database, ids
 
+    def test_resume_shows_how_many_links_were_found(self):
+        # A beta user's feedback, 2026-11-16: the count, so a user can see none were lost.
+        folder = self.home / "resume"
+        folder.mkdir()
+        (folder / "raw-1.pdf").write_bytes(b"%PDF raw")
+        raw = {"path": str(folder / "raw-1.pdf"), "file_name": "cv.pdf", "sha256": RAW_SHA}
+        link = {"text": "Portfolio", "near": "", "url": "https://example.com/alex", "page": 1, "written_out": False}
+
+        def page(**more):
+            (self.home / "profile.json").write_text(json.dumps({"resume_raw": dict(raw, **more)}))
+            return self.client.get("/settings").text
+
+        three = page(links=[link, dict(link, url="https://example.com/b"), dict(link, url="https://example.com/c")])
+        self.assertIn("3 links found.", three)
+        self.assertIn("Keeps all 3 links, written out and clickable.", three)
+        one = page(links=[link])
+        self.assertIn("1 link found.", one)
+        self.assertIn("Keeps the link, written out and clickable.", one)
+        self.assertIn("No links found.", page(links=[]))
+        waiting = page()   # uploaded before links were read: the next round reads them, nothing to say or do
+        self.assertNotIn("links found", waiting)
+        self.assertNotIn("Links not read", waiting)
+        (folder / "raw-1.pdf").unlink()
+        self.assertIn("Links not read. Upload your résumé again to keep them.", page())
+
     def test_resume_files_open_from_the_home_only(self):
         folder = self.home / "resume"
         folder.mkdir()

@@ -100,6 +100,8 @@
       <h3>Your résumé (as uploaded)</h3>
       <p><strong>{{ x.raw.file_name }}</strong>{% if x.raw.page_count %}, {{ x.raw.page_count }} page{{ "" if x.raw.page_count == 1 else "s" }}{% endif %}</p>
       <p class="muted">Used for outreach, replies and the sentences below.</p>
+      {# Links read from the file (a beta user's feedback, 2026-11-16): the count, so the user can see none were lost. #}
+      {% if x.raw.links is defined %}{% set n = x.raw.links|length %}<p class="muted">{% if n %}{{ n }} link{{ "" if n == 1 else "s" }} found.{% else %}No links found.{% endif %}</p>{% endif %}
       <p class="resume-uploads"><span class="resume-on">Applications upload this file.</span><span class="resume-off muted">Not uploaded in applications.</span></p>
       {% if x.raw_file %}<a class="button button-quiet" href="/settings/resume/file/raw" target="_blank" rel="noopener">Open</a>{% else %}<p class="muted">This file is no longer on this computer. Upload your résumé again below.</p>{% endif %}
     </div>
@@ -107,6 +109,8 @@
       <label class="resume-use"><input type="radio" name="application_resume" value="ats"{% if use == "ats" %} checked{% endif %}> Use for application <span class="muted">(recommended)</span></label>
       <h3>ATS version</h3>
       <p><strong>PDF</strong> written from your résumé, easy for application systems to read</p>
+      {% if x.raw.links is not defined %}{% if not x.raw_file %}<p class="muted">Links not read. Upload your résumé again to keep them.</p>{% endif %}
+      {% elif x.raw.links %}{% set n = x.raw.links|length %}<p class="muted">{% if n == 1 %}Keeps the link, written out and clickable.{% else %}Keeps all {{ n }} links, written out and clickable.{% endif %}</p>{% endif %}
       <p class="resume-uploads"><span class="resume-on">Applications upload this file.</span><span class="resume-off muted">Not uploaded in applications.</span></p>
       {% if x.application_file %}<a class="button button-quiet" href="/settings/resume/file/application" target="_blank" rel="noopener">Open</a>{% else %}<p class="muted">Not written yet. Upload your résumé again below.</p>{% endif %}
     </div>

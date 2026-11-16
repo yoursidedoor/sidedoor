@@ -465,11 +465,20 @@ def research_ineligible_reason(role):
     code = assessment[1] if len(assessment) > 1 and isinstance(assessment[1], str) and assessment[1] else "OUTSIDE_CONFIRMED_SCOPE"
     reason = research_scope_reason(role) or (assessment[2] if len(assessment) > 2 and isinstance(assessment[2], str)
                                              and assessment[2].strip() else "Research judged this role outside your search.")
-    return code, "Research judged this role outside your search: " + reason.strip()[:900]
+    # A role judged again after the user's picks changed (`pick_changes`) says so (owner, 2026-11-16).
+    lead = ("Judged again after your search changed, this role is now outside it: "
+            if isinstance(role.get("judged_again"), dict) else "Research judged this role outside your search: ")
+    return code, lead + reason.strip()[:900]
 
 
 def research_scope_reason(role):
-    """Research's own words for the first scope dimension it judged out of scope, or None."""
+    """Research's own words for the first scope dimension it judged out of scope, or None.
+
+    A role_fit of NONE counts too: research never stores such a role, so it is only on a role judged
+    again after the user's picks changed (`pick_changes`, owner 2026-11-16)."""
+    fit = role.get("role_fit") if isinstance(role, dict) and isinstance(role.get("role_fit"), dict) else {}
+    if fit.get("fit") == "NONE" and isinstance(fit.get("reason"), str) and fit["reason"].strip():
+        return fit["reason"].strip()
     policy_fit = role.get("policy_fit") if isinstance(role, dict) and isinstance(role.get("policy_fit"), dict) else {}
     for dimension in ("funding_stage", "location"):
         verdict = policy_fit.get(dimension)
@@ -5140,6 +5149,14 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
         application_recovery.relabel_failed_closures(database, now)
         # Jobs parked before a closed posting closed its job at the first read (owner, 2026-11-14).
         application_recovery.close_parked_closed_postings(database, now)
+    if only is None:
+        # A résumé uploaded before its links were read gets them now, with no step for the user (owner,
+        # 2026-11-16). Never the round's problem: a failure is logged there and tried again later.
+        import resume_intake
+        try:
+            resume_intake.keep_links_of_saved_resume(config, database=database, root=root)
+        except Exception as error:
+            LOG.warning("resume links: not added this round (%s)", type(error).__name__)
     local_day = workflow_tasks.budget_day(now, config.get("timezone", "America/Los_Angeles"))
     try:
         budget_room = config.get("daily_compute_seconds", 10800) - workflow_tasks.compute_used(database, local_day)
@@ -5269,6 +5286,23 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
                     position += 1
     with database:
         session_yield.round_ended(database)
+    if only is None and not stopped:
+        # The user's picks changed (owner, 2026-11-16, M1 a): the AI judges each found, not yet applied
+        # role again against the picks as they are now. After the round's application work, so it never
+        # delays it, and ended between calls when the round is asked to stop. The jobs of the roles now
+        # out close here as they do at the top of a round. Never the round's problem: a failure closes
+        # nothing and the role is judged on a later round.
+        import pick_changes
+        try:
+            judged = pick_changes.judge_round(database, config, root, policy, clock() if clock else now,
+                                              should_stop=should_stop)
+            if judged and judged["out"]:
+                with database:
+                    close_research_ineligible(database, clock() if clock else now)
+        except Exception as error:
+            if database.in_transaction:
+                database.rollback()
+            LOG.warning("pick changes: found roles were not judged again this round (%s)", type(error).__name__)
     result = report(database, now)
     if stopped:
         result["stopped"] = stopped

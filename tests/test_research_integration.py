@@ -50,7 +50,7 @@ def opportunity(company="Fixture"):
     return {"company": company, "role": "Staff Software Engineer", "url": "https://employer.example/jobs/123",
             "rationale": "MOCK integration fixture", "requisition_id": "123", "people": [],
             "role_fit": {"fit": "STRONG", "reason": "MOCK Staff backend role matches the target levels"},
-            "policy_fit": {"funding_stage": {"in_scope": True, "reason": "MOCK"}, "location": {"in_scope": True, "reason": "MOCK"}},
+            "policy_fit": {"funding_stage": {"in_scope": True, "reason": "MOCK"}, "location": {"in_scope": True, "reason": "MOCK", "priority_index": None}},
             "in_user_home_area": None,
             "evidence": [evidence(field, value) for field, value in facts.items()]}
 
@@ -293,9 +293,11 @@ class ResearchIntegrationTests(unittest.TestCase):
         stored = json.loads(self.database.execute("SELECT processed FROM rw_results").fetchone()[0])
         self.assertEqual(len(stored["verified_company_findings"]), 1)
 
-    def located(self, city, work_mode, state=None):
-        """The fixture opportunity, moved to a place, through the real research entry point."""
+    def located(self, city, work_mode, state=None, index=None):
+        """The fixture opportunity, moved to a place, through the real research entry point. `index` is
+        research's own policy_fit.location.priority_index (a position in the profile's location_priority)."""
         item = opportunity()
+        item["policy_fit"]["location"]["priority_index"] = index
         item["evidence"] = [entry for entry in item["evidence"] if entry["field"] not in {"city", "work_mode", "state"}]
         item["evidence"].append(evidence("city", city))
         item["evidence"].append(evidence("work_mode", work_mode))
@@ -313,11 +315,15 @@ class ResearchIntegrationTests(unittest.TestCase):
     def test_a_recorded_state_excludes_a_washington_city_outside_the_named_set(self):
         self.assertEqual(self.located("Issaquah", "hybrid", state="WA")["ranking"]["location_priority"], 99)
 
+    # Owner pick M3 a (2026-11-16): the rank is 2 + research's position in the user's own place order.
     def test_us_remote_is_unaffected_inside_an_excluded_state(self):
-        self.assertEqual(self.located("Bellevue", "remote")["ranking"]["location_priority"], 2)
+        self.assertEqual(self.located("Bellevue", "remote", index=1)["ranking"]["location_priority"], 3)
 
-    def test_other_us_onsite_keeps_its_existing_rank(self):
-        self.assertEqual(self.located("New York", "onsite")["ranking"]["location_priority"], 3)
+    def test_other_us_onsite_ranks_by_its_place_entry(self):
+        self.assertEqual(self.located("New York", "onsite", index=2)["ranking"]["location_priority"], 4)
+
+    def test_an_excluded_place_stays_last_whatever_entry_research_matched(self):
+        self.assertEqual(self.located("Issaquah", "hybrid", state="WA", index=0)["ranking"]["location_priority"], 99)
 
     def test_out_of_scope_is_persisted_rejected_and_not_an_application(self):
         self.payload = completed(opportunity("Unplanned Company"))

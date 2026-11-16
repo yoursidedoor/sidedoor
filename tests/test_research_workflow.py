@@ -93,7 +93,8 @@ class ResearchTests(unittest.TestCase):
     def test_structured_review_is_assess_compatible(self):
         normalized = research.normalize_opportunity(role(), now=NOW)
         self.assertIsNone(normalized["assessment"])
-        self.assertEqual(normalized["ranking"]["location_priority"], 2)
+        # No place entry matched (the fixture carries no priority_index): worked last.
+        self.assertEqual(normalized["ranking"]["location_priority"], 99)
         self.assertIsNone(applications.assess(normalized["review"], {"employer": "example ai", "requisition": "123"}, research.DEFAULT_POLICY, NOW))
 
     def test_sparse_legacy_never_promoted(self):
@@ -186,8 +187,28 @@ class ResearchTests(unittest.TestCase):
         change(item, "city", "Peoria")
         change(item, "metro", "Central Illinois")
         change(item, "work_mode", "hybrid")
-        # Owner, 2026-10-14: research's in_user_home_area ranks first; false or null ranks 3.
-        self.assertEqual(research.normalize_opportunity(item, now=NOW)["ranking"]["location_priority"], 3)
+        # Owner, 2026-10-14: research's in_user_home_area ranks first. Owner pick M3 a, 2026-11-16:
+        # then the user's own place order, as research's policy_fit.location.priority_index.
+        places = dict(research.DEFAULT_POLICY, location_priority=["Peoria hybrid", "US remote", "Europe remote"])
+
+        def rank(index, policy=places, **change_role):
+            ranked = dict(item, **change_role)
+            ranked["policy_fit"] = dict(item["policy_fit"], location=dict(item["policy_fit"]["location"], priority_index=index))
+            return research.normalize_opportunity(ranked, now=NOW, policy=policy)["ranking"]["location_priority"]
+        self.assertEqual([rank(0), rank(1), rank(2)], [2, 3, 4])
+        self.assertEqual(rank(None), 99)                       # matched no entry: last
+        self.assertEqual(rank(2, in_user_home_area=True), 1)   # near home: first, before entry 0
+        for unusable in (3, -1, True, "0", 1.0):              # not a position in the list: read as null
+            self.assertEqual(rank(unusable), 99, unusable)
+        self.assertEqual(rank(0, policy=dict(places, location_priority=[])), 99)
+        self.assertEqual(rank(0, policy=None), 99)
+        # A result saved before the field existed is still accepted, and worked last.
+        old = dict(item, policy_fit={"funding_stage": {"in_scope": True, "reason": "MOCK"},
+                                     "location": {"in_scope": True, "reason": "MOCK"}})
+        opportunity, _ = research.check_role(old, now=NOW, policy=places)
+        self.assertEqual(opportunity["ranking"]["location_priority"], 99)
+        self.assertTrue(opportunity["review"]["scope_fit"]["location"]["in_scope"])
+        self.assertEqual(research.normalize_opportunity(dict(item, policy_fit=None), now=NOW, policy=places)["ranking"]["location_priority"], 99)
         item["in_user_home_area"] = True
         self.assertEqual(research.normalize_opportunity(item, now=NOW)["ranking"]["location_priority"], 1)
         item["in_user_home_area"] = None

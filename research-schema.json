@@ -274,7 +274,8 @@
                 "additionalProperties": false,
                 "required": [
                   "in_scope",
-                  "reason"
+                  "reason",
+                  "priority_index"
                 ],
                 "properties": {
                   "in_scope": {
@@ -285,6 +286,12 @@
                   },
                   "reason": {
                     "type": "string"
+                  },
+                  "priority_index": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
                   }
                 }
               }

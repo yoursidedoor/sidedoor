@@ -376,7 +376,8 @@ class LessonsTest(Case):
         self.assertEqual(shown[:2], [("Target.activateTarget", "MAIN", None), ("Page.bringToFront", None, "S-MAIN")])
         self.chrome.take_front("SOMETHING-ELSE")   # the page is hidden: a mouse event would now take 5 s
         self.assertTrue(await until(lambda: self.chrome.front == "MAIN", 2.0))   # the one-second watchdog
-        self.assertGreaterEqual(session.chrome.counts["refronted"], 1)
+        # The count is written after the second call of the refront returns, so wait for it (Linux CI, 1.0.1).
+        self.assertTrue(await until(lambda: session.chrome.counts.get("refronted", 0) >= 1, 2.0))
         socket = FakeSocket()
         asyncio.create_task(view.serve(session, socket))
         self.chrome.open_page("POPUP", "", opener="MAIN")   # "Sign in with Google": a pop-up, hidden at first

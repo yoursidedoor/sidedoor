@@ -46,7 +46,7 @@ def role(company, title="Staff Software Engineer", *, url="https://employer.exam
         items.append(evidence("official_destination", url, source=url))
     return {"company": company, "role": title, "url": url, "rationale": "SYNTHETIC", "requisition_id": "",
             "people": [], "evidence": items + list(extra), "role_fit": {"fit": fit, "reason": "SYNTHETIC"},
-            "policy_fit": {"funding_stage": {"in_scope": True, "reason": "SYNTHETIC"}, "location": {"in_scope": True, "reason": "SYNTHETIC"}},
+            "policy_fit": {"funding_stage": {"in_scope": True, "reason": "SYNTHETIC"}, "location": {"in_scope": True, "reason": "SYNTHETIC", "priority_index": None}},
             "in_user_home_area": None}
 
 
