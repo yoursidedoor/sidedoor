@@ -136,6 +136,10 @@ GONE = "This application is no longer waiting for you."
 ABANDONED = "Abandoned. You can bring it back with Try again on Applications."
 NOT_ABANDONED = "This application may already have reached the employer, so it stays open while Sidedoor checks."
 NOT_CLOSED = "Sidedoor could not close this application. Reload the page and try again."
+ALREADY_FINISHED = "This application is already finished, so nothing was changed."
+# What a refused Abandon says (`abandon_job`), by `access_outcomes.abandon_refusal`'s reason: (tone, words).
+ABANDON_REFUSED = {"GONE": ("warning", GONE), "FINISHED": ("warning", ALREADY_FINISHED),
+                   "UNCERTAIN": ("warning", NOT_ABANDONED), "NOT_CLOSED": ("error", NOT_CLOSED)}
 RELEASED_ONE = "Sidedoor tries this application on its next round."
 RELEASED_MANY = "Sidedoor tries these %d applications on its next round."
 STAYS_ONE = "One application stays open while Sidedoor checks whether it reached the employer."
@@ -530,22 +534,22 @@ def abandon(database, job_key, now):
         return {"tone": "success", "text": ABANDONED}
 
 
-def abandon_parked(database, job_key, now):
-    """Abandon on the Applications page, beside Try again, for a job parked for the user
-    (`access_outcomes.parked_for_user`): the job closes as abandoned by the user and keeps Try again.
-    Never a job whose submission may have reached the employer."""
+def abandon_job(database, job_key, now):
+    """Abandon on the Applications page and on a "Questions for you" card (owner, 2026-11-16), for every
+    job that is not finished and not being submitted (`access_outcomes.abandon_refusal`): the job closes
+    as abandoned by the user and keeps Try again, and its question cards go. Never a job whose
+    submission may have reached the employer; a refused press changes nothing and says why.
+    The flash, with `closed` (True when this press closed the job) and `cards` (the cards it closed)."""
     job_key = str(job_key or "")
     with database:
         _locked(database)
-        job = database.execute("SELECT state,blocker FROM application_jobs WHERE job_key=?", (job_key,)).fetchone()
-        if not job or not access_outcomes.parked_for_user(job["state"], job["blocker"]):
-            return {"tone": "warning", "text": GONE}
-        import applications
-        if applications.uncertain_submission(database, job_key):
-            return {"tone": "warning", "text": NOT_ABANDONED}
-        if not access_outcomes.abandon_parked(database, job_key, now):
-            return {"tone": "error", "text": NOT_CLOSED}
-        return {"tone": "success", "text": ABANDONED}
+        result = access_outcomes.abandon_job(database, job_key, now)
+        if not result["closed"]:
+            tone, text = ABANDON_REFUSED[result["why"]]
+            return {"tone": tone, "text": text, "closed": False, "cards": []}
+        if result["host"]:
+            _free_site(database, result["host"], now)   # as `abandon`: the jobs held behind its site go on
+        return {"tone": "success", "text": ABANDONED, "closed": True, "cards": result["cards"]}
 
 
 def done(database, job_key, now):

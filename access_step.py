@@ -578,8 +578,10 @@ def _go_on(database, job, now, words, next_at=None, detail=None):
     import desktop_adapter
     for request_id, _, _ in access_outcomes._stopped_reads(database, job["job_key"]):
         desktop_adapter.record(database, request_id, WALL_ANSWERED_EVENT, now)   # the read did its job: not one of the three
+    # Never a finished job (one the user abandoned while its session ran): it stays closed.
     database.execute("UPDATE application_jobs SET state='RETRY_WAIT',blocker=NULL,next_action=?,next_at=?,updated_at=? "
-                     "WHERE job_key=?", (words, next_at, now, job["job_key"]))
+                     "WHERE job_key=? AND state NOT IN ('SUBMITTED','DUPLICATE','INELIGIBLE','EXHAUSTED','ABANDONED')",
+                     (words, next_at, now, job["job_key"]))
     if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_blockers'").fetchone():
         database.execute("DELETE FROM application_blockers WHERE job_key=?", (job["job_key"],))
     access_outcomes._spend_stopped_reads(database, job["job_key"])

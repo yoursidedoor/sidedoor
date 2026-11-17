@@ -643,13 +643,17 @@ def job_view(row, owner_keys, asked, live_reading, fmt, waits=None):
             "try_again": access_cards.TRY_AGAIN_LABEL if not unsure and (
                 access_cards.can_try_again(state, code)
                 or access_cards.access_outcomes.recovery_try_again(state, code)) else None,
-            # Abandon, beside Try again, on a job parked for the user (owner, 2026-11-14): never a dead end.
-            "abandon": access_cards.ABANDON_LABEL if not unsure and access_cards.access_outcomes.parked_for_user(state, code) else None}
+            # Abandon on every job that is not finished and not being submitted (owner, 2026-11-16): never a
+            # dead end. The same rule as the write path's (`access_outcomes.abandon_refusal`): the lists also
+            # ask `applications.uncertain_submission` (`_no_try_again_when_uncertain`).
+            "abandon": access_cards.ABANDON_LABEL if not unsure and state not in FINAL
+                       and state not in ("SUBMITTING", "RECONCILE") else None}
 
 
 def _no_try_again_when_uncertain(reader, view):
     """Try again is never shown on a job whose submission may have reached the employer (hard line: the
-    button would be refused, `access_outcomes.try_again`). Asked only for a row that would show it."""
+    button would be refused, `access_outcomes.try_again`), and neither is Abandon (refused the same way,
+    `access_outcomes.abandon_refusal`). Asked only for a row that would show one."""
     if (view.get("try_again") or view.get("abandon")) and reader.database is not None:
         import applications
         try:

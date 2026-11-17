@@ -420,6 +420,21 @@ def _profile_site(field, role):
     return site_sessions.site_key(role.get("url") if isinstance(role, dict) else None)
 
 
+ABANDON_QUESTION_LABEL = "Abandon application"
+
+
+def _may_abandon(database, job_key):
+    """True when the user's Abandon would close this job (`access_outcomes.abandon_refusal`, the rule the
+    write path enforces). A read that fails shows no button."""
+    if not job_key:
+        return False
+    import access_outcomes
+    try:
+        return access_outcomes.abandon_refusal(database, job_key) is None
+    except sqlite3.Error:
+        return False
+
+
 def questions(database, now, only=None, page=1):
     if not _has(database, "user_decisions"):
         return []
@@ -431,7 +446,7 @@ def questions(database, now, only=None, page=1):
     label += "".join(",d." + name if name in columns else ",NULL" for name in ("required", "hint", "site_reason"))
     rows = database.execute(
         "SELECT d.id,d.job_key,d.field,d.semantic,d.answer_type,d.choices,d.payload_hash,d.expires_at"
-        + (",j.employer,j.payload" if jobs else ",NULL,NULL") + label
+        + (",j.employer,j.payload" if jobs else ",NULL,NULL") + label + (",j.job_key" if jobs else ",NULL")
         + " FROM user_decisions d" + (" LEFT JOIN application_jobs j ON j.job_key=d.job_key" if jobs else "")
         + " WHERE d.state='PENDING' AND d.expires_at>?" + test + (" AND d.id=?" if only is not None else "")
         + " ORDER BY d.expires_at,d.id LIMIT ? OFFSET ?",
@@ -439,7 +454,7 @@ def questions(database, now, only=None, page=1):
     import decision_transport
     found = []
     for (identifier, job_key, field, semantic, answer_type, choices, payload_hash, expires_at, employer, payload, label,
-         required, hint, site_reason) in rows:
+         required, hint, site_reason, known_job) in rows:
         role = _object(payload) or {}
         operational = field == decision_transport.FORM_NOT_READABLE_FIELD
         choices = _json(choices)
@@ -465,6 +480,8 @@ def questions(database, now, only=None, page=1):
                       "site_reason": None if operational else site_reason,
                       # Sidedoor's own note (3 identical answering failures) is not a site refusal.
                       "own_note": site_reason == applications.ANSWERING_CARD_REASON,
+                      # Abandon the card's job (owner, 2026-11-16), where the write path would close it.
+                      "abandon": _may_abandon(database, known_job),
                       "expires": expires})
     return found
 
@@ -1065,6 +1082,28 @@ def register(app, templates, layout, *, home, root, config):
 
         def reply(flash, gone):
             return answer_card(request, "question", decision_id, finder, "approvals_question.html", flash, gone)
+        # A file card's document (owner, 2026-11-16, S2): saved under the Sidedoor home for the card's job,
+        # hashed, and answered as the marker of that saved file. The limit is the résumé upload's.
+        import setup_steps
+        import user_uploads
+        upload = form.get("file")
+        marker = None
+        if upload is not None and hasattr(upload, "read"):
+            data = await upload.read(setup_steps.RESUME_MAX_BYTES + 1)
+            if not data:
+                return reply({"tone": "error", "text": "Choose the file to upload first."},
+                             {"tone": "error", "text": "Choose the file to upload first."})
+            if len(data) > setup_steps.RESUME_MAX_BYTES:
+                too_big = "This file is larger than %d MB. Choose a smaller file." % (setup_steps.RESUME_MAX_BYTES // (1024 * 1024))
+                return reply({"tone": "error", "text": too_big}, {"tone": "error", "text": too_big})
+            owner_of = lambda database: database.execute("SELECT job_key FROM user_decisions WHERE id=? AND kind='fact'",
+                                                         (decision_id,)).fetchone() if _has(database, "user_decisions") else None
+            row = read(lambda database: owner_of(database) if database is not None else None)
+            if row:
+                # One path per card (F1): a refused post discards only this card's own file, never one
+                # another recorded answer names.
+                marker = await run_in_threadpool(user_uploads.save, row[0], upload.filename, data, home, decision_id)
+                raw = json.dumps(marker)
         if not raw:
             return reply({"tone": "error", "text": "Write or choose an answer first."},
                          {"tone": "error", "text": "Write or choose an answer first."})
@@ -1075,6 +1114,8 @@ def register(app, templates, layout, *, home, root, config):
             if policy is None:
                 return {"state": "REFUSED", "message": decision_transport.DASHBOARD_REFUSALS["PROFILE_MISSING"]}, None
             result = decision_transport.answer_locally(database, decision_id, raw, shown_payload_hash=shown, policy=policy)
+            if result["state"] != "APPLIED" and marker is not None:
+                user_uploads.discard(marker, home)   # a refused post keeps no file behind
             # A database from before the label column (Q3, review round 1): NULL, never an error after the
             # answer was recorded.
             columns = {column[1] for column in database.execute("PRAGMA table_info(user_decisions)")}
@@ -1084,18 +1125,24 @@ def register(app, templates, layout, *, home, root, config):
             return result, row
         outcome = await run_in_threadpool(write, act)
         if outcome is None:
+            if marker is not None:
+                user_uploads.discard(marker, home)
+                return reply({"tone": "error", "text": BUSY}, {"tone": "error", "text": BUSY})
             return reply({"tone": "error", "text": BUSY + " Your answer is still in the box.", "kept": raw},
                          {"tone": "error", "text": BUSY, "kept": raw})
         result, row = outcome
         if result["state"] != "APPLIED":
             # A refusal (expired, answered, changed, stale) or an answer that does not fit: the reason in
-            # plain words, the typed answer kept (E6.T4 review 15).
-            return reply({"tone": "warning", "text": result["message"], "kept": raw, "kept_list": ticked},
-                         {"tone": "warning", "text": result["message"], "kept": raw, "kept_list": ticked})
+            # plain words, the typed answer kept (E6.T4 review 15); a file is chosen again.
+            kept = "" if marker is not None else raw
+            return reply({"tone": "warning", "text": result["message"], "kept": kept, "kept_list": ticked},
+                         {"tone": "warning", "text": result["message"], "kept": kept, "kept_list": ticked})
         import decision_transport
-        import setup_steps
         field, semantic, answer_type, employer, payload, row_choices, label = row
         text = "Answer saved. The application goes on at its next turn."
+        if answer_type == "file":
+            # A document for this one application (S2): it is attached to this job and not kept in Settings.
+            return reply({}, {"tone": "success", "text": "File saved. The application goes on at its next turn."})
         if field != decision_transport.FORM_NOT_READABLE_FIELD:
             role = _object(payload) or {}
             value = (raw.casefold() in {"yes", "true"} if answer_type == "boolean"
@@ -1129,6 +1176,38 @@ def register(app, templates, layout, *, home, root, config):
                     now = dt.datetime.now(dt.timezone.utc).isoformat()
                     await run_in_threadpool(write, lambda database: decision_transport.refresh_stale(database, fresh, now))
         return reply({}, {"tone": "success", "text": text})
+
+    @app.post("/approvals/questions/abandon")
+    async def abandon_question_job(request: Request):
+        """Abandon on a "Questions for you" card (owner, 2026-11-16): the card's job closes as abandoned by
+        the user and every question card of that job goes. The rule and the refusals are
+        `access_cards.abandon_job`'s; a refused press changes nothing and says why on the card."""
+        import access_cards
+        form = await request.form()
+        decision_id = form.get("decision_id") if isinstance(form.get("decision_id"), str) else ""
+        finder = lambda database: questions(database, dt.datetime.now(dt.timezone.utc), only=decision_id)
+
+        def act(database):
+            # Only a question card that is still open (review C3): one answered or closed in another tab
+            # abandons nothing.
+            row = database.execute("SELECT job_key FROM user_decisions WHERE id=? AND kind='fact' AND state='PENDING'",
+                                   (decision_id,)).fetchone() if decision_id and _has(database, "user_decisions") else None
+            return access_cards.abandon_job(database, row[0] if row else "", applications.stamp())
+        try:
+            flash = await run_in_threadpool(write, act)
+        except Exception as error:   # a press never ends with nothing on the card
+            import log
+            log.get(__name__).warning("A question card's Abandon failed (%s).", type(error).__name__)
+            flash = {"tone": "error", "text": access_cards.PRESS_FAILED}
+        if flash is None:
+            flash = {"tone": "error", "text": BUSY}
+        answer = answer_card(request, "question", decision_id, finder, "approvals_question.html", flash, flash)
+        others = [dom("question", card) for card in flash.get("cards") or [] if card != decision_id]
+        if others and request.headers.get("hx-request") == "true":
+            # The job's other cards on the page go with it (htmx removes each by its id).
+            gone = "".join('<article id="%s" hx-swap-oob="delete"></article>' % identifier for identifier in others)
+            return HTMLResponse(answer.body.decode() + gone)
+        return answer
 
     # --- Notes --------------------------------------------------------------------------------------
 

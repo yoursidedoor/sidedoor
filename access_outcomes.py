@@ -758,6 +758,10 @@ def record(database, job, code, now, reason=None, source="session", config=None,
     Sidedoor asks (`effective_setting`), it waits as ASK_EACH_TIME."""
     import applications
     _lock(database)
+    if _finished(database, job["job_key"]):
+        # The job closed while its session ran (the user's Abandon from the dashboard, owner 2026-11-16):
+        # nothing is written, and no step of Sidedoor's own is planned that would make it due again.
+        return None
     since = since or now   # when the wall was met; a result read late still counts its 7 days from then
     described = None
     if reason is None and WALL_REASONS.get(code, "SIGN_IN") == "SIGN_IN":
@@ -1125,11 +1129,47 @@ def close_plain(database, job, why, now, read_code=None, reason=None):
     return True
 
 
-def abandon_parked(database, job_key, now):
-    """The user's Abandon on a job parked for them with Try again (`parked_for_user`). Returns True when closed."""
+# The reason stored on a question card closed because the user abandoned its job (`abandon_job`).
+ABANDONED_CARD_REASON = "JOB_ABANDONED_BY_YOU"
+
+
+def abandon_refusal(database, job_key):
+    """THE rule for the user's Abandon (owner, 2026-11-16: every job that is not finished and not in the
+    middle of submitting has one, on Applications and on its question cards). None when the job may be
+    abandoned, else why not: "GONE" (no such job), "FINISHED" (a final state) or "UNCERTAIN" (it is
+    being submitted or confirmed, or its submission may have reached the employer:
+    `applications.uncertain_submission`). The pages ask it to show the button; `abandon_job` asks it
+    again under the write lock."""
+    import applications
+    job = database.execute("SELECT state FROM application_jobs WHERE job_key=?", (job_key,)).fetchone()
+    if not job:
+        return "GONE"
+    if job[0] in applications.FINAL:
+        return "FINISHED"
+    if job[0] in applications.UNCERTAIN or applications.uncertain_submission(database, job_key):
+        return "UNCERTAIN"
+    return None
+
+
+def abandon_job(database, job_key, now):
+    """The user's Abandon on any job `abandon_refusal` allows. One transaction (the caller's): the job
+    closes as abandoned by the user and keeps Try again (through `close` when it waits behind a sign-in
+    or a check, so that wait's ledger is right; else `close_plain`), and every question card of the job
+    is superseded with its notification cancelled. A refusal changes nothing.
+    Returns {"closed": True, "cards": [card ids closed], "host": the closed wait's host or None}
+    or {"closed": False, "why": the refusal, or "NOT_CLOSED"}."""
+    import applications
     _lock(database)
-    job = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (job_key,)).fetchone()
-    return bool(job) and parked_for_user(job["state"], job["blocker"]) and close_plain(database, dict(job), "ABANDONED", now)
+    refused = abandon_refusal(database, job_key)
+    if refused:
+        return {"closed": False, "why": refused}
+    job = dict(database.execute("SELECT * FROM application_jobs WHERE job_key=?", (job_key,)).fetchone())
+    wait = open_wait(database, job_key)
+    closed = close(database, job, "ABANDONED", now) if wait is not None else close_plain(database, job, "ABANDONED", now)
+    if not closed:
+        return {"closed": False, "why": "NOT_CLOSED"}
+    return {"closed": True, "cards": applications.close_job_cards(database, job_key, ABANDONED_CARD_REASON, now),
+            "host": wait["host"] if wait is not None else None}
 
 
 def abandon(database, job_key, now):

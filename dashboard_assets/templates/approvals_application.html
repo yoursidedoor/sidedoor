@@ -43,6 +43,9 @@
     <span class="approval-a-control approval-a-choices">{% for o in q.options %}<label><input type="{{ q.control }}" form="{{ fid }}" name="{{ name }}" value="{{ o }}"{% if chosen(q, o) == "True" %} checked{% endif %}> {{ o }}</label>{% endfor %}</span>
     {% elif q.control == "date" %}
     <input type="date" class="approval-a-control" form="{{ fid }}" name="{{ name }}" value="{{ q.answer }}" aria-labelledby="{{ qid }}">
+    {% elif q.control == "file" %}
+    {# The file chosen for this control (S2), or the résumé (F4): uploaded as it is, never edited as text. #}
+    <span class="approval-a-control muted">{{ q.answer }}</span>
     {% else %}
     <textarea class="approval-a-control" form="{{ fid }}" name="{{ name }}" rows="{{ 4 if q.control == 'textarea' else 1 }}" aria-labelledby="{{ qid }}">{{ q.answer }}</textarea>
     {% endif %}

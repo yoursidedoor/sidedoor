@@ -627,7 +627,8 @@ limit. Never a yes/no, number, date, choice, checkbox, select or upload either: 
 supplied answer exactly. A field with no limit gets the supplied answer exactly as supplied.
 request.attachments, when present, maps a required
 question's field to a file this product generated for this job (a cover letter written
-from the owner's own answer): upload that exact path to that exact control. A supplied
+from the owner's own answer) or a document the owner supplied for this job (user_supplied
+true): upload that exact path to that exact control, as it is. A supplied
 answer to a file control whose value is the designated resume's path or file name (any letter
 case) means: upload request.resume to that control. Upload nothing else. request.resume and the
 request.attachments paths are copies inside the browser's own upload folder; upload exactly those paths.
@@ -2969,7 +2970,12 @@ def staged_uploads(payload, directory):
                 staged["answers"][field] = staged["resume"]
     for entry in (staged.get("attachments") or {}).values():
         if isinstance(entry, dict):
-            entry["path"] = copy(entry.get("path"))
+            # A user-supplied document (S2) is uploaded under the user's own file name when that name
+            # is free in the upload folder; a generated file keeps its storage name.
+            name = entry.get("file_name") if entry.get("user_supplied") and isinstance(entry.get("file_name"), str) else None
+            if name and (browser_runtime.upload_folder(directory) / Path(name).name).exists():
+                name = None
+            entry["path"] = copy(entry.get("path"), name)
     browser_runtime.seal(directory)
     return staged, pairs
 

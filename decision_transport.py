@@ -551,7 +551,7 @@ def _apply_answer(database, decision, job, response, now):
     return "INVALID_ANSWER"
 
 
-ANSWER_TYPES = frozenset({"text", "boolean", "choice", "multi_choice", "date", "number"})
+ANSWER_TYPES = frozenset({"text", "boolean", "choice", "multi_choice", "date", "number", "file"})
 
 
 def fits_control(answer_type, choices, raw):
@@ -559,8 +559,12 @@ def fits_control(answer_type, choices, raw):
     2026-10-24): a date is an ISO date (the card's date picker sends one; the application browser
     enters it in the site's format), a number parses as a finite number, a choice is one of the
     form's options, a multi-choice is a JSON list of one or more of them (the card's checkboxes), a yes/no
-    is yes or no; text is any non-empty text. `value` is what is stored."""
+    is yes or no; text is any non-empty text; a file is the marker of a file the user uploaded on the
+    card (`user_uploads`, owner 2026-11-16: typed text never fits a file control). `value` is what is stored."""
     value = raw.strip() if isinstance(raw, str) else ""
+    if answer_type == "file":
+        import user_uploads
+        return user_uploads.parse(value)
     if answer_type == "multi_choice":
         try:
             picked = json.loads(value)
@@ -594,7 +598,8 @@ NOT_FITTING = {"date": "This question needs a date. Pick one with the date picke
                "number": "This question needs a number.",
                "choice": "Choose one of the form's options.",
                "multi_choice": "Tick one or more of the form's options.",
-               "boolean": "Choose Yes or No."}
+               "boolean": "Choose Yes or No.",
+               "file": "This question needs a file. Choose the file to upload, or press Abandon if you do not have one."}
 
 
 DASHBOARD_REFUSALS = {

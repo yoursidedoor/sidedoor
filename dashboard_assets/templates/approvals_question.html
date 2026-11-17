@@ -8,9 +8,13 @@
   {% if q.site_reason %}<p class="note note-warning">{% if not q.own_note %}The application site didn't accept this answer: {% endif %}{{ q.site_reason }}</p>{% endif %}
   {% if q.expires %}<p class="muted approval-q-due">Answer by {{ v.when(q.expires) }}. Nothing is submitted without your answer.</p>{% endif %}
   {% if f.text %}<p class="note note-{{ f.tone }}" role="alert">{{ f.text }}</p>{% endif %}
-  <form class="approval-q-form{{ ' approval-q-prose' if q.control not in ('radio', 'checkbox', 'select', 'date', 'number') }}" method="post" action="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
+  <form class="approval-q-form{{ ' approval-q-prose' if q.control not in ('radio', 'checkbox', 'select', 'date', 'number', 'file') }}" method="post" action="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/questions/answer{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML"{% if q.control == "file" %} enctype="multipart/form-data" hx-encoding="multipart/form-data"{% endif %}>
     <input type="hidden" name="decision_id" value="{{ q.id }}"><input type="hidden" name="payload_hash" value="{{ q.payload_hash }}">
-    {% if q.control == "radio" %}
+    {% if q.control == "file" %}
+    {# A document the form needs (owner, 2026-11-16, S2): a file, never typed text. #}
+    <p class="muted approval-q-hint" id="file-{{ q.dom }}">The form asks for this document. Choose the file to upload, or press Abandon if you do not have one.</p>
+    <input type="file" name="file" aria-labelledby="label-{{ q.dom }}" aria-describedby="file-{{ q.dom }}" required>
+    {% elif q.control == "radio" %}
     <span class="approval-q-choices" role="radiogroup" aria-labelledby="label-{{ q.dom }}">{% for choice in q.options %}<label class="approval-q-choice"><input type="radio" name="answer" value="{{ choice }}"{% if loop.first %} required{% endif %}{% if f.kept == choice %} checked{% endif %}> {{ choice }}</label>{% endfor %}</span>
     {% elif q.control == "checkbox" %}
     <span class="approval-q-choices" role="group" aria-labelledby="label-{{ q.dom }}">{% for choice in q.options %}<label class="approval-q-choice"><input type="checkbox" name="answer_multi" value="{{ choice }}"{% if choice in (f.kept_list or []) %} checked{% endif %}> {{ choice }}</label>{% endfor %}</span>
@@ -24,6 +28,13 @@
     {# Every free-text answer is one control (owner, 2026-11-14): a text area, as the site-profile text question's. #}
     <textarea name="answer" rows="3" maxlength="4000" aria-labelledby="label-{{ q.dom }}" required>{{ f.kept or "" }}</textarea>
     {% endif %}
-    <button class="button" type="submit">Save answer</button>
+    <button class="button" type="submit">{{ "Upload file" if q.control == "file" else "Save answer" }}</button>
   </form>
+  {% if q.abandon %}
+  {# The card's job, not the question (owner, 2026-11-16): the job closes and all its questions go. #}
+  <form class="approval-inline" method="post" action="/approvals/questions/abandon{{ '?' + v.query if v is defined and v.query }}" hx-post="/approvals/questions/abandon{{ '?' + v.query if v is defined and v.query }}" hx-target="closest article" hx-swap="outerHTML">
+    <input type="hidden" name="decision_id" value="{{ q.id }}">
+    <button class="button button-quiet" type="submit" aria-label="Abandon the application to {{ q.employer }}{% if q.role %}, {{ q.role }}{% endif %}">Abandon application</button>
+  </form>
+  {% endif %}
 </article>

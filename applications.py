@@ -56,6 +56,15 @@ RESUME_SEMANTICS = frozenset({"resume", "resume_cv", "cv", "resume_upload", "res
 # Controls that take a file; the designated resume is carried out of band, anything else the
 # AI wrote text for is rendered to a PDF and attached (cover_letter).
 ANSWER_FILE_TYPES = frozenset({"file", "upload", "attachment", "file_upload", "document"})
+# The answering AI's structured verdict on a file control (owner, 2026-11-16): `file_role` in its answer
+# is "resume" (this control is the applicant's main résumé/CV upload, under whatever name the read gave
+# it), "resume_copy_ok" (another document the résumé may stand in for), "written" (a document Sidedoor
+# writes itself, a cover letter: the value is its text, rendered to a PDF), "other" (a document Sidedoor
+# does not have: asked of the user as a FILE) or null for a question that takes no file. Python reads the
+# value only; it never reads the control's wording. An answer written from the first two roles is saved
+# under this source prefix, so every later pass (and the submit gate) treats the field as the résumé.
+FILE_ROLE_SOURCE_PREFIX = "ai-file-role:"
+FILE_ROLES_RESUME = frozenset({"resume", "resume_copy_ok"})
 # Pre-arm blockers the job itself cannot influence: the session lacked a capability it needed.
 # A submit that ends on one of these is reconciled as not submitted and costs no attempt.
 # FILE_UPLOAD_FAILED added 2026-09-22. It is the Chrome file-picker case this set was written
@@ -1902,15 +1911,17 @@ def local_gate(database, job, now, policy=None):
 
 
 def attachment_uploads(questions, answers, resume):
-    """{field: text} of the file-control answers rendered to a PDF (a cover letter) for this attempt."""
+    """{field: text} of the file-control answers rendered to a PDF (a cover letter) for this attempt.
+
+    Only a TEXT answer to a non-résumé file control is rendered. An answer naming the résumé file (a
+    certificate or other upload answered with it; `resolve_answers` points every such answer at the
+    designated file, S4) is never printed into a PDF: it stays an answer, and the submit session uploads
+    the designated résumé to that control (application_browser submit prompt). A user-supplied file
+    (`user_uploads` marker, S2) is not text and is attached as the file itself."""
     return {question_field(question): answers[question_field(question)]
-            for question in questions if isinstance(question, dict)
-            and str(question.get("answer_type") or "").strip().casefold() in ANSWER_FILE_TYPES
+            for question in questions if file_control(question)
             and question.get("semantic") not in RESUME_SEMANTICS
             and isinstance(answers.get(question_field(question)), str)
-            # An answer naming the resume file (a certificate or other upload answered with it)
-            # is never printed into a PDF: it stays an answer, and the submit session uploads
-            # the designated resume to that control (application_browser submit prompt).
             and answers[question_field(question)].strip()
             and Path(answers[question_field(question)].strip()).name.casefold() != resume.name.casefold()}
 
@@ -2214,6 +2225,49 @@ def recorded_fact_for_ai(question, policy):
                and recorded_answer_for_ai(answer, question) for answer in answers.values())
 
 
+def file_control(question):
+    """Does this control take a file (the read's answer_type or control names one)?"""
+    return (isinstance(question, dict)
+            and (str(question.get("answer_type") or "").strip().casefold() in ANSWER_FILE_TYPES
+                 or str(question.get("control") or "").strip().casefold() in ANSWER_FILE_TYPES))
+
+
+def resume_file_control(question):
+    """Is this the form's résumé upload: one of the résumé names AND a file control (the read's
+    answer_type or control)? A text box under a résumé name is not."""
+    return isinstance(question, dict) and question.get("semantic") in RESUME_SEMANTICS and file_control(question)
+
+
+def resume_pointers(policy):
+    """Every string that names the user's résumé: the saved pointer (`answers.resume.value`, always the
+    ATS path, `resume_intake`), the ATS file's path and the original upload's path."""
+    answers = (policy or {}).get("answers") if isinstance((policy or {}).get("answers"), dict) else {}
+    pointer = answers.get("resume") if isinstance(answers.get("resume"), dict) else {}
+    found = [pointer.get("value")]
+    for key in ("resume", "resume_raw"):
+        record = (policy or {}).get(key)
+        found.append(record.get("path") if isinstance(record, dict) else None)
+    return [value for value in found if isinstance(value, str) and value.strip()]
+
+
+def names_resume(value, policy):
+    """Does this file-control answer name the user's résumé (one of `resume_pointers`, by exact path or by
+    file name)? A pointer comparison, not a reading of any wording."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    pointers = resume_pointers(policy)
+    names = {Path(pointer).name.casefold() for pointer in pointers}
+    return value.strip() in pointers or Path(value.strip()).name.casefold() in names
+
+
+def resume_role_answer(saved, question, policy):
+    """A saved answer that is the résumé by role: written by the answering AI's `file_role` (S1), or any
+    file-control answer naming the résumé pointer (S4). Its value is the designated file, whichever the
+    user chose in Settings > Résumé, never the pointer's own path."""
+    return bool(saved) and file_control(question) and question.get("semantic") not in RESUME_SEMANTICS and (
+        str(saved.get("source") or "").startswith(FILE_ROLE_SOURCE_PREFIX) or names_resume(saved.get("value"), policy))
+
+
 def resolve_answers(questions, policy):
     answers = {}
     missing = []
@@ -2232,6 +2286,22 @@ def resolve_answers(questions, policy):
         optional = not question.get("required")
         field = question_field(question)
         semantic = question.get("semantic")
+        if resume_file_control(question):
+            # The résumé FILE control takes the designated résumé under ANY of its names (owner, 2026-11-16).
+            # The read named Databricks' "Resume/CV*" file control `resume_cv`; the saved pointer is kept
+            # under `resume`, so the exact-name lookup below found nothing, the answering step skips
+            # résumé fields by design, and after three empty tries the file control was asked of the
+            # owner as a text question. The file is the user's choice in Settings > Résumé
+            # (`user_profile.application_resume`), carried out of band and hash-checked; it never
+            # depended on which name the read gave the control. Only a file control: a text box under one of
+            # these names ("Paste your CV") is an ordinary question and keeps the path below (review C1).
+            designated = user_profile.application_resume(policy).get("path")
+            if designated:
+                answers[field] = designated
+            elif not optional and field not in seen:
+                seen.add(field)
+                missing.append(field)
+            continue
         saved = policy["answers"].get(field)
         if saved is None:
             # A computed start date never stands in for a menu question (review round 9: a submit
@@ -2256,12 +2326,15 @@ def resolve_answers(questions, policy):
                 if not recorded_answer_for_ai(matches[0], question):
                     saved = matches[0]
         if saved and semantic in RESUME_SEMANTICS:
-            # The main resume control takes the designated resume (the file the user chose in
-            # Settings > Résumé, `user_profile.application_resume`), carried out of band and
-            # hash-checked (other file controls may take a generated cover letter). The answer is
-            # therefore always that file's path, whatever path the saved pointer names (owner,
-            # 2026-10-24: the choice can change, and the ATS version is used when the chosen
-            # original is gone); with no designated file there is nothing to attach.
+            # A résumé-named control that is not a file control, as before 2026-11-16: the saved pointer's
+            # answer is always the designated file's path, whatever path it names.
+            designated = user_profile.application_resume(policy).get("path")
+            saved = dict(saved, value=designated) if designated else None
+        if resume_role_answer(saved, question, policy):
+            # S1/S4 (owner, 2026-11-16): a file control the AI judged to be the résumé upload under another
+            # name, or one it answered with the résumé pointer (a certificate), takes the file the user
+            # chose in Settings > Résumé, so the submit session uploads that file and nothing renders the
+            # pointer's path into a PDF when the chosen file is the original.
             designated = user_profile.application_resume(policy).get("path")
             saved = dict(saved, value=designated) if designated else None
         if not saved or not saved.get("source") or semantic != saved.get("semantic"):
@@ -3941,10 +4014,12 @@ def owner_question(field, question):
     options stays multi_choice (checkboxes; its answer is a list); another question with options is a
     choice (the card shows them as radio buttons); a yes/no control without options is yes/no; a
     date or number control keeps its type (owner, 2026-10-24: the card shows the form's own
-    control); anything else is free text."""
+    control); a file control stays a file question (owner, 2026-11-16, S2: the card takes a file,
+    never typed text); anything else is free text."""
     choices = [choice.strip() for choice in question.get("choices") or () if isinstance(choice, str) and choice.strip()]
     kind = str(question.get("answer_type") or "").strip().casefold()
     answer_type = ("multi_choice" if choices and kind == "multi_choice" else "choice" if choices
+                   else "file" if file_control(question)
                    else "boolean" if kind in BOOLEAN_ANSWER_TYPES
                    else kind if kind in ("date", "number") else "text")
     label = question.get("label") if isinstance(question.get("label"), str) and question["label"].strip() else None
@@ -3960,7 +4035,12 @@ def ask_owner(database, job, asked, policy, now):
     """One "Questions for you" card per question (`request_fact` returns the open one when it is
     already asked, so a re-run never asks twice). A question of this job whose deadline passed is
     closed EXPIRED first, so it is asked again with a fresh one. Caller holds the transaction.
-    The hold's deadline is read back with `open_cards`."""
+    The hold's deadline is read back with `open_cards`. A job that reached a final state while it was
+    being answered (the user abandoned it from the dashboard, owner 2026-11-16) is asked nothing: no
+    card is left behind for a closed job."""
+    current = database.execute("SELECT state FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()
+    if current and current[0] in FINAL:
+        return
     milliseconds = int(dt.datetime.fromisoformat(now).timestamp() * 1000)
     for field in asked:
         for (event_key,) in database.execute("SELECT event_key FROM user_decisions WHERE job_key=? AND field=? "
@@ -4123,6 +4203,50 @@ def _close_cards(database, job_key, reason, now, where, parameters):
         database.execute("UPDATE user_decisions SET state='SUPERSEDED',last_error=? WHERE id=? AND state='PENDING'", (reason, identifier))
         database.execute("UPDATE notification_outbox SET state='CANCELLED',updated_at=? WHERE event_key=? "
                          "AND state IN ('PENDING','WAITING_TRANSPORT','WAITING_OWNER')", (now, event_key))
+
+
+def close_job_cards(database, job_key, reason, now):
+    """Every PENDING "Questions for you" card of a job that is closing (the user abandoned it), the
+    form-not-readable note too: superseded, its notification cancelled. Caller holds the transaction.
+    Returns the ids of the cards closed."""
+    rows = database.execute("SELECT id,event_key FROM user_decisions WHERE job_key=? AND kind='fact' AND state='PENDING'",
+                            (job_key,)).fetchall()
+    for identifier, event_key in rows:
+        database.execute("UPDATE user_decisions SET state='SUPERSEDED',last_error=? WHERE id=? AND state='PENDING'", (reason, identifier))
+        database.execute("UPDATE notification_outbox SET state='CANCELLED',updated_at=? WHERE event_key=? "
+                         "AND state IN ('PENDING','WAITING_TRANSPORT','WAITING_OWNER')", (now, event_key))
+    return [identifier for identifier, _ in rows]
+
+
+def withdraw_resume_cards(database, now):
+    """Cards that asked the owner to type an answer for a résumé FILE control (the defect described in
+    `resolve_answers`): each is superseded, and a job that waited only on such cards is due again, so
+    its next turn attaches the designated résumé and goes on. The card itself was stored as a text
+    question, so whether its control is a file is read from the job's saved form read; a text box under
+    a résumé name ("Paste your CV") is a real question and is left alone. Call inside a transaction.
+    Returns the job keys made due."""
+    marks = ",".join("?" * len(RESUME_SEMANTICS))
+    cards = database.execute(
+        "SELECT id, job_key, field FROM user_decisions WHERE kind='fact' AND state='PENDING' AND semantic IN (%s)" % marks,
+        tuple(sorted(RESUME_SEMANTICS))).fetchall()
+    due = []
+    for identifier, job_key, field in cards:
+        row = database.execute("SELECT evidence FROM application_reviews WHERE job_key=? ORDER BY observed_at DESC, rowid DESC LIMIT 1",
+                               (job_key,)).fetchone()
+        try:
+            questions = json.loads(row[0]).get("questions") if row else None
+        except (ValueError, AttributeError):
+            questions = None
+        if not any(resume_file_control(question) and question_field(question) == field for question in questions or []):
+            continue
+        _close_cards(database, job_key, "RESUME_IS_ATTACHED_AS_A_FILE", now, "id=?", (identifier,))
+        waiting = database.execute("SELECT 1 FROM user_decisions WHERE job_key=? AND kind='fact' AND state='PENDING' "
+                                   "AND field<>? LIMIT 1", (job_key, decision_transport.FORM_NOT_READABLE_FIELD)).fetchone()
+        if waiting is None and job_key not in due and database.execute(
+                "UPDATE application_jobs SET next_at=NULL WHERE job_key=? AND state='BLOCKED' AND blocker LIKE ?",
+                (job_key, "UNKNOWN_REQUIRED_ANSWERS:%")).rowcount:
+            due.append(job_key)
+    return due
 
 
 def close_settled_cards(database, job, missing, now):
@@ -4309,10 +4433,16 @@ def approval_snapshot(job, review, questions, answers, resume, designated, polic
         if field in seen or field not in answers or question.get("semantic") in RESUME_SEMANTICS:
             continue
         seen.add(field)
+        import user_uploads
         items.append({"field": field, "label": question_label(question) or None, "semantic": question.get("semantic"),
                       "answer_type": question.get("answer_type"), "control": question.get("control"),
                       "choices": [choice for choice in question.get("choices") or () if isinstance(choice, str)],
                       "required": question.get("required") is True, "cover_letter": field in covers,
+                      # The file the user chose for this control (S2): shown by name, not edited on the card.
+                      "user_file": user_uploads.is_marker(answers[field]),
+                      # The résumé attached to this control (S1/S4; F4): fixed words on the card, never its path in a box.
+                      "resume_file": bool(file_control(question) and isinstance(answers[field], str)
+                                          and designated.get("path") and answers[field] == designated.get("path")),
                       "value": answers[field]})
     return {"route": "email" if target else "ats", "destination": application_destination(job, review),
             "subject": target["subject"] if target else None,
@@ -4811,6 +4941,14 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         if cards:
             hold_for_owner_cards(database, job, unanswered, cards, missing, policy, now)
             return
+    if (missing or unanswered) and database.execute(
+            "SELECT state FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()[0] in FINAL:
+        return   # closed meanwhile (the user's Abandon): this pass writes nothing more for it (review C2)
+    if missing and any(resume_file_control(question) and question_field(question) in missing for question in questions):
+        # A résumé control with no designated file to attach is not a question for the AI or the owner.
+        with database:
+            hold(database, job, "DESIGNATED_RESUME_MISMATCH", "Restore the designated resume or obtain explicit designation of its replacement", now)
+        return
     if missing:
         blocker = "ANSWERING_RETRY:" + ",".join(missing)
         # Owner, 2026-10-26: the third identical failure becomes a card, the seventh gives up
@@ -4950,9 +5088,13 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         # this job. The AI already wrote the text as the answer to that question; it is rendered to
         # a PDF here and carried as an attachment instead of being typed into a file control.
         import cover_letter
+        import user_uploads
         uploads = attachment_uploads(questions, answers, resume)
         attachments = cover_letter.prepare(root, job["job_key"],
                                            {key: {"value": value, "attachment": True} for key, value in uploads.items()})
+        # A document the user supplied on a file card (S2) is attached as the file itself, re-hashed
+        # here and again at the submission gate; it is never rendered.
+        attachments.update(user_uploads.attachments(questions, answers))
         answers = {key: value for key, value in answers.items() if key not in attachments}
         submission = {"job": job, "attempt_id": attempt_id, "idempotency_key": job["job_key"], "answers": answers, "resume": str(resume), "form_revision": review.get("form_revision"), "no_extra_answers": True,
                       "recorded_facts": recorded_authorization_facts(policy)}
@@ -5149,6 +5291,8 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
         application_recovery.relabel_failed_closures(database, now)
         # Jobs parked before a closed posting closed its job at the first read (owner, 2026-11-14).
         application_recovery.close_parked_closed_postings(database, now)
+        # A résumé file control that was asked of the owner as a question (owner, 2026-11-16).
+        withdraw_resume_cards(database, now)
     if only is None:
         # A résumé uploaded before its links were read gets them now, with no step for the user (owner,
         # 2026-11-16). Never the round's problem: a failure is logged there and tried again later.

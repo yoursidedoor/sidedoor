@@ -708,9 +708,16 @@ def submission_gate(database, root, request, now):
         raise ValueError("DESIGNATED_RESUME_MISMATCH")
     if payload.get("attachments"):
         # Every other attached file is one this product generated for this job (a cover letter),
-        # unchanged since it was written. Nothing else on disk can be attached.
+        # unchanged since it was written, or a document the user supplied on a file card for this
+        # job (`user_uploads`, owner 2026-11-16, S2), under the Sidedoor home and hashing to the
+        # recorded answer for that field. Nothing else on disk can be attached.
         import cover_letter
-        cover_letter.verify(root, payload["attachments"])
+        import user_uploads
+        attachments = payload["attachments"]
+        supplied = {field: entry for field, entry in attachments.items()
+                    if isinstance(entry, dict) and entry.get("user_supplied")}
+        cover_letter.verify(root, {field: entry for field, entry in attachments.items() if field not in supplied})
+        user_uploads.verify_attachments(supplied, evidence["answers"])
     return evidence
 
 

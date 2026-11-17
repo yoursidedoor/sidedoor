@@ -29,7 +29,8 @@
           "negative_value",
           "attribution",
           "derivation",
-          "unknown_reason"
+          "unknown_reason",
+          "file_role"
         ],
         "properties": {
           "question_key": {
@@ -76,9 +77,10 @@
               "choice",
               "multi_choice",
               "number",
-              "text"
+              "text",
+              "file"
             ],
-            "description": "Copy the packet question's answer_type."
+            "description": "Copy the packet question's answer_type. \"file\" is a control that takes a document: give file_role for it."
           },
           "value": {
             "anyOf": [
@@ -173,6 +175,20 @@
               "null"
             ],
             "description": "Required when status is UNKNOWN or WITHHELD_BY_POLICY: what is missing, or which policy withholds it."
+          },
+          "file_role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "resume",
+              "resume_copy_ok",
+              "written",
+              "other",
+              null
+            ],
+            "description": "For a question whose answer_type is \"file\" only; null for every other question. What this file control is, by its meaning on the form: \"resume\" when it is the applicant's main resume/CV upload (whatever the field is called: resume_file, cv_upload, curriculum_vitae); \"resume_copy_ok\" when it asks for another document the resume may stand in for (a certificate, a transcript, a supporting document); \"written\" when it asks for a document you write yourself (a cover letter: put the text in value); \"other\" when it asks for a document the owner has not supplied and you cannot write (a transcript the form needs as the real document, a portfolio file, an ID). Python attaches the owner's resume for \"resume\" and \"resume_copy_ok\" (leave value null, status ANSWERED), renders value to a PDF for \"written\", and asks the owner for the file for \"other\" (status UNKNOWN, value null)."
           }
         }
       }

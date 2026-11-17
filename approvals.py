@@ -1014,6 +1014,14 @@ def application_control(item):
     value = item.get("value")
     if item.get("operational"):
         return "textarea", []
+    import user_uploads
+    if item.get("user_file") or item.get("resume_file") or user_uploads.is_marker(value) or (
+            value is None and not item.get("cover_letter")
+            and (kind in applications_file_types() or control in applications_file_types())):
+        # A control that takes a document (owner, 2026-11-16, S2): the Questions card (no answer yet)
+        # takes a file; the held-application card shows the chosen file by name, or the résumé in
+        # fixed words (F4), and never edits either as text.
+        return "file", []
     if kind in MULTI_CHOICE_TYPES or isinstance(value, list) or (control == "checkbox" and len(choices) > 1):
         return "checkbox", choices or [str(choice) for choice in value or ()]
     if choices:
@@ -1029,9 +1037,24 @@ def application_control(item):
     return "text", []
 
 
+def applications_file_types():
+    import applications
+    return applications.ANSWER_FILE_TYPES
+
+
+RESUME_UPLOADED = "Your résumé is uploaded"
+USER_FILE_UPLOADED = " (the file you chose; it is uploaded as it is)"
+
+
 def shown_answer(item):
-    """The answer as the card shows it: a label, or the list of labels ticked."""
+    """The answer as the card shows it: a label, the list of labels ticked, a chosen file's name, or
+    the résumé in fixed words (F4: never its path)."""
     value = item.get("value")
+    import user_uploads
+    if user_uploads.is_marker(value):
+        return value["file_name"] + USER_FILE_UPLOADED
+    if item.get("resume_file"):
+        return RESUME_UPLOADED
     if isinstance(value, list):
         return [str(choice) for choice in value]
     if isinstance(value, bool):
@@ -1061,6 +1084,8 @@ def _fitted(item, values):
     form's options; several for a multi-select). `values` is the form's list for that field."""
     control, options = application_control(item)
     original = item.get("value")
+    if control == "file":
+        return original                      # the file as chosen: the card never edits it as text
     if control == "checkbox":
         chosen = [value for value in values if isinstance(value, str)]
         if any(value not in options for value in chosen):

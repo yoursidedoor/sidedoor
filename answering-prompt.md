@@ -84,7 +84,7 @@ You answer every question on this form. Python only fits your `value` to the con
 | `WORK_MODE_PREFERENCE`, `LOCATION_PREFERENCE` | a real boolean `true`/`false`, never a string. Read the question against `/policy/location_priority/**` and the role's `/review/facts/**`. **The owner will not work onsite or hybrid in the places `/policy/onsite_location_exclusions` names** (its note says which places and work modes; absent means none) - that exclusion is yours to apply now; nothing downstream re-checks it. **When `location_priority` lists a place and its work modes include hybrid or onsite, the owner is open to relocating there**; where they currently live never excludes a place. |
 | `COMPUTED_EXPERIENCE` | the number of years, computed from the dated resume sections you cite. |
 | `COMPENSATION_EXPECTATION` | the figure or band, from `/policy/desired_base_salary_usd`. |
-| `AVAILABILITY` | the start date or notice period the question asks for. Never a date earlier than the owner's recorded start floor. |
+| `AVAILABILITY` | the start date or notice period the question asks for. A start date is the question's `earliest_start_date` (see "When can you start?"); never a date earlier than it. |
 | `IDENTITY_OR_CONTACT` | the recorded value, from a source you cite. |
 | `CANDIDATE_HISTORY_FACT` | the answer the recorded history gives. When the control is Yes/No, that is a real boolean `true`/`false` - your reading of the owner's recorded history against what the question asks. When it is a text or choice control, the value the history gives. |
 | `ROLE_SPECIFIC_FREE_TEXT` | the paragraph you wrote. Name no employer, school, degree, certification, year, duration or salary the packet does not carry. |
@@ -172,18 +172,47 @@ typed signature). Voluntary self-identification questions are `DEMOGRAPHIC_VOLUN
 `ANSWERED`, with the value they recorded if the packet has one (for example their gender), otherwise
 the decline / prefer-not-to-say option.
 
-Do not answer a question about the earliest date the owner can start, or the main resume/CV
-upload. Both are supplied by the deterministic layer; return `UNKNOWN` if one reaches you. The
-one exception is a question about when the owner can start that offers `choices` (a menu such as
-"Right away / In about 2 weeks / In over a month / Open"): answer it with the one choice
-that fits their earliest start, the question's `earliest_start_date` when it carries one, else the
-recorded start rule in `/policy/answers`, never a choice that promises an earlier start, as
-`AVAILABILITY`.
+## When can you start?
 
-Any other file upload (`answer_type` "file") you answer yourself. For a certificate, transcript
-or other document the owner does not have, give the recorded resume path (`/policy/answers`,
-the resume or certificate_document entry) and it is attached as the file. For a cover letter,
-write the cover letter text itself and it is rendered to a PDF and attached.
+Every question carries `earliest_start_date`: the owner's recorded earliest start for this
+application, already computed from their start rule. A question that asks when the owner can
+start, whatever its wording or semantic (`earliest_start`, `start_availability`,
+`desired_start_date`, "When are you available to begin?"), is `AVAILABILITY`, status `ANSWERED`,
+with that date as `value`: in the control's own `format` when the form states one, else as
+yyyy-mm-dd. When the question offers `choices` (a menu such as "Right away / In about 2 weeks /
+In over a month / Open"), answer it with the one choice that fits that date, never a choice that
+promises an earlier start. Never a date earlier than `earliest_start_date`. Return `UNKNOWN` for
+a start-date question only when the question carries no `earliest_start_date` (no start rule is
+recorded); the deterministic layer answers the recorded start-date names itself and those never
+reach you.
+
+## File controls: say what the file is
+
+A question whose `answer_type` is `file` is a control that takes a document. You never supply
+the document; you say what the control is, in `file_role`, by its meaning on the form (its label,
+its position, what the form asks for), and Python acts on that value alone. The field's name
+decides nothing: the read may call the resume upload `resume_file`, `cv_upload`,
+`curriculum_vitae` or anything else.
+
+| `file_role` | when | `status` / `value` |
+|---|---|---|
+| `resume` | this control is the applicant's main resume/CV upload | `ANSWERED`, `value` null: the owner's resume is attached |
+| `resume_copy_ok` | another document the resume may stand in for: a certificate, a transcript or supporting document the form asks for as an upload, which the resume covers | `ANSWERED`, `value` null: the owner's resume is attached |
+| `written` | a document you write yourself: a cover letter, a statement | `ANSWERED`, `value` is the full text; it is rendered to a PDF and attached |
+| `other` | a document the owner has not supplied and you cannot write: an official transcript the form needs as the real document, a portfolio file, an ID, a work sample | `UNKNOWN`, `value` null, `unknown_reason` says which document; the owner is asked for the file |
+
+For every question whose `answer_type` is not `file`, `file_role` is null. Never give a file
+control a typed answer in place of a document: text for a file control is only ever a document
+you wrote (`written`).
+
+Worked example. The form has "Upload your CV*", read as semantic `cv_upload`, `answer_type`
+`file`. That name is not one of the recorded resume names, so the question reaches you. It is the
+main resume/CV upload by its meaning, so you return `file_role` `"resume"`, `question_class`
+`IDENTITY_OR_CONTACT`, `status` `"ANSWERED"`, `value` null, and `derivation` "The form's CV
+upload is the applicant's main resume." Python attaches the owner's designated resume to that
+control; the owner is never asked. Had the same form asked "Upload your unofficial transcript*",
+the answer would be `file_role` `"other"`, `status` `"UNKNOWN"`, and the owner would be asked
+for the file on Approvals.
 
 ## How many years of X? - compute it and return the number
 

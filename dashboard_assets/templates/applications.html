@@ -30,6 +30,12 @@
     <input type="hidden" name="job_key" value="{{ j.key }}">
     <button class="button button-quiet" type="submit">{{ j.try_again }}</button>
   </form>
+  {% elif j.abandon %}
+  {# Every job that is not finished and not being submitted (owner, 2026-11-16): Abandon. Its answer replaces it. #}
+  <form class="app-try{{ ' ' + where if where }}" method="post" action="/applications/abandon" hx-post="/applications/abandon" hx-target="this" hx-swap="outerHTML">
+    <input type="hidden" name="job_key" value="{{ j.key }}">
+    <button class="button button-quiet" type="submit" aria-label="{{ j.abandon }} {{ j.company }}, {{ j.role }}">{{ j.abandon }}</button>
+  </form>
   {% endif %}
 {% endmacro %}
 {% macro same_job(j, v) %}{% if j.closing and j.closing.other_key %}Same job as: <a href="{{ v.link(job=j.closing.other_key) }}">{{ j.closing.other }}</a>{% else %}Same job as an earlier application{% endif %}{% endmacro %}

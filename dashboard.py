@@ -668,13 +668,13 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
 
     @app.post("/applications/abandon")
     async def applications_abandon(request: Request):
-        """Abandon, beside Try again, on a job parked for the user (owner, 2026-11-14)."""
+        """Abandon on any job that is not finished and not being submitted (owner, 2026-11-16)."""
         import access_cards
         import applications
         import approvals_page
         form = await request.form()
         job_key = form.get("job_key") if isinstance(form.get("job_key"), str) else ""
-        flash = await run_in_threadpool(access_write, lambda database: access_cards.abandon_parked(database, job_key, applications.stamp()))
+        flash = await run_in_threadpool(access_write, lambda database: access_cards.abandon_job(database, job_key, applications.stamp()))
         if flash is None:
             flash = {"tone": "error", "text": approvals_page.BUSY}
         if request.headers.get("hx-request") == "true":

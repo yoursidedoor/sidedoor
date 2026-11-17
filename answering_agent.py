@@ -188,7 +188,11 @@ ANSWER_TYPES = {
     "float": "number", "currency": "number",
     "text": "text", "string": "text", "textarea": "text", "long_text": "text",
     "email": "text", "url": "text", "tel": "text", "phone": "text", "date": "text",
+    # A control that takes a file (owner, 2026-11-16): the AI sees "file" and returns `file_role`.
+    # Its value, when it writes one (a cover letter), is text.
+    **{kind: "file" for kind in applications.ANSWER_FILE_TYPES},
 }
+FILE_ROLES = frozenset({"resume", "resume_copy_ok", "written", "other"})
 
 
 class AnsweringUnavailable(RuntimeError):
@@ -256,6 +260,8 @@ def at_pointer(value, pointer):
 
 
 def answer_type_of(question):
+    if applications.file_control(question):
+        return "file"
     raw = question.get("answer_type")
     if isinstance(raw, str):
         normalized = ANSWER_TYPES.get(applications.normalized(raw).replace(" ", "_"))
@@ -305,7 +311,7 @@ def packet_policy(policy):
     for key, value in applications.answers_for_model((policy or {}).get("answers")).items():
         if not isinstance(value, dict) or not value.get("source"):
             continue
-        if str(value.get("source")).startswith(AI_SOURCE_PREFIX):
+        if str(value.get("source")).startswith((AI_SOURCE_PREFIX, applications.FILE_ROLE_SOURCE_PREFIX)):
             continue
         answers[key] = {"semantic": value.get("semantic"), "value": value.get("value"),
                         "source": value.get("source")}
@@ -518,7 +524,11 @@ def _entry_shape(entry):
     required = {"question_key", "question_semantic", "question_class", "status", "answer_type",
                 "value", "jurisdiction", "assertion", "affirmative_value", "negative_value",
                 "attribution", "derivation", "unknown_reason"}
-    if not isinstance(entry, dict) or set(entry) != required:
+    # `file_role` (owner, 2026-11-16) is required by the schema; an output without it (an older
+    # fixture, a model that dropped it) is still read, with no role.
+    if not isinstance(entry, dict) or set(entry) - {"file_role"} != required:
+        return False
+    if entry.get("file_role") is not None and entry.get("file_role") not in FILE_ROLES:
         return False
     if not isinstance(entry.get("question_key"), str) or not entry["question_key"].strip():
         return False
@@ -787,6 +797,15 @@ def evaluate(entry, question, key, policy, packet, attempt_id, now):
     if entry["status"] == "UNKNOWN":
         return None, dict(verdict, outcome="UNKNOWN",
                           reason=entry.get("unknown_reason") or "MODEL_REPORTED_UNKNOWN")
+    if applications.file_control(question) and entry.get("file_role") != "written":
+        # S2 (owner, 2026-11-16): a document Sidedoor does not have ("other"), or a file control whose
+        # role the model left null or out (F2: read as "other"). Nothing the AI typed is ever printed
+        # into a PDF and uploaded as that document: the question is unknown, and when the judge agrees
+        # the user is asked for the FILE on Approvals (`applications.owner_questions`). Only "written"
+        # (a cover letter) is the AI's own text, rendered to a PDF; the résumé roles never reach here.
+        return None, dict(verdict, status="UNKNOWN", outcome="UNKNOWN",
+                          reason="FILE_ROLE_OTHER" if entry.get("file_role") == "other" else "FILE_ROLE_MISSING",
+                          derivation=entry.get("derivation"))
     # Owner, 2026-09-28: "remove this remaining python check. Let AI solely give the answers based
     # on my preferences. ... I trust it more than i trust Python." Every class the AI answers is
     # taken as answered: no question-type rule, no allowed-sources rule, no citation check.
@@ -926,6 +945,11 @@ def answer(database, job, questions, policy, now, adapter=None, *, root=None, co
 
     resolved, _unused = applications.resolve_answers(questions, policy)
     seen, askable = set(), []
+    # S3 (owner, 2026-11-16): every question the AI gets carries the owner's earliest start date, so a
+    # question asking when the applicant can start under ANY semantic (`earliest_start`,
+    # `start_availability`, ...) is answered from it, not sent to the owner. The six recorded names
+    # keep the computed path below, unchanged.
+    floor = earliest_start_floor(now, policy)
     for question in questions:
         # An optional question is asked too when the owner recorded a yes/no or authorization fact
         # for it (owner, 2026-09-21: a recorded optional answer is filled; since 2026-10-07 the AI
@@ -952,7 +976,6 @@ def answer(database, job, questions, policy, now, adapter=None, *, root=None, co
                                       "reason": "DESIGNATED_RESUME_ATTACHED_OUT_OF_BAND"})
             continue
         if question.get("semantic") in applications.EARLIEST_START_SEMANTICS:
-            floor = earliest_start_floor(now, policy)
             if question.get("choices") and floor:
                 # A start-date menu (owner, 2026-10-06, Woodgrove): the AI picks the option that fits
                 # the owner's earliest start date, which goes with the question.
@@ -965,7 +988,7 @@ def answer(database, job, questions, policy, now, adapter=None, *, root=None, co
             else:
                 result["unknown"].append(key)
             continue
-        askable.append((key, question))
+        askable.append((key, dict(question, earliest_start_date=floor) if floor else question))
 
     if not askable:
         return result
@@ -1003,10 +1026,52 @@ def answer(database, job, questions, policy, now, adapter=None, *, root=None, co
 
     base = {name: value for name, value in packet.items() if name not in ("repair_feedback", "packet_sha256")}
     pending = {key: (question, entries[key], attempt_id) for key, question in askable}
+    # S1 (owner, 2026-11-16): a file control the AI marked as the résumé (`file_role` "resume": the main
+    # résumé/CV upload under a name outside RESUME_SEMANTICS, or "resume_copy_ok": a document the résumé
+    # stands in for) is filled with the designated résumé here, as `resolve_answers` fills the six names.
+    # The AI's structured value decides; the judge is told it is not overturned by wording, and Python
+    # enforces that by not putting it to the judge. Never a card for it.
+    for key, (question, entry, _minted_by) in list(pending.items()):
+        role = entry.get("file_role")
+        if not applications.file_control(question) or role not in applications.FILE_ROLES_RESUME:
+            continue
+        del pending[key]
+        record = _file_role_record(policy, question, key, entry, attempt_id)
+        if record is None:
+            result["unknown"].append(key)
+            result["audit"]["verdicts"].append({"question_key": key, "question_class": entry["question_class"],
+                                                "status": "UNKNOWN", "outcome": "UNKNOWN",
+                                                "reason": "DESIGNATED_RESUME_MISSING", "file_role": role})
+            continue
+        result["answers"][key] = record
+        result["audit"]["verdicts"].append({"question_key": key, "question_class": entry["question_class"],
+                                            "status": "ANSWERED", "outcome": "ANSWERED", "reason": None,
+                                            "value": record["value"], "basis": record["basis"], "file_role": role,
+                                            "derivation": entry.get("derivation")})
+    if not pending:
+        result["audit"]["outcome"] = "COMPLETE"
+        _record_attempt(database, job, result, now)
+        return result
     result["audit"]["outcome"] = _review_rounds(database, job, pending, base, policy, root, config, options,
                                                 adapter, now, result)
     _record_attempt(database, job, result, now)
     return result
+
+
+def _file_role_record(policy, question, key, entry, attempt_id):
+    """The designated résumé as the answer to a file control the AI marked `file_role` resume or
+    resume_copy_ok; None when no résumé is designated."""
+    import user_profile
+    designated = user_profile.application_resume(policy)
+    if not isinstance(designated.get("path"), str) or not designated["path"].strip():
+        return None
+    role = entry.get("file_role")
+    return {"value": designated["path"], "semantic": question.get("semantic"),
+            "attribution": [{"pointer": "/policy/answers/resume/value", "quote": designated["path"]}],
+            "question_id": question.get("id"), "question_key": key,
+            "source": applications.FILE_ROLE_SOURCE_PREFIX + role + ":" + attempt_id,
+            "question_class": entry.get("question_class"), "basis": "FILE_ROLE_" + role.upper(),
+            "derivation": entry.get("derivation")}
 
 
 def _booked_call(database, prefix, job, packet, prompt, root, config, options, adapter, now, result, role):
@@ -1444,11 +1509,12 @@ def materialize(database, job, questions, scoped_policy, now, adapter=None, *, r
         with database:
             for key, record in result["answers"].items():
                 source = str(record.get("source") or "")
-                if not source.startswith((AI_SOURCE_PREFIX, DECLARATION_SOURCE_PREFIX)):
+                written_by_ai = (AI_SOURCE_PREFIX, DECLARATION_SOURCE_PREFIX, applications.FILE_ROLE_SOURCE_PREFIX)
+                if not source.startswith(written_by_ai):
                     continue
                 existing = scoped_policy["answers"].get(key)
                 if isinstance(existing, dict) and existing.get("source") and not str(
-                        existing["source"]).startswith((AI_SOURCE_PREFIX, DECLARATION_SOURCE_PREFIX)):
+                        existing["source"]).startswith(written_by_ai):
                     continue
                 database.execute(
                     """INSERT INTO application_answers VALUES (?,?,?,?,?)

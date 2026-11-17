@@ -191,7 +191,7 @@ class ParkedJobsTest(unittest.TestCase):
         self.assertNotIn("sign-in", page)
         self.assertIsNone(RAW_CODE.search(re.sub(r"<[^>]+>", " ", page)))
         # A second press finds nothing to do; Try again brings the job back.
-        self.assertIn(access_cards.GONE, self.post("/applications/abandon", "one"))
+        self.assertIn(access_cards.ALREADY_FINISHED, self.post("/applications/abandon", "one"))
         self.assertIn(access_cards.REOPENED, self.post("/access/try-again", "one"))
         self.assertEqual(self.row("one")["state"], "QUEUED")
 
@@ -201,10 +201,11 @@ class ParkedJobsTest(unittest.TestCase):
         self.assertNotIn(">Abandon</button>", self.page())
         self.assertIn(access_cards.NOT_ABANDONED, self.post("/applications/abandon", "sent"))
         self.assertEqual((self.row("sent")["state"], self.row("sent")["blocker"]), ("BLOCKED", PARKED))
-        # A job that is not parked for the user is never closed by a forged key.
+        # Whatever its state (Abandon is on every open job since 2026-11-16, tests/test_abandon_any.py):
+        # a job that may have reached the employer is never closed by a forged key.
         with self.database:
             self.database.execute("UPDATE application_jobs SET state='QUEUED',blocker=NULL WHERE job_key='sent'")
-        self.assertIn(access_cards.GONE, self.post("/applications/abandon", "sent"))
+        self.assertIn(access_cards.NOT_ABANDONED, self.post("/applications/abandon", "sent"))
         self.assertEqual(self.row("sent")["state"], "QUEUED")
 
 
