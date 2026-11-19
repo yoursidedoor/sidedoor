@@ -84,6 +84,38 @@ class ScheduleTests(unittest.TestCase):
             self.assertEqual((state["state"], state["investigation_attempts"]), (expected, index + 1))
             at += dt.timedelta(hours=2)
 
+    def test_next_run_waits_are_counted_on_their_own(self):
+        """Y1 (owner, 2026-11-19): three deadline waits then three allowance waits on one day: the
+        deadline waits use neither the ordinary wait counter nor a try, so the day is not EXHAUSTED and
+        the allowance waits still get the allowance reset as their retry."""
+        def waiting(reason, retry):
+            return {"state": "PARTIAL", "compute_wait": True, "retryable": True, "next_retry_at": retry.isoformat(),
+                    "industries": [{"industry": "AI", "state": "COMPUTE_WAIT",
+                                    "compute_wait": {"reason": reason, "next_retry_at": retry.isoformat()}}]}
+        now = self.at("2026-09-17T09:00:00")
+        reset = self.at("2026-09-17T12:00:00")
+        for number in range(3):
+            claim = daily_schedule.claim(self.database, self.config, now)
+            self.assertEqual(claim["state"], "CLAIMED")
+            outcome = daily_schedule.finish(self.database, self.config, claim["id"],
+                                            waiting("RESEARCH_DEADLINE_WAIT", now + dt.timedelta(minutes=5)), now)
+            self.assertEqual((outcome["state"], outcome["compute_wait_attempts"], outcome["investigation_attempts"]),
+                             ("RETRY_WAIT", 0, 0))
+            self.assertEqual(outcome["next_run_wait_attempts"], number + 1)
+            now += dt.timedelta(minutes=6)
+        for number in range(3):
+            claim = daily_schedule.claim(self.database, self.config, now)
+            self.assertEqual(claim["state"], "CLAIMED")
+            outcome = daily_schedule.finish(self.database, self.config, claim["id"],
+                                            waiting("DAILY_COMPUTE_ALLOWANCE_EXHAUSTED", reset), now)
+            self.assertEqual(outcome["state"], "RETRY_WAIT")
+            self.assertEqual(outcome["next_retry_at"], reset.isoformat())
+            self.assertEqual(outcome["compute_wait_attempts"], number + 1)
+            now = reset + dt.timedelta(minutes=1)
+            reset = now + dt.timedelta(hours=3)
+        self.assertEqual(outcome["investigation_attempts"], 0)
+        self.assertNotEqual(daily_schedule.claim(self.database, self.config, now)["state"], "EXHAUSTED")
+
     def test_compute_wait_excusals_are_bounded_and_the_day_still_ends(self):
         at = self.at("2026-09-18T08:00:12")
         excused = 0

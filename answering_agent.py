@@ -56,7 +56,7 @@ Both calls are direct OpenRouter chat-completions calls (`text_model.complete`, 
 a strict json_schema response format, provider routing `outreach_agent.DIRECT_PROVIDER`), the
 judges' shape. They have no tools, so they cannot produce a side effect. Each call is booked
 through `workflow_tasks.reserve_compute` as a consumer of the existing shared budget and settled
-when it completes; a compute wait consumes nothing, writes no answer and fails nothing.
+however it ends (owner T2, 2026-11-19: completed, failed or interrupted); a compute wait consumes nothing, writes no answer and fails nothing.
 
 `adapter` (the sixth positional parameter) is an optional injected executor for offline
 validation, used in place of the OpenRouter call for both the answering AI and the judge. It is
@@ -1075,10 +1075,11 @@ def _file_role_record(policy, question, key, entry, attempt_id):
 
 
 def _booked_call(database, prefix, job, packet, prompt, root, config, options, adapter, now, result, role):
-    """One model call under its own shared-compute booking, settled when it completes cleanly.
+    """One model call under its own shared-compute booking, settled however the call ends.
 
-    A booking the pool cannot hold is a compute wait (ANSWERING_COMPUTE_BUDGET_EXHAUSTED); a call
-    that fails keeps its whole booking, as for every other worker. Raises AnsweringUnavailable.
+    A booking the pool cannot hold is a compute wait (ANSWERING_COMPUTE_BUDGET_EXHAUSTED). A call
+    that completes, fails or is interrupted gives back its measured unused tail (owner T2,
+    2026-11-19; until then a failed call kept its whole booking). Raises AnsweringUnavailable.
     """
     timezone = config.get("timezone", "America/Los_Angeles")
     with database:
@@ -1086,8 +1087,10 @@ def _booked_call(database, prefix, job, packet, prompt, root, config, options, a
         # budget, not to this step; this only guarantees it exists on a database that has not yet
         # run a compute-reserving worker.
         workflow_tasks.initialize(database)
-        booking = (prefix + job["job_key"] + ":" + packet["packet_sha256"][:16] + ":"
-                   + workflow_tasks.budget_day(now, timezone))
+        # A retry of the same packet on the same day books a numbered successor once the earlier
+        # booking was refunded (owner T2, 2026-11-19), so it is charged again rather than run free.
+        booking = workflow_tasks.unsettled_booking(database, prefix + job["job_key"] + ":" + packet["packet_sha256"][:16]
+                                                    + ":" + workflow_tasks.budget_day(now, timezone))
         reserved = workflow_tasks.reserve_compute(database, booking, now, options["timeout_seconds"], timezone,
                                                   options["daily_seconds"])
     if not reserved:
@@ -1096,21 +1099,20 @@ def _booked_call(database, prefix, job, packet, prompt, root, config, options, a
     # from the answering step's start (a later round would otherwise be charged every earlier one).
     started = dt.datetime.now(dt.timezone.utc).isoformat()
 
-    def settle(reason):
-        with database:
-            workflow_tasks.settle_compute(database, booking, started, dt.datetime.now(dt.timezone.utc).isoformat(),
-                                          "application answering " + role + " " + reason + "; shared daily pool: "
-                                          "unused tail of a cleanly completed reservation")
+    outcome = "interrupted"
     try:
         raw = run_model(root, config, prompt, options["timeout_seconds"], adapter, packet, role=role,
                         calls=result["audit"]["calls"])
-    except AnsweringUnavailable as error:
-        if getattr(error, "settle", False):
-            # Cut off at max_tokens (J8): the call ran to its end, so it is charged its duration
-            # and still reported ANSWERING_OUTPUT_EXCEEDS_LIMIT. Every other failure keeps its booking.
-            settle("cut off at max_tokens")
+        outcome = "completed"
+    except Exception as error:
+        # Cut off at max_tokens (J8) is still reported ANSWERING_OUTPUT_EXCEEDS_LIMIT; it and every
+        # other failure are charged only the time they used (owner T2, 2026-11-19).
+        outcome = "cut off at max_tokens" if getattr(error, "settle", False) else "failed " + type(error).__name__
         raise
-    settle("completed")
+    finally:
+        workflow_tasks.give_back_compute(database, booking, started, dt.datetime.now(dt.timezone.utc).isoformat(),
+                                         "application answering " + role + " " + outcome
+                                         + "; shared daily pool: unused tail of its reservation")
     return raw
 
 

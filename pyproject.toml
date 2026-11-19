@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidedoor"
-version = "1.0.3"
+version = "1.0.4"
 description = "Referral-first job-search agent for engineers that runs on your machine."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -113,6 +113,7 @@ py-modules = [
     "linkedin_session",
     "live_view",
     "log",
+    "log_downloads",
     "log_retention",
     "login_item",
     "mac_update",

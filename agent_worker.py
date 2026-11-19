@@ -268,7 +268,9 @@ def cycle(root, database, config, now=None, execute=None):
                 paced = provider_pacing.take(None, timeout, provider=engines.engine(config).pacing_provider)
             stamp = current()
             day = workflow_tasks.budget_day(stamp, "America/Los_Angeles")
-            reservation = WORKER + ":" + task["task_id"] + ":" + str(task["attempts"] + 1) + ":" + day
+            # A retry that would reuse an already refunded booking books a numbered successor (owner T2, 2026-11-19).
+            reservation = workflow_tasks.unsettled_booking(
+                database, WORKER + ":" + task["task_id"] + ":" + str(task["attempts"] + 1) + ":" + day)
             if task["attempts"] < task["max_attempts"] and workflow_tasks.instant(stamp) < workflow_tasks.instant(task["deadline"]):
                 with database:
                     reserved = workflow_tasks.reserve_compute(database, reservation, stamp, timeout,
@@ -349,6 +351,11 @@ def cycle(root, database, config, now=None, execute=None):
                     paced.release()
                 for signum, handler in handlers.items():
                     signal.signal(signum, handler)
+                # However the run ended (completed, failed, refused before the model ran, or
+                # interrupted), the booking's unused tail goes back now, measured from the booking
+                # to this moment (owner T2, 2026-11-19). A run that hit its timeout credits ~0.
+                workflow_tasks.give_back_compute(database, reservation, stamp, current(),
+                                                 "agent investigation ended (" + (blocker or status) + "); unused tail of its reservation")
             try:
                 if directory is not None:
                     evidence.extend(_artifacts(directory, current()))
@@ -363,14 +370,9 @@ def cycle(root, database, config, now=None, execute=None):
                         # (2026-09-29).
                         state = workflow_tasks.compute_wait(database, task["task_id"], claim["token"], current(), current(),
                                                             blocker, dict(result, evidence=evidence))
-                        workflow_tasks.settle_compute(database, reservation, stamp, current(),
-                                                      "agent investigation refused before the model ran; nothing used")
                     else:
                         state = workflow_tasks.finish(database, task["task_id"], claim["token"], current(), result, evidence,
                                                       status=status, blocker=blocker, next_action=next_action)
-                        if status == "COMPLETE":
-                            workflow_tasks.settle_compute(database, reservation, stamp, current(),
-                                                          "agent investigation completed; shared daily pool: unused tail of a cleanly completed reservation")
             except Exception:
                 database.rollback()
                 state = "UNCOMMITTED_OR_STALE"

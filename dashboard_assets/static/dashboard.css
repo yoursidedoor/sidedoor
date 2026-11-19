@@ -363,6 +363,10 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 .fail-error { color: var(--muted); }
 .fail-runs { padding-left: 18px; }
 .fail-runs li { margin: 2px 0; overflow-wrap: anywhere; }
+.metrics-table.log-files-table th, .metrics-table.log-files-table td { text-align: left; overflow-wrap: anywhere; vertical-align: middle; }
+.metrics-table.log-files-table td:last-child { text-align: right; vertical-align: middle; }
+.log-files-table td:nth-child(2) { white-space: nowrap; }
+.fail-details-download { margin-top: 8px; }
 .log-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; margin: 0 0 12px; }
 .log-filters label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 0.875rem; min-width: 0; }
 .log-filters select, .log-filters input { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 10px; min-width: 0; max-width: 100%; }

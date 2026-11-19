@@ -20,9 +20,13 @@ the standard library only (`msvcrt`, `ctypes`):
 macOS with fakes.
 """
 
+import contextlib
 import os
 import stat
+import subprocess
+import sys
 import threading
+import time
 
 try:
     import fcntl
@@ -834,6 +838,98 @@ def try_remove(path):
 
 
 # ---------------------------------------------------------------------------------------------
+# Sleep (owner, 2026-11-18, R2 c): the computer stays awake while a job does agentic work, and a
+# sleep that happens anyway is noticed by comparing the wall clock with the monotonic clock, which
+# stops while macOS (and Linux) sleep.
+
+SLEEP_DRIFT_SECONDS = 60          # the wall clock ran this much further than the monotonic one
+CAFFEINATE = "/usr/bin/caffeinate"   # an absolute path: a job started from the Dock has no PATH
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+
+class SleptThrough(RuntimeError):
+    """A session was running while the computer slept: an interruption, not a failed attempt."""
+
+    def __init__(self, seconds):
+        super().__init__("The computer slept for %d seconds while this session ran" % seconds)
+        self.seconds = seconds
+
+
+def _unbiased_seconds():
+    """Windows' interrupt time without the time spent asleep or hibernating, in seconds. Y2 (owner,
+    2026-11-19, measured on the Windows VM): time.monotonic (QueryPerformanceCounter) keeps counting
+    through a hibernation, QueryUnbiasedInterruptTime does not."""
+    import ctypes
+    value = ctypes.c_ulonglong()
+    if not _kernel32().QueryUnbiasedInterruptTime(ctypes.byref(value)):
+        raise OSError("QueryUnbiasedInterruptTime failed")
+    return value.value / 10_000_000
+
+
+class SleepWatch:
+    """`slept()` returns how long the computer slept since the last look (0 when it did not).
+
+    `wall` returns wall-clock seconds. The clock that stops during sleep is time.monotonic on macOS
+    and Linux, and QueryUnbiasedInterruptTime on Windows (time.monotonic there if that call fails)."""
+
+    def __init__(self, wall=None):
+        self.wall = wall or (lambda: time.time())
+        self.awake = time.monotonic
+        if WINDOWS:
+            try:
+                _unbiased_seconds()
+                self.awake = _unbiased_seconds
+            except Exception:
+                pass
+        self.last = (self.wall(), self.awake())
+
+    def slept(self):
+        try:
+            awake = self.awake()
+        except Exception:   # the Windows call failed after all: monotonic from here on
+            self.awake = time.monotonic
+            self.last = (self.wall(), time.monotonic())
+            return 0
+        now = (self.wall(), awake)
+        drift = (now[0] - self.last[0]) - (now[1] - self.last[1])
+        self.last = now
+        return drift if drift > SLEEP_DRIFT_SECONDS else 0
+
+
+@contextlib.contextmanager
+def stay_awake(popen=None):
+    """Keep the computer from sleeping while the block runs. macOS: `caffeinate -i -w <this pid>`
+    (it also ends by itself if this process dies); Windows: SetThreadExecutionState on this thread;
+    elsewhere nothing. Never fails the work: when it cannot be taken one warning is logged."""
+    held = None
+    try:
+        if WINDOWS:
+            if not _kernel32().SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED):
+                raise OSError("SetThreadExecutionState refused")
+            held = "windows"
+        elif sys.platform == "darwin":
+            held = (popen or subprocess.Popen)([CAFFEINATE, "-i", "-w", str(os.getpid())],
+                                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.DEVNULL)
+    except Exception as error:
+        import log
+        log.get(__name__).warning("Could not keep the computer awake for this job (%s: %s); it runs anyway.",
+                                  type(error).__name__, error)
+    try:
+        yield
+    finally:
+        try:
+            if held == "windows":
+                _kernel32().SetThreadExecutionState(ES_CONTINUOUS)
+            elif held is not None:
+                held.kill()   # this exact process, started above
+                held.wait(timeout=5)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------------------------
 # Windows plumbing (ctypes, every function declared: handles are 64-bit)
 
 _kernel = None
@@ -940,6 +1036,8 @@ def _declare():
         "OpenProcess": (wintypes.HANDLE, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]),
         "GetExitCodeProcess": (wintypes.BOOL, [wintypes.HANDLE, ctypes.POINTER(ctypes.c_uint32)]),
         "SetErrorMode": (wintypes.UINT, [wintypes.UINT]),
+        "SetThreadExecutionState": (wintypes.DWORD, [wintypes.DWORD]),
+        "QueryUnbiasedInterruptTime": (wintypes.BOOL, [ctypes.POINTER(ctypes.c_ulonglong)]),
     }
     for name, (restype, argtypes) in signatures.items():
         function = getattr(kernel32, name)

@@ -178,6 +178,11 @@ class ResearchRecoveryTests(unittest.TestCase):
         self.assertEqual(self.fixture.states(result)["Defense"]["abandonment_reason"], "INTERRUPTED_RECOVERY_DECISION_NOT_REPLAYED")
 
     def test_each_phase_reserves_compute_and_respects_reduced_cap(self):
+        # Every session here uses its whole booking, so nothing comes back when it ends (the
+        # immediate refunds of owner T1/T2, 2026-11-19, are tested in test_parallel_research).
+        whole = patch.object(parallel_research.workflow_tasks, "refund_compute", return_value=0)
+        whole.start()
+        self.addCleanup(whole.stop)
         # Compute arithmetic below is written in 120-second sessions; the session sizes themselves
         # (300 s discovery, 120 + 1.5 x slow end x companies) are tested in test_parallel_research.
         for name, value in (("DISCOVERY_SECONDS", 120), ("qualification_seconds", lambda database, companies: 120)):
@@ -195,7 +200,9 @@ class ResearchRecoveryTests(unittest.TestCase):
         self.assertLessEqual(sum(row[0] for row in reservations) + 8700, 9000)
         self.assertEqual(self.fixture.count("application_attempts"), 0)
 
-    def test_deadline_persists_without_restart_extension(self):
+    def test_restart_gives_a_resumed_industry_a_fresh_deadline(self):
+        """R1 (owner, 2026-11-18): a saved deadline long past never closes a resumed industry; the
+        next run gives it this run's deadline and it re-enters recovery for its recorded failure."""
         self.fixture.worker_hook = self.fail_discovery
         self.fixture.run_research()
         path = self.fixture.cache_path("Defense")
@@ -209,9 +216,9 @@ class ResearchRecoveryTests(unittest.TestCase):
         self.fixture.calls.clear()
         self.decisions.clear()
         result = self.fixture.run_research("restart")
-        self.assertEqual(self.fixture.calls, [])
-        self.assertEqual(self.decisions, [])
-        self.assertEqual(self.fixture.states(result)["Defense"]["recovery_state"], "ABANDONED")
+        self.assertTrue(self.decisions)
+        self.assertNotIn(self.fixture.states(result)["Defense"].get("abandonment_reason"),
+                         ("RESEARCH_DEADLINE_EXHAUSTED", "RECOVERY_UNAVAILABLE: Global research deadline exhausted"))
         self.assertNotEqual(json.loads(path.read_text())["deadline_at"], original_deadline)
 
     def test_unsupported_method_never_launches_worker(self):

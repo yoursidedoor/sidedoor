@@ -1261,6 +1261,7 @@ TRY_AGAIN_REFUSED = {
     "NOT_CLOSED": "This application is not closed.",
     "NOT_CLOSED_BY_A_WALL": "This application was not closed while it waited for you.",
     "SUBMISSION_UNCERTAIN": "This application may already have reached the employer, so Sidedoor will not apply again.",
+    "POSTING_TAKEN_OVER": "Another listing of this role is carrying this application.",
 }
 
 
@@ -1313,6 +1314,11 @@ def try_again(database, job_key, now):
         return refused("NOT_CLOSED_BY_A_WALL")
     if applications.uncertain_submission(database, job_key):
         return refused("SUBMISSION_UNCERTAIN")
+    # Another job took this one's posting over and still holds it: reopening would leave two open jobs on
+    # one posting (review H1, owner's pick 2026-11-18).
+    import identity_reconciliation
+    if identity_reconciliation.taken_over_by(database, job_key):
+        return refused("POSTING_TAKEN_OVER")
     # The check and the write are one statement: the job is reopened only from the very state and
     # reason read above, so a job that moved on in between is never reset.
     changed = database.execute(

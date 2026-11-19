@@ -482,3 +482,38 @@ class MergeCoexistenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PostingOwnedCopyTests(unittest.TestCase):
+    """Owner's pick D1 (2026-11-18): a verified resolution onto a posting another job holds (applied, may
+    have, or still open) closes this job as that job's copy. It used to be refused as an "identity
+    collision" on every claim until the claims ran out (a CoreWeave listing, 2026-11-18)."""
+
+    def test_a_resolution_onto_another_jobs_posting_closes_this_job_as_its_copy(self):
+        import identity_reconciliation
+        import posting_judge
+        for applied, words in ((False, "; that job carries this application"),
+                               (True, "; that job may already have applied to it, so this one never applies")):
+            with self.subTest(applied=applied), fixture() as item:
+                # The holder's own row is not needed: with no row, the words for a holder that may have
+                # applied are the cautious ones.
+                owned = identity_reconciliation.PostingOwned("holder:1", applied)
+                with patch.object(application_recovery, "bound_evidence", return_value=True), \
+                        patch.object(application_recovery, "apply_resolution", side_effect=owned):
+                    first_claim(item, dict(preserved_failure(), status="RESOLVED", resolution_verified=True,
+                                           reason="The official posting is the holder's"))
+                job = item.job()
+                self.assertEqual((job["state"], job["blocker"]), ("DUPLICATE", posting_judge.SAME_JOB_BLOCKER))
+                self.assertEqual(job["next_action"], "Same posting as holder:1" + words)
+                self.assertFalse(records(item, "APPLICATION_RECOVERY_RESOLUTION_REJECTED"))
+                # Its own event, never counted as a recovery (review H2).
+                self.assertFalse(records(item, "APPLICATION_RECOVERY_RESOLVED"))
+                closed, = records(item, "APPLICATION_RECOVERY_CLOSED_AS_COPY")
+                self.assertEqual(closed["copy_of"], "holder:1")
+                linked, = records(item, "SAME_POSTING_LINKED")
+                self.assertEqual((linked["same_as"], linked["basis"]), ("holder:1", "RECOVERY_POSTING_OWNED"))
+                # Final: no further claim is spent on it.
+                spent = claims(item)
+                cycle(item, 10 ** 5)
+                self.assertEqual(claims(item), spent)
+                self.assertEqual(item.job()["state"], "DUPLICATE")

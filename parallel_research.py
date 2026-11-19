@@ -28,6 +28,7 @@ import research_tools
 import workflow_tasks
 import user_profile
 import paths
+import portable
 
 
 TIMEZONE = "America/Los_Angeles"
@@ -35,7 +36,7 @@ LOG = log.get(__name__)
 
 # Session time limits (owner, 2026-10-27, from his own data: discovery sessions took 19-46 s;
 # qualification about 67 s per company at the median, 100 s at the p90 "slow end", 135 at most).
-DISCOVERY_SECONDS = 300          # a discovery session, flat
+DISCOVERY_SECONDS = 900          # a discovery session, flat (owner T1, 2026-11-19: was 300)
 SESSION_CEILING_SECONDS = 3600   # the code's hard ceiling on any one session
 QUALIFICATION_BASE_SECONDS = 120
 QUALIFICATION_SLOW_FACTOR = 1.5
@@ -78,8 +79,39 @@ def qualification_seconds(database, companies):
 
 
 def initial_deadline_seconds():
-    """The run's starting deadline: a discovery session plus one retry plus 5 minutes."""
+    """The run's starting deadline: a discovery session plus one retry plus 5 minutes (2100 s)."""
     return 2 * DISCOVERY_SECONDS + RETRY_MARGIN_SECONDS
+
+
+# R1 (owner, 2026-11-18): a passed research deadline is a wait for a later run, never an abandonment.
+DEADLINE_WAIT = "RESEARCH_DEADLINE_WAIT"
+# W1 (owner, 2026-11-19): the recovery coordinator's call failing (timed out, unreachable, an answer
+# that could not be read) is a wait too; the call is not a spent decision and a later run asks again.
+RECOVERY_CALL_WAIT = "RESEARCH_RECOVERY_CALL_WAIT"
+NEXT_RUN_WAITS = (DEADLINE_WAIT, RECOVERY_CALL_WAIT)   # retried at the next research tick after the run
+DEADLINE_RETRY_SECONDS = 300    # the next research tick (research_dispatch_interval_seconds)
+# N1 (owner, 2026-11-19): consecutive next-run waits of one industry back off: 5 min, doubling each
+# time, at most 2 hours; progress (a session or a decision completing) starts it again at 5 min.
+NEXT_RUN_BACKOFF_MAX_SECONDS = 7200
+WAITS_KEPT = 20   # N4: compute_waits keeps the latest 20 entries; compute_wait_count keeps the total
+
+
+def next_run_backoff(streak):
+    """The wait before the `streak`-th consecutive next-run wait's retry (1 -> 300 s, 2 -> 600 s, ...)."""
+    return min(DEADLINE_RETRY_SECONDS * 2 ** (max(1, streak) - 1), NEXT_RUN_BACKOFF_MAX_SECONDS)
+
+
+DAY_CHANGED = "SERVICE_DAY_CHANGED"   # W4 (owner, 2026-11-19)
+
+
+class ServiceDayChanged(RuntimeError):
+    """The research day ended during this run. The industry is closed for that day as interrupted,
+    never as a failure; the new day's research starts it fresh (W4)."""
+
+
+class ResearchDeadline(TimeoutError):
+    """This run's research deadline has passed. The industry waits and a later run, with a fresh
+    deadline, picks it up where it was (R1)."""
 
 
 class ComputeWait(RuntimeError):
@@ -336,7 +368,6 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
     states = {}
     caches = {}
     charges = {}
-    refundable = []
     pending = {}
     ready = []
     recovery_ready = []
@@ -359,6 +390,56 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
 
     def deadline_at():
         return wall["at"]
+
+    # R2 (owner, 2026-11-18): a sleep of the computer is not research time. The monotonic clock the
+    # run's own deadline uses stops while the computer sleeps; the wall-clock deadlines move on by it.
+    sleep_watch = portable.SleepWatch(lambda: dt.datetime.fromisoformat(runtime.utcnow()).timestamp())
+    slept_reruns = set()   # (industry, phase) re-run once already after a sleep in this run
+
+    def notice_sleep():
+        slept = sleep_watch.slept()
+        if not slept:
+            return
+        shift = dt.timedelta(seconds=slept)
+        wall["at"] = (dt.datetime.fromisoformat(wall["at"]) + shift).isoformat()
+        for cache in caches.values():
+            if cache.get("deadline_at") and not cache.get("terminal"):
+                cache["deadline_at"] = (dt.datetime.fromisoformat(cache["deadline_at"]) + shift).isoformat()
+        LOG.info("The computer slept for %d minutes during research; the research deadline moved by the same time.",
+                 round(slept / 60))
+
+    def rerun_after_sleep(executor, industry, phase, error):
+        """A session that ran across a sleep is an interruption: started once more, with no failed
+        attempt recorded and no recovery decision spent (R2)."""
+        slept_reruns.add((industry, phase))
+        states[industry].setdefault("sleep_interruptions", []).append(
+            {"phase": phase, "slept_seconds": round(getattr(error, "seconds", 0)), "observed_at": runtime.utcnow()})
+        persist(industry)
+        try:
+            if phase == "discovery":
+                discover(executor, industry)
+            else:
+                ready.append(industry)
+        except Exception as problem:
+            fail(industry, problem)
+
+    def day_changed(industry):
+        """W4 (owner, 2026-11-19): the research day ended while this industry was still working. It is
+        closed for that day as interrupted (not abandoned, not failed); the new day starts it fresh."""
+        states[industry].update(state="INTERRUPTED", interruption_reason=DAY_CHANGED,
+                                error="The research day ended before this industry finished")
+        persist(industry)
+
+    def deadline_wait(industry, message):
+        """R1: an industry this run's deadline overtook waits for a later run, keeping what it recorded.
+        One that was in recovery resumes recovery; a coordinator call cut off undecided is not a spent decision."""
+        state, cache = states[industry], caches[industry]
+        refused = None
+        decisions = cache.get("recovery_decisions") or []
+        if state["state"] == "RECOVERING" and decisions and decisions[-1].get("state") == "PENDING":
+            refused = dict(decisions.pop(), state=DEADLINE_WAIT)
+        resume = "RECOVERY" if state["state"] in {"RECOVERING", "RECOVERY_PENDING"} and cache.get("failures") else "RESEARCH"
+        defer(industry, ResearchDeadline(message), resume, refused, reason=DEADLINE_WAIT)
 
     def extend_deadline(industry, seconds, at=None, span=None):
         """At a qualification launch, and again when a session really starts (`at`, after its pacing
@@ -429,7 +510,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
         caches[industry]["terminal"] = True
         persist(industry)
 
-    def defer(industry, error, resume, refused=None, shown=None):
+    def defer(industry, error, resume, refused=None, shown=None, reason=None):
         """Record a compute WAIT: retryable, with a next retry, and no failed-attempt charge.
 
         `resume` says what the next attempt must do once allowance exists: RESEARCH
@@ -443,19 +524,39 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
         observed = runtime.utcnow()
         # The provider refusing the turn for usage is the same kind of WAIT, resuming at the
         # provider's stated reset instead of the next service-day start.
-        limit = provider_limits.wait_of(error)
+        limit = None if reason else provider_limits.wait_of(error)
+        backoff = None
+        if reason in NEXT_RUN_WAITS:   # a later run; run() moves it to the back-off after this run ends
+            # B2 (owner, 2026-11-19): only failed coordinator calls lengthen the back-off; a deadline
+            # wait always retries at the next tick and leaves the streak as it is.
+            if reason == RECOVERY_CALL_WAIT:
+                cache["next_run_streak"] = cache.get("next_run_streak", 0) + 1
+                backoff = next_run_backoff(cache["next_run_streak"])
+            else:
+                backoff = DEADLINE_RETRY_SECONDS
+            retry_at = (dt.datetime.fromisoformat(observed) + dt.timedelta(seconds=backoff)).isoformat()
+            if refused is not None:
+                # N4: a short entry; the decision packet is already in the recorded failures and checkpoints.
+                refused = {key: refused.get(key) for key in ("state", "error_type", "error", "observed_at")}
+        else:
+            retry_at = limit.next_at if limit else next_compute_reset(observed)
         wait = {"action_id": research_id + ":" + industry,
-                "reason": provider_limits.CODE if limit else "DAILY_COMPUTE_ALLOWANCE_EXHAUSTED",
+                "reason": reason or (provider_limits.CODE if limit else "DAILY_COMPUTE_ALLOWANCE_EXHAUSTED"),
                 "stage": getattr(error, "stage", None) or state.get("phase", "planning"),
                 "error_class": type(error).__name__, "diagnostic": str(error), "observed_at": observed,
                 "owner": "orchestrator", "resume": resume, "retryable": True,
-                "next_retry_at": limit.next_at if limit else next_compute_reset(observed),
-                "wait": len(cache.setdefault("compute_waits", [])) + 1}
+                "next_retry_at": retry_at,
+                "wait": max(cache.get("compute_wait_count", 0), len(cache.setdefault("compute_waits", []))) + 1}
+        if backoff is not None:
+            wait["backoff_seconds"] = backoff
         if limit:
             wait["provider"] = limit.detail()
         if refused is not None:
             wait["refused_recovery_decision"] = refused
         cache["compute_waits"].append(wait)
+        cache["compute_wait_count"] = wait["wait"]
+        del cache["compute_waits"][:-WAITS_KEPT]   # N4: only the latest entries; the count stays whole
+        state["compute_wait_count"] = wait["wait"]
         state.update(state="COMPUTE_WAIT", compute_wait=wait, next_retry_at=wait["next_retry_at"],
                      error=shown or str(error), error_type=type(error).__name__)
         persist(industry)
@@ -466,9 +567,17 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
         if isinstance(error, ComputeWait):
             defer(industry, error, "RESEARCH", shown=shown)
             return
+        if isinstance(error, ServiceDayChanged):
+            day_changed(industry)
+            return
+        if isinstance(error, ResearchDeadline):
+            # R1: the deadline passed before this step could start: no failed attempt, a later run resumes.
+            defer(industry, error, "RESEARCH", reason=DEADLINE_WAIT)
+            return
         if provider_limits.wait_of(error):
             # The provider refused the turn before any work: return the measured unused tail of
-            # the reservation and wait; nothing is recorded as a failed attempt.
+            # the reservation and wait; nothing is recorded as a failed attempt. (A discovery's tail
+            # is returned when its session ends, owner T2 2026-11-19; nothing is returned twice.)
             completed_cleanly(industry, provider_limits.CODE)
             defer(industry, error, "RESEARCH", shown=shown)
             return
@@ -494,13 +603,13 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
         if runtime.RESEARCH_STOP.is_set():
             raise InterruptedError("Research interrupted by service shutdown")
         if _day(runtime.utcnow()) != day:
-            raise RuntimeError("Service day changed; reserve a new daily run")
+            raise ServiceDayChanged("Service day changed; reserve a new daily run")
         seconds = deadline - time.monotonic()
         if industry and caches[industry].get("deadline_at"):
             seconds = min(seconds, (dt.datetime.fromisoformat(caches[industry]["deadline_at"])
                                    - dt.datetime.fromisoformat(runtime.utcnow())).total_seconds())
         if seconds <= 0:
-            raise TimeoutError("Global research deadline exhausted")
+            raise ResearchDeadline("Global research deadline exhausted")
         return seconds
 
     def reserve(industry, phase, maximum):
@@ -525,40 +634,38 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
         return seconds
 
     def completed_cleanly(industry, reason):
-        """Close this industry's open measured window; the run settles it at the end.
+        """Give back this industry's open reservation's measured unused tail, now (owner T1 and T2,
+        2026-11-19), so the reservations that follow in this same run can use it.
 
-        Called ONLY where the operation finished with an unambiguous success (or the provider
-        refused the turn before any work). A research failure, timeout, interruption,
-        abandonment, compute wait or uncertain outcome never reaches here and keeps its whole
-        charge: only the contact finder refunds a failed run's tail (owner, 2026-10-22, CM1 b),
-        and committed browser sessions (2026-09-29).
-
-        Settlement is deferred to settle_refunds() rather than applied here so that a
-        reservation stays fully spent for the whole of the run that made it: research never
-        recycles its own booking mid-run, and every existing mid-run admission boundary --
-        including the compute waits at the reduced research ceiling -- behaves exactly as
-        before. The stranded tail is returned to the shared pool for the remaining hours of
-        the compute day, which is what it was doing nothing for.
+        Called when a research session (discovery, qualification or recovery) ends before its time
+        limit: cleanly, failed or interrupted, or when the provider refused the turn before any work.
+        A session stopped at its time limit has no tail and keeps its whole charge (its charge is
+        dropped where the timeout is seen). The window runs from the orchestrator's stamp one step
+        before the operation started (reserve) to now; no worker, prompt or model output reports its
+        own usage. The charge leaves `charges` here, so it is never settled twice; a refund is also
+        keyed by its reservation, so a replay credits nothing further.
         """
         charge = charges.pop(industry, None)
-        if charge:
-            refundable.append(dict(charge, industry=industry, completed_at=runtime.utcnow(), reason=reason))
-
-    def settle_refunds():
-        """Credit each cleanly completed reservation's unused tail back to the shared pool."""
-        for charge in refundable:
+        if not charge:
+            return
+        try:
             with database:
                 credited = workflow_tasks.refund_compute(database, charge["action_id"], charge["started_at"],
-                                                         charge["completed_at"], runtime.utcnow(), charge["reason"])
-            if credited:
-                industry = charge["industry"]
-                states[industry]["compute_refunded_seconds"] = states[industry].get("compute_refunded_seconds", 0) + credited
-                persist(industry)
+                                                         runtime.utcnow(), runtime.utcnow(), reason)
+        except Exception as error:
+            # Y4 (owner, 2026-11-19): a refund that cannot be made (a clock stepped backwards, a busy
+            # database) never stops the run; the whole charge simply stays.
+            LOG.warning("%s research: its unused time could not be given back (%s: %s); the run continues.",
+                        industry, type(error).__name__, error)
+            return
+        if credited:
+            states[industry]["compute_refunded_seconds"] = states[industry].get("compute_refunded_seconds", 0) + credited
+            persist(industry)
 
     def submit(executor, industry, phase, command, prompt, output, companies=0):
         # A whole-run cap never bounds one worker (the old research_timeout_seconds); the
         # per-industry allowance in reserve() and the research compute ceiling still bound spend.
-        # Session limits by formula (owner, 2026-10-27): discovery 300 s flat; qualification
+        # Session limits by formula (owner, 2026-10-27; T1 2026-11-19): discovery 900 s flat; qualification
         # 120 s + 1.5 x the install's slow end x its companies, set here from the actual count.
         maximum = DISCOVERY_SECONDS if phase == "discovery" else qualification_seconds(database, companies)
         if phase == "qualification":
@@ -668,6 +775,14 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             # ABANDON branch below and NO_SUPPORTED_ALTERNATIVE above), never a deterministic
             # reaction to an empty budget. The recorded failure stays; recovery resumes on retry.
             defer(industry, error, "RECOVERY")
+        except ResearchDeadline as error:
+            # R1 (owner, 2026-11-18): the deadline passed is timing, never a reason to give up. The
+            # recorded failure stays and a later run, with a fresh deadline, re-enters recovery.
+            defer(industry, error, "RECOVERY", reason=DEADLINE_WAIT)
+        except ServiceDayChanged:
+            day_changed(industry)
+        except InterruptedError:
+            return   # the service is stopping: left RECOVERY_PENDING, recorded INTERRUPTED when the run ends
         except Exception as error:
             abandon(industry, "RECOVERY_UNAVAILABLE: " + str(error))
 
@@ -930,6 +1045,12 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                 abandon(industry, "INTERRUPTED_RECOVERY_DECISION_NOT_REPLAYED")
                 continue
             waiting = prior.get("compute_wait") if prior.get("state") == "COMPUTE_WAIT" else None
+            if (waiting and waiting.get("reason") in NEXT_RUN_WAITS and waiting.get("next_retry_at")
+                    and dt.datetime.fromisoformat(runtime.utcnow()) < dt.datetime.fromisoformat(waiting["next_retry_at"])):
+                # B1 (owner, 2026-11-19): its own back-off has not passed: it keeps waiting, with its
+                # state and records, while the industries that are due run.
+                states[industry] = {**prior, "research_id": research_id, "held_wait": True}
+                continue
             if waiting:
                 # A recorded compute wait resumes; it is neither an interrupted attempt nor a
                 # failed investigation, so it must not enter the "no blind replay" branch below.
@@ -946,11 +1067,17 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                     elif industry not in recovery_ready:
                         recovery_ready.append(industry)
                     continue
+            # Every industry that does more work in this run runs to THIS run's deadline (R1, owner
+            # 2026-11-18): a saved one is an earlier run's, long past, and closed the industry before it
+            # started. A completed industry below keeps its saved one; it does no more work.
+            resumed_deadline = deadline_at()
             if prior.get("state") in {"RUNNING", "RECOVERING", "RECOVERY_PENDING", "FAILED", "INTERRUPTED"}:
+                caches[industry]["deadline_at"] = resumed_deadline
                 states[industry].update(prior, research_id=research_id)
                 fail(industry, RuntimeError("Prior attempt interrupted or failed; no blind replay"))
                 continue
             if "discovery" not in cached:
+                caches[industry]["deadline_at"] = resumed_deadline
                 continue
             names = industry_discovery.validate(cached["discovery"], {**policy, "industries": [industry]},
                                                 runtime.utcnow(), cached["discovery_limit"])
@@ -982,6 +1109,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                 states[industry] = {**prior, "state": "WAITING_SHARED_RESEARCH", "reused": True,
                                     "research_id": research_id}
             else:
+                caches[industry]["deadline_at"] = resumed_deadline
                 states[industry]["discovery_reused"] = True
                 states[industry]["discovery_report"] = prior.get("discovery_report")
         except Exception as error:
@@ -1057,6 +1185,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             state["discovery_blockers"] = list(result["blockers"])
         cache["discovery"] = result
         if cut_off is None:   # a cut-off session keeps its whole charge, like any session that did not finish
+            caches[industry]["next_run_streak"] = 0   # N1: progress
             completed_cleanly(industry, "RESEARCH_DISCOVERY_COMPLETE")
         else:
             note_cut_off(industry, "discovery", note, output)
@@ -1120,6 +1249,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             state.pop("error", None)
             state.pop("error_type", None)
             if cut_off is None:
+                caches[industry]["next_run_streak"] = 0   # N1: progress
                 completed_cleanly(industry, "RESEARCH_QUALIFICATION_COMPLETE")
         persist(industry)
         if left:
@@ -1203,6 +1333,7 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
 
         while pending or ready or recovery_ready or any(
                 state["state"] == "WAITING_SHARED_RESEARCH" for state in states.values()):
+            notice_sleep()
             apply_starts()
             # A session still waiting for its pacing slot is not out of time: its clock has not started.
             if runtime.RESEARCH_STOP.is_set() or time.monotonic() >= deadline and not waiting_for_slot():
@@ -1210,15 +1341,18 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             finished, _ = wait(pending, timeout=0 if ready or recovery_ready else min(1, max(0.05, deadline - time.monotonic())),
                                return_when=FIRST_COMPLETED)
             finished.update(future for future in pending if future.done())
+            notice_sleep()   # before any finished session is looked at: its deadline has moved with the sleep
             apply_starts()   # a session that started and finished since the last look extends first
             for future in sorted(finished, key=lambda item: pending[item][1] != "qualification"):
                 industry, phase, output = pending.pop(future)
                 session = sessions.pop(industry, None) if phase == "qualification" else None
                 final_used = []   # set once the final output reaches the store: no salvage after that
+                answered = False   # the coordinator's call returned an answer (W1)
                 try:
                     try:
                         returned = future.result()
                     except subprocess.TimeoutExpired:
+                        charges.pop(industry, None)   # stopped at its limit: no tail, the whole charge stays (T2)
                         # Cut off at its limit: recorded as having taken at least that limit, so the
                         # slow end can grow back after a run of fast sessions (review R1, 2026-10-27).
                         if session:
@@ -1230,6 +1364,8 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                         cache = caches[industry]
                         entry = cache["recovery_decisions"][-1]
                         entry.update(state="DECIDED", decision=returned)
+                        answered = True
+                        cache["next_run_streak"] = 0   # N1: a decision was answered
                         persist(industry)
                         directive = research_recovery.validate_decision(returned, entry["packet"]["supported_methods"], cache["recovery_decisions"][:-1])
                         completed_cleanly(industry, "RESEARCH_RECOVERY_DECISION_COMPLETE")
@@ -1254,17 +1390,38 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                         continue
                     take_final(industry, phase, output, session, finished_at, final_used)
                 except Exception as error:
-                    if phase == "recovery" and provider_limits.wait_of(error):
+                    if not isinstance(error, subprocess.TimeoutExpired):
+                        # Owner T2, 2026-11-19: a session that failed or was interrupted before its time
+                        # limit gives back its measured unused tail now, as a clean one does.
+                        completed_cleanly(industry, "RESEARCH_" + phase.upper() + "_ENDED_EARLY")
+                    if isinstance(error, ServiceDayChanged):
+                        if phase == "recovery":   # not a spent decision: the new day starts afresh
+                            caches[industry]["recovery_decisions"].pop()
+                        day_changed(industry)
+                    elif (isinstance(error, portable.SleptThrough) and phase in ("discovery", "qualification")
+                            and (industry, phase) not in slept_reruns):
+                        rerun_after_sleep(executor, industry, phase, error)
+                    elif phase == "recovery" and provider_limits.wait_of(error):
                         # No decision was made: the pending entry is not a spent recovery
                         # decision. It is kept with the wait, and the coordinator runs again
                         # for the same recorded failure after the provider's reset.
                         refused = caches[industry]["recovery_decisions"].pop()
                         completed_cleanly(industry, provider_limits.CODE)
                         defer(industry, error, "RECOVERY", dict(refused, state="PROVIDER_USAGE_LIMIT_WAIT"))
-                    elif phase == "recovery":
+                    elif phase == "recovery" and answered:
+                        # The coordinator answered, but its decision is not one the catalogue allows
+                        # (an unsupported or already-tried method): unchanged, the AI's answer stands.
                         entry = caches[industry]["recovery_decisions"][-1]
                         entry.update(state="FAILED", error_type=type(error).__name__, error=str(error))
                         abandon(industry, "RECOVERY_DECISION_FAILED")
+                    elif phase == "recovery":
+                        # W1 (owner, 2026-11-19): the coordinator's call itself failed (timed out,
+                        # unreachable, an answer that could not be read): never an abandonment, and
+                        # not a spent decision. The recorded failure stays; a later run asks again.
+                        entry = caches[industry]["recovery_decisions"].pop()
+                        defer(industry, error, "RECOVERY",
+                              dict(entry, state=RECOVERY_CALL_WAIT, error_type=type(error).__name__, error=str(error)),
+                              reason=RECOVERY_CALL_WAIT)
                     elif not final_used and salvage(industry, phase, output, session, error):
                         pass   # the saved entries were kept (R1); salvage queued any retry
                     else:
@@ -1318,19 +1475,20 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
             if runtime.RESEARCH_STOP.is_set():
                 states[industry].update(state="INTERRUPTED", error="Research interrupted by service shutdown")
                 persist(industry)
+            elif _day(runtime.utcnow()) != day:
+                day_changed(industry)
             else:
-                fail(industry, TimeoutError("Global research deadline exhausted"))
-                abandon(industry, "RESEARCH_DEADLINE_EXHAUSTED")
+                deadline_wait(industry, "Global research deadline exhausted")
 
     for industry in [name for name in industries if states[name]["state"] == "WAITING_SHARED_RESEARCH"]:
         if runtime.RESEARCH_STOP.is_set():
             states[industry].update(state="INTERRUPTED", error="Shared research interrupted before owner completion")
             persist(industry)
+        elif _day(runtime.utcnow()) != day:
+            day_changed(industry)
         else:
-            fail(industry, TimeoutError("Global research deadline exhausted before shared-owner review"))
-            abandon(industry, "RESEARCH_DEADLINE_EXHAUSTED")
+            deadline_wait(industry, "Global research deadline exhausted before shared-owner review")
 
-    settle_refunds()
     completed = sum(state["state"] == "COMPLETE" for state in states.values())
     unresolved = [industry for industry in industries if states[industry]["state"] != "COMPLETE"]
     waiting = [industry for industry in industries if states[industry]["state"] == "COMPUTE_WAIT"]
@@ -1341,9 +1499,9 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
     # Retry later the SAME day once refunds free the allowance (owner, 2026-09-25: "yup ... do
     # it"). A wait was always parked until the next local midnight, because reservations were
     # once never released inside a compute day. Refunds now return each finished industry's
-    # unused tail at settle_refunds() above, so the allowance a waiting industry was refused
-    # mid-run can be free a minute later: on 2026-09-25 Healthcare was refused at 07:07 while
-    # 7,135 of the 11,520 reserved seconds came back when the run ended, and it sat until the
+    # unused tail as each session ends (completed_cleanly; owner T2, 2026-11-19), so the allowance a
+    # waiting industry was refused can be free a minute later: on 2026-09-25 Healthcare was refused
+    # at 07:07 while 7,135 of the 11,520 reserved seconds came back when the run ended, and it sat until the
     # next day. Only a wait on OUR allowance moves; a provider limit keeps its stated reset.
     # The retry is taken only when a phase reservation fits right now, measured with the same
     # arithmetic reserve_compute admits against, so it cannot turn into a same-day wait loop.
@@ -1355,6 +1513,25 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
                 caches[industry].get("discovery_limit", 20))))
         except (KeyError, TypeError, ValueError):
             return DISCOVERY_SECONDS
+    # A deadline wait (R1) or a failed coordinator call (W1) retries at the next research tick after this run ended.
+    ended = dt.datetime.fromisoformat(runtime.utcnow())
+    for industry in waiting:
+        if states[industry]["compute_wait"]["reason"] in NEXT_RUN_WAITS and not states[industry].get("held_wait"):
+            # N1 (a held industry, B1, keeps the retry time it already has): this industry's back-off counted from the end of the run; the run's (and the day's)
+            # next retry is the earliest of them.
+            after_run = (ended + dt.timedelta(seconds=states[industry]["compute_wait"].get(
+                "backoff_seconds", DEADLINE_RETRY_SECONDS))).isoformat()
+            states[industry]["compute_wait"]["next_retry_at"] = after_run
+            states[industry]["next_retry_at"] = after_run
+            persist(industry)
+        elif (states[industry]["compute_wait"]["reason"] in NEXT_RUN_WAITS
+              and dt.datetime.fromisoformat(states[industry]["compute_wait"]["next_retry_at"]) <= ended):
+            # A held industry whose time came while this run was going (review of B1): it retries at the
+            # next tick, so the day's next retry is never already past (a past one spent an investigation try).
+            soon = (ended + dt.timedelta(seconds=DEADLINE_RETRY_SECONDS)).isoformat()
+            states[industry]["compute_wait"]["next_retry_at"] = soon
+            states[industry]["next_retry_at"] = soon
+            persist(industry)
     phase_seconds = max([resume_seconds(industry) for industry in waiting] or [DISCOVERY_SECONDS])
     if (compute_wait and all(states[industry]["compute_wait"]["reason"] == "DAILY_COMPUTE_ALLOWANCE_EXHAUSTED"
                              for industry in waiting)
@@ -1391,10 +1568,14 @@ def run(root, config, database, pipeline, observation, research_id, *, runtime, 
              "summary": (f"{completed}/{len(industries)} industries completed; results advanced independently."
                          + (f" {sum(map(len, open_companies.values()))} companies in completed industries remain"
                             " unresolved and are listed individually." if open_companies else "")
-                         + (f" {len(waiting)} waiting on the shared daily compute allowance; not a failed"
+                         + (f" {len(waiting)} waiting to continue in a later run; not a failed"
                             " investigation." if waiting else "")),
              "report": str(reports / (research_id + ".parallel.json"))}
     if runtime.RESEARCH_STOP.is_set():
         final["state"] = "INTERRUPTED"
+    elif any(state.get("interruption_reason") == DAY_CHANGED for state in states.values()):
+        # W4: the day this run belonged to has ended: its unfinished industries were interrupted, not
+        # failed, and the run reads as interrupted (the Failures page lists no cause for it).
+        final.update(state="INTERRUPTED", stop_reason=DAY_CHANGED)
     runtime.write_json(Path(final["report"]), final)
     return final

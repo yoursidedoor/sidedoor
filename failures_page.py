@@ -68,6 +68,7 @@ import json
 import os
 import re
 import stat
+import types
 import urllib.parse
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -210,7 +211,13 @@ def _item(group, text, todo, at=None, count=1, retry_at=None, you=False, fix=Non
             "slots": list(slots), "code": code, "reasons": shown, "reasons_more": more,
             "reasons_href": reasons.more_href if reasons is not None else None, "refs": dict(refs or {}),
             "log_href": log_href or (shown[0]["log_href"] if shown else None),
+            "details_href": _details_href(log_href or (shown[0]["log_href"] if shown else None)),
             "all_time": all_time}   # the count includes answering failures of any age: no "last N days"
+
+
+def _details_href(log_href):
+    import log_downloads
+    return log_downloads.details_href(log_href)
 
 
 # --- Recorded causes (2026-10-23: "why dont we display the actual failure reasons?") ---------------
@@ -249,6 +256,7 @@ CAUSE_WORDS = {
     "NO_SUPPORTED_RECOVERY_EXECUTOR": "No way to recover was available.",
     "RECOVERY_UNAVAILABLE": "Recovery could not run.",
     "RESEARCH_INTERRUPTED": "It was stopped before it finished (Sidedoor was closed or restarted).",
+    "SERVICE_DAY_CHANGED": "The research day ended before it finished. The next day's research starts it again.",
     "RESEARCH_FAILED": "It stopped with an error.",
     "NOTIFICATION_RECONCILIATION_EXHAUSTED": "Sidedoor checked 5 times and could not confirm delivery.",
     "AGENT_DECISION_NOT_READY": "Sidedoor's check rejected the note before it was sent.",
@@ -706,7 +714,7 @@ def research_causes(result, attempt_id, at, secrets=()):
             continue
         name = str(industry.get("industry") or "An industry")
         state = str(industry.get("state") or "UNKNOWN").upper()
-        code = industry.get("abandonment_reason") or ("RESEARCH_" + state if state in ("INTERRUPTED", "FAILED") else state)
+        code = industry.get("abandonment_reason") or industry.get("interruption_reason") or ("RESEARCH_" + state if state in ("INTERRUPTED", "FAILED") else state)
         label = None
         try:
             label = _research_label(name) if industry.get("industry") else None
@@ -806,7 +814,10 @@ def research_failures(reader, config, now, fmt, secrets=()):
             result = {"state": attempt[0]["state"]}
         if str((result or {}).get("state") or "").upper() == "INTERRUPTED":
             continue
-        tries = max(1, (day["attempts"] or 0) - (day["compute_wait_attempts"] or 0))
+        next_runs = reader.rows("SELECT value FROM schedule_meta WHERE key=?",
+                                ("next_run_wait_attempts:" + day["day"],), "schedule_meta")   # Y1: not tries
+        tries = max(1, (day["attempts"] or 0) - (day["compute_wait_attempts"] or 0)
+                    - (int(next_runs[0]["value"]) if next_runs else 0))
         at = overview._utc(attempt[0]["started_at"]) if attempt else None
         reason = _research_reason(result)
         skipped = _dropped_text(_research_dropped(result))
@@ -1814,8 +1825,9 @@ RUN_LINES = 80          # lines shown per file of a run
 RUN_FILES = 12          # files per page of a run
 RUN_EVENTS = 40         # records per page of a run
 RUNS_LISTED = 30        # per component per page on the Runs list
-# Files of a session folder that are shown: what the run reported and printed. Never the prompt or the
-# request it was given (prompt.txt, request.json, schema.json), which carry the user's profile.
+# Files of a session folder shown in its run view: what the run reported and printed. The prompt and the
+# request it was given (prompt.txt, request.json, schema.json) are not shown here; the Files list and
+# its downloads (log_downloads) do include them whole, with secrets removed (owner X1, V1).
 RUN_FILE_NAMES = ("stderr.log", "executor.log", "output.json", "decision.json", "trace.jsonl")
 _RESEARCH_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Any printable id (a job key can hold spaces and parentheses): task, finder and job ids only reach SQL
@@ -2236,7 +2248,7 @@ def _redaction_complete(home):
 
 
 KEPT_PARAMS = ("component", "level", "q", "day", "run", "section", "page", "log", "before", "file", "file_before",
-               "records_page", "files_page", "runs_part", "runs_page")
+               "records_page", "files_page", "runs_part", "runs_page", "log_files_page")
 PAGE_NUMBER = re.compile(r"[0-9]{1,6}\Z")
 
 
@@ -2270,10 +2282,10 @@ def older_links(entry, params, anchor, file=None):
 
 
 def register(app, templates, layout, home, root, config, token, database, connect_read_only):
-    """GET /failures and GET /failures/logs.txt. Both read only: the database through
+    """GET /failures, /failures/logs.txt and the whole-file downloads (`log_downloads`). All read only: the database through
     `overview_page.snapshot`, the logs through `read_tail`."""
     from fastapi import Request
-    from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+    from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
     import setup_steps
 
     logs = paths.logs(root)
@@ -2331,6 +2343,10 @@ def register(app, templates, layout, home, root, config, token, database, connec
         context["runs"], context["runs_parts"] = runs_paged(
             root, logs, context["logs"]["component"], context["logs"]["day"], zone, params.get("runs_part"),
             number(params, "runs_page"), names if isinstance(names, dict) else None)
+        import log_downloads
+        context["log_files"], context["log_files_paging"] = log_downloads.files_paged(
+            root, logs, context["logs"]["component"], context["logs"]["level"], context["logs"]["day"], zone,
+            number(params, "log_files_page"), session_names)
         if run:
             found = find_run(run, secrets, file_older, params)
             for entry in (found or {}).get("files") or []:
@@ -2369,6 +2385,60 @@ def register(app, templates, layout, home, root, config, token, database, connec
         elif not entry["lines"] and not entry.get("note"):
             entry["note"] = "Nothing in this older part can be shown."
         return HTMLResponse(templates.get_template("failures_older.html").render(fragment=entry))
+
+    def session_names():
+        """What each session folder was about, for the file names (read only); {} when unreadable."""
+        import log_downloads
+        try:
+            found = overview.snapshot(database, lambda connection: log_downloads.folder_names(
+                overview.Reader(connection), root), connect_read_only)
+        except Exception:
+            found = None
+        return found if isinstance(found, dict) else {}
+
+    def attachment(name, body, media):
+        """A download streamed from `body` (a generator of bytes, or a finished temporary .zip)."""
+        import log_downloads
+        if not isinstance(body, types.GeneratorType):   # a temporary file (which iterates lines) is sent in chunks
+            body = log_downloads.chunks(body)
+        return StreamingResponse(body, media_type=media, headers={
+            "Content-Disposition": "attachment; filename=\"%s\"" % re.sub(r'[^A-Za-z0-9._-]', "_", name)})
+
+    @app.get("/failures/file")
+    def failures_file(id: str = ""):
+        """One log or report file, whole, secrets removed (`log_downloads.resolve` names it by id only)."""
+        import log_downloads
+        if not _redaction_complete(home):
+            return PlainTextResponse(DETAILS_HIDDEN, status_code=403)
+        path = log_downloads.resolve(root, logs, id)
+        body = log_downloads.file_bytes(path, secrets_of(home, config, token))
+        if body is None:
+            return PlainTextResponse("This file is no longer on this computer. Go back to Failures and logs to see "
+                                     "the files you can download.", status_code=404)
+        return attachment(path.name, body, "text/plain; charset=utf-8")
+
+    @app.get("/failures/support.zip")
+    def failures_support():
+        import log_downloads
+        if not _redaction_complete(home):
+            return PlainTextResponse(DETAILS_HIDDEN, status_code=403)
+        zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+        name, body = log_downloads.support_zip(root, logs, secrets_of(home, config, token), zone, names=session_names)
+        return attachment(name, body, "application/zip")
+
+    @app.get("/failures/details.zip")
+    def failures_details(run: str = ""):
+        import log_downloads
+        if not _redaction_complete(home):
+            return PlainTextResponse(DETAILS_HIDDEN, status_code=403)
+        found = overview.snapshot(database, lambda connection: log_downloads.run_files(
+            overview.Reader(connection), root, logs, run), connect_read_only)
+        if not isinstance(found, tuple):
+            return PlainTextResponse("No saved files belong to this problem. Go back to Failures and logs to see "
+                                     "the files you can download.", status_code=404)
+        zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+        name, body = log_downloads.details_zip(root, logs, secrets_of(home, config, token), found, zone, names=session_names)
+        return attachment(name, body, "application/zip")
 
     @app.get("/failures/logs.txt")
     def failures_download(request: Request):

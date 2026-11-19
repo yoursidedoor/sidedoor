@@ -527,12 +527,15 @@ class LengthCutSettlementTests(base.ResumeFixture):
         self.assertEqual(result["audit"]["outcome"], "ANSWERING_OUTPUT_EXCEEDS_LIMIT")
         self.assertEqual(set(self.settled()), {"application-answering", "application-answering-judge"})
 
-    def test_an_http_402_keeps_its_whole_booking(self):
+    def test_an_http_402_gives_back_its_unused_tail(self):
+        # Owner T2, 2026-11-19: a failed call no longer keeps its whole booking; the 402 came back
+        # at once, so nearly all 600 s are credited.
         result = self.run_direct(lambda body: (402, b'{"error": {"message": "credits", "code": 402}}'), timeout=600)
         self.assertEqual(result["audit"]["outcome"], provider_limits.CODE)
-        self.assertEqual(self.settled(), {})
         booked = self.database.execute("SELECT seconds FROM worker_compute_reservations").fetchone()[0]
         self.assertEqual(booked, 600)
+        self.assertEqual(len(self.settled()), 1)
+        self.assertLess(list(self.settled().values())[0], 10)
 
 
 if __name__ == "__main__":

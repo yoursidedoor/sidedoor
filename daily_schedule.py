@@ -92,14 +92,16 @@ def claim(database, config, now):
         saved_authorization = database.execute("SELECT value FROM schedule_meta WHERE key=?", (authorization_key,)).fetchone()
         authorization = json.loads(saved_authorization[0]) if saved_authorization else {}
         forced_retry = authorization.get("state") == "AUTHORIZED" and bool(authorization.get("authorization"))
-        waits = row["compute_wait_attempts"] if row else 0
+        waits = (row["compute_wait_attempts"] + next_run_waits(database, day)) if row else 0
         if row:
             if row["state"] in {"COMPLETE", "RUNNING"} or row["state"] == "EXHAUSTED" and not forced_retry:
                 database.commit()
                 return {"state": row["state"], "day": day}
-            # Recorded compute waits are not failed investigations, so they do not spend the
-            # investigation attempt budget. `waits` is itself capped in finish(), so the total
-            # number of claims per day stays bounded.
+            # Recorded waits are not failed investigations, so they do not spend the investigation
+            # attempt budget. Ordinary compute waits are capped in finish(); provider waits and
+            # next-run waits (a passed deadline, a failed coordinator call; Y1) are not capped by
+            # count but are bounded in time: a provider wait by its stated reset, a next-run wait by
+            # its industry's back-off (5 min doubling to 2 hours, N1), and every wait by the day's end.
             if row["attempts"] - waits >= config["research_max_attempts"] and not forced_retry:
                 database.commit()
                 return {"state": "EXHAUSTED", "day": day}
@@ -192,37 +194,71 @@ def long_wait_retry(result, now, config):
     return min(moment, dt.datetime.fromisoformat(next_daily_time(now, config))).isoformat()
 
 
+# parallel_research.NEXT_RUN_WAITS: a passed deadline (R1) and a failed recovery call (W1, 2026-11-19).
+NEXT_RUN_WAITS = ("RESEARCH_DEADLINE_WAIT", "RESEARCH_RECOVERY_CALL_WAIT")
+
+
+# Y1 (owner, 2026-11-19): next-run waits (a passed deadline, a failed coordinator call) are counted on
+# their own, per day, in schedule_meta; they never use the ordinary wait counter nor an investigation try.
+# (Kept out of research_days so its column layout stays as every reader and writer knows it.)
+NEXT_RUN_WAITS_KEY = "next_run_wait_attempts:"
+
+
+def next_run_waits(database, day):
+    row = database.execute("SELECT value FROM schedule_meta WHERE key=?", (NEXT_RUN_WAITS_KEY + day,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def deadline_wait(result):
+    """True when every industry still waiting waits only because its run's research deadline passed
+    (parallel_research.DEADLINE_WAIT; owner R1, 2026-11-18): timing, which never uses up the day's
+    tries, so the day keeps retrying at a later run, as a provider wait does. Bounded by the day's
+    compute allowance and the day itself."""
+    industries = [industry for industry in result.get("industries") or [] if isinstance(industry, dict)
+                  and industry.get("state") == "COMPUTE_WAIT"]
+    return bool(industries) and all(isinstance(industry.get("compute_wait"), dict)
+                                    and industry["compute_wait"].get("reason") in NEXT_RUN_WAITS
+                                    for industry in industries)
+
+
 def finish(database, config, attempt_id, result, now):
     row = database.execute("SELECT * FROM research_days WHERE attempt_id=? AND state='RUNNING'", (attempt_id,)).fetchone()
     if not row:
         raise ValueError("Daily attempt is not owned by this worker")
     success = result["state"] == "COMPLETE"
     waits = row["compute_wait_attempts"]
+    next_runs = next_run_waits(database, row["day"])
     waiting = None if success else compute_wait_retry(result, now)
     if not success and waiting is None and provider_wait(result):
         waiting = long_wait_retry(result, now, config)
     retry_at = None
     if success:
         state = "COMPLETE"
+    elif waiting and deadline_wait(result):
+        # Y1: its own counter; neither the ordinary wait cap nor a try.
+        state, retry_at, next_runs = "RETRY_WAIT", waiting, next_runs + 1
     elif waiting and (waits < config["research_max_attempts"] or provider_wait(result)):
         # A wait is recorded and bounded, never erased: the attempt row survives with its real
         # count, and `compute_wait_attempts` says how many of those attempts were waits rather
         # than investigations. No compute limit is raised and no usage is discarded.
         state, retry_at, waits = "RETRY_WAIT", waiting, waits + 1
-    elif (row["attempts"] - waits >= config["research_max_attempts"]
+    elif (row["attempts"] - waits - next_runs >= config["research_max_attempts"]
           or result.get("retryable") is False and result.get("stop_reason") == "ALL_UNRESOLVED_INDUSTRIES_ABANDONED"):
         state = "EXHAUSTED"
     else:
         state = "RETRY_WAIT"
         delays = config["research_retry_delays_seconds"]
-        delay = delays[min(max(row["attempts"] - waits, 1), len(delays)) - 1]
+        delay = delays[min(max(row["attempts"] - waits - next_runs, 1), len(delays)) - 1]
         retry_at = (now + dt.timedelta(seconds=delay)).isoformat()
     with database:
         database.execute("UPDATE research SET state=?,result=? WHERE id=?", (result["state"], json.dumps(result), attempt_id))
         database.execute("UPDATE research_days SET state=?,next_retry_at=?,completed_at=?,compute_wait_attempts=? WHERE attempt_id=?",
                          (state, retry_at, now.isoformat() if success else None, waits, attempt_id))
+        database.execute("INSERT INTO schedule_meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (NEXT_RUN_WAITS_KEY + row["day"], str(next_runs)))
     return {"day": row["day"], "state": state, "attempts": row["attempts"],
-            "compute_wait_attempts": waits, "investigation_attempts": row["attempts"] - waits,
+            "compute_wait_attempts": waits, "next_run_wait_attempts": next_runs,
+            "investigation_attempts": row["attempts"] - waits - next_runs,
             "next_retry_at": retry_at}
 
 

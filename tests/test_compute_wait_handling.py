@@ -47,6 +47,11 @@ class ComputeWaitTests(unittest.TestCase):
     maxDiff = None
 
     def setUp(self):
+        # Every session here uses its whole booking, so nothing comes back when it ends (the
+        # immediate refunds of owner T1/T2, 2026-11-19, are tested in test_parallel_research).
+        whole = patch.object(parallel_research.workflow_tasks, "refund_compute", return_value=0)
+        whole.start()
+        self.addCleanup(whole.stop)
         # Compute arithmetic below is written in 120-second sessions; the session sizes themselves
         # (300 s discovery, 120 + 1.5 x slow end x companies) are tested in test_parallel_research.
         for name, value in (("DISCOVERY_SECONDS", 120), ("qualification_seconds", lambda database, companies: 120)):
@@ -414,15 +419,10 @@ class ComputeWaitTests(unittest.TestCase):
             "SELECT SUM(seconds) FROM worker_compute_reservations").fetchone()[0], 9000,
             "every charge is still recorded in full")
 
-        # The eight discoveries completed cleanly, so their measured unused tails were credited
-        # back to the SHARED pool at the end of the run; the eight failed qualifications kept
-        # their whole charge. The credit is not a research entitlement, so let the services take
-        # it, exactly as they would during the day, and the allowance is spent again.
+        # Every session here used its whole booking (setUp), so no tail came back. Any credit is not a
+        # research entitlement, so the services would take it, exactly as they would during the day.
         refunded = self.database.execute("SELECT COALESCE(SUM(seconds),0) FROM worker_compute_refunds").fetchone()[0]
-        self.assertEqual(self.database.execute(
-            "SELECT COUNT(*) FROM worker_compute_refunds WHERE reason='RESEARCH_DISCOVERY_COMPLETE'").fetchone()[0], 8)
-        self.assertEqual(self.database.execute("SELECT COUNT(*) FROM worker_compute_refunds").fetchone()[0], 8)
-        self.assertTrue(0 < refunded <= 960, refunded)
+        self.assertEqual(refunded, 0)
         self.assertEqual(workflow_tasks.compute_used(self.database, "2026-09-18"), 9000 - refunded)
         if refunded:
             self.spend(refunded, "services-take-the-refunded-tail")

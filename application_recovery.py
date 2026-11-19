@@ -36,6 +36,9 @@ RECOVERABLE = {
     # SUBMISSION_OBSERVATION_LOST is deliberately NOT here: nothing was observed, so there is
     # no finding to act on and reconciliation is the only honest next step.
     "SUBMISSION_REPORTED_FAILED",
+    # LISTING_LINK_IDENTITY (FU11, 2026-11-17) is deliberately NOT here: it is resolved by re-recording the
+    # job under the posting the listing's Apply link leads to (`applications.follow_listing_link`), never
+    # by an investigation.
 }
 # AUTHENTICATION_REQUIRED, CAPTCHA_REQUIRED and MFA_REQUIRED left this set on 2026-10-11. Since
 # 2026-11-10 (E15.T1) a walled job waits on the user or closes (access_outcomes; `process` starts
@@ -598,10 +601,11 @@ def active(database, key, now=None):
     since = superseded_scope(database, key, now or applications.stamp())
     latest = database.execute("""SELECT event, detail FROM application_events WHERE job_key=? AND event IN
         ('APPLICATION_RECOVERY_STARTED','APPLICATION_RECOVERY_RESOLVED','APPLICATION_RECOVERY_INVESTIGATED',
-         'APPLICATION_RECOVERY_DECIDED','APPLICATION_RECOVERY_DECISION_FAILED','APPLICATION_RECOVERY_SUPERSEDED')
+         'APPLICATION_RECOVERY_DECIDED','APPLICATION_RECOVERY_DECISION_FAILED','APPLICATION_RECOVERY_SUPERSEDED',
+         'APPLICATION_RECOVERY_CLOSED_AS_COPY')
         """ + ("AND id >= ? " if since is not None else "") + """
         ORDER BY id DESC LIMIT 1""", ((key, since) if since is not None else (key,))).fetchone()
-    if not latest or latest[0] in {"APPLICATION_RECOVERY_RESOLVED", SUPERSEDED_EVENT}:
+    if not latest or latest[0] in {"APPLICATION_RECOVERY_RESOLVED", SUPERSEDED_EVENT, CLOSED_AS_COPY_EVENT}:
         return False
     if latest[0] == "APPLICATION_RECOVERY_DECIDED":
         try:
@@ -728,6 +732,10 @@ def resumption_active(database, key, job, blocker, now=None, since=None):
 def bound_evidence(evidence, job, now):
     return (isinstance(evidence, dict) and applications.fresh(evidence, now)
             and evidence.get("independent_read") is True and evidence.get("job_key") == job["job_key"])
+
+
+# A recovery resolution onto a posting another job holds closed this job as its copy (owner's pick D1).
+CLOSED_AS_COPY_EVENT = "APPLICATION_RECOVERY_CLOSED_AS_COPY"
 
 
 def apply_resolution(database, job, resolution, now):
@@ -1151,10 +1159,21 @@ def recover(database, job, adapter, config, blocker, action, now, clock=None, po
         if returned in RECOVERABLE:
             blocker = returned
         if result.get("status") == "RESOLVED":
+            import identity_reconciliation
             try:
                 if not bound_evidence(result.get("evidence"), job, now):
                     raise ValueError("RECOVERY_RESULT_EVIDENCE_REQUIRED")
                 apply_resolution(database, job, result.get("resolution"), now)
+            except identity_reconciliation.PostingOwned as owned:
+                # The verified posting is another job's that applied, may have, or is open: this job is a
+                # copy of it and closes (owner's pick D1, 2026-11-18). It used to be refused as an
+                # "identity collision" and investigated again until the claims ran out.
+                # Its own event, not APPLICATION_RECOVERY_RESOLVED, so the report does not count it as a
+                # recovery (review H2); it ends the lifecycle as that one does.
+                applications.event(database, key, CLOSED_AS_COPY_EVENT, dict(finding, copy_of=owned.owner), now)
+                applications.close_as_copy(database, current, owned, now, {
+                    "reason": finding["reason"], "basis": "RECOVERY_POSTING_OWNED"})
+                return True
             except (ValueError, KeyError, TypeError, AttributeError) as error:
                 finding["reason"] = "UNVERIFIED_RESOLUTION: " + str(error)
                 applications.event(database, key, "APPLICATION_RECOVERY_RESOLUTION_REJECTED", finding, now)

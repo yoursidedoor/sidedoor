@@ -212,6 +212,11 @@ class ResearchFirstTests(ResearchFixture):
 
     def test_the_ceiling_is_the_only_thing_that_stops_research(self):
         """6,240 spent leaves exactly eight 120-second discoveries inside the 7,200 ceiling."""
+        # Every session here uses its whole booking, so nothing comes back when it ends (the
+        # immediate refunds of owner T1/T2, 2026-11-19, are tested in test_parallel_research).
+        whole = patch.object(parallel_research.workflow_tasks, "refund_compute", return_value=0)
+        whole.start()
+        self.addCleanup(whole.stop)
         self.spend(CEILING - 960)
         result = self.research()
         self.assertEqual(sorted(phase for _, phase in self.calls), ["discovery"] * 8)
@@ -361,7 +366,8 @@ class ResearchRefundTests(ResearchFixture):
         over = (dt.datetime.fromisoformat(start) + dt.timedelta(seconds=900)).isoformat()
         with self.database:                                   # overran its booking: nothing back
             self.assertEqual(workflow_tasks.refund_compute(self.database, action_id, start, over, over, "CLEAN"), 0)
-        self.assertEqual(self.refunds(), [])
+        # The zero credit is recorded as the booking's settlement (owner Z1 a, 2026-11-19), crediting nothing.
+        self.assertEqual([row["seconds"] for row in self.refunds()], [0])
         with self.database:                                   # and a window cannot run backwards
             with self.assertRaises(ValueError):
                 workflow_tasks.refund_compute(self.database, action_id, over, start, over, "CLEAN")

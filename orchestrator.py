@@ -1387,10 +1387,15 @@ def run_research_worker(root, command, prompt, log_path, timeout, on_start=None,
         deadline = started + timeout
         pending_input = engine.prompt_input(prompt)
         timed_out = False
+        watch = portable.SleepWatch()   # R2 (owner, 2026-11-18): a sleep ends the session as an interruption
         try:
             while True:
                 if RESEARCH_STOP.is_set():
                     raise InterruptedError("Research interrupted by service shutdown")
+                slept = watch.slept()
+                if slept:
+                    # Its connections did not survive the sleep: stop it now; the run starts it once more.
+                    raise portable.SleptThrough(slept)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
@@ -1702,9 +1707,12 @@ def run(root, config, database, pipeline, local_only=False):
 
 
 JOB_COMMANDS = ("run", "research", "applications", "invites")
+# The commands whose job runs AI workers or browser sessions (research, applications, outreach, the
+# reply agent, recovery, the contact finder): the computer is kept awake while one runs (R2).
+AWAKE_COMMANDS = ("run", "research", "applications", "invites", "outreach")
 
 
-def main(argv=None):
+def main(argv=None, _awake=False):
     from_command_line = argv is None
     argv = list(sys.argv[1:] if argv is None else argv)
     import scheduler_loop
@@ -1767,6 +1775,11 @@ def main(argv=None):
                         help="serve, supervise: started by the start-at-login entry (E5.T2)")
     parser.add_argument("--home", help="serve, supervise: the Sidedoor home the start-at-login entry was registered for")
     args = parser.parse_args(argv)
+    if args.command in AWAKE_COMMANDS and not _awake:
+        # R2 (owner, 2026-11-18): the computer stays awake for the whole job that runs AI workers or
+        # browser sessions; the job runs as before inside it.
+        with portable.stay_awake():
+            return main(argv, _awake=True)
     if args.start and args.command not in ("serve", "supervise"):
         parser.error("--start is for serve only")
     if args.home:  # before anything reads the home (user_profile.home)

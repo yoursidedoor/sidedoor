@@ -115,12 +115,13 @@ class BrowserReservationRefundTests(unittest.TestCase):
             self.database, "acme:1", "2026-09-22T10:02:00+00:00")
         self.assertEqual(credited, 360, "480 booked, 120 measured, 360 should return")
 
-    def test_an_uncommitted_session_keeps_its_whole_charge(self):
+    def test_a_booking_with_no_ended_session_is_not_settled_yet(self):
+        # Since owner T2 (2026-11-19) an uncommitted session is refunded the tail after its lease
+        # ran out (tests/test_t2_refund_all.py); with nothing ended yet nothing is credited.
         self.reserve(1, 480, "2026-09-22T10:00:00+00:00")
         credited = self.workflow_tasks.settle_browser_reservations(
             self.database, "acme:1", "2026-09-22T10:10:00+00:00")
-        self.assertEqual(credited, 0,
-                         "a timed-out or killed session commits nothing and must retain its charge")
+        self.assertEqual(credited, 0, "nothing has ended inside the cycle window, so nothing settles yet")
 
     def test_a_two_operation_block_settles_only_once_both_commit(self):
         self.reserve(2, 960, "2026-09-22T10:00:00+00:00")

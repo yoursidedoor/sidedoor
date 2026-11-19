@@ -1073,8 +1073,11 @@ def repair_rejected(root, database, config, adapter, action, proof, now=None):
         timeout = config.get("reply_worker", {}).get("timeout_seconds", 60)
         if type(timeout) is not int or not 1 <= timeout <= 600:
             return None
-        reference = "reply-repair:" + routing.digest([action["action_id"], action["message"], objection])
         import workflow_tasks
+        # The same rewrite asked again books a numbered successor once the earlier booking was
+        # refunded (owner T2, 2026-11-19), so it is charged again rather than run free.
+        reference = workflow_tasks.unsettled_booking(
+            database, "reply-repair:" + routing.digest([action["action_id"], action["message"], objection]))
         with database:
             if not workflow_tasks.reserve_compute(database, reference, current.isoformat(), timeout,
                     config.get("timezone", "America/Los_Angeles"), config.get("daily_compute_seconds", 10800)):

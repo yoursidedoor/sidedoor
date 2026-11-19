@@ -291,6 +291,16 @@ class MigrationTest(Base):
         self.unlock()
         self.assertIn("still in a file", doctor.check_credentials(self.home)["line"])
 
+    def test_every_credential_has_a_label_and_the_vault_alone_is_not_listed(self):
+        self.assertLessEqual(set(credentials.NAMES), set(doctor.CREDENTIAL_LABELS))
+        credentials.put("vault", "v" * 44, self.home)   # the check crashed (KeyError) once a vault existed
+        self.assertEqual(doctor.check_credentials(self.home)["line"], "No keys saved yet; they will be kept in %s."
+                         % credentials.where())
+        credentials.put("license", LICENSE, self.home)
+        line = doctor.check_credentials(self.home)["line"]
+        self.assertIn("license key", line)
+        self.assertNotIn("sign-ins", line)
+
     def test_no_os_store_keeps_the_0600_file_and_doctor_says_so(self):
         credentials.use_backend(credentials.NO_STORE)
         self.write("license", LICENSE)

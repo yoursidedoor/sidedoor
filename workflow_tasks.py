@@ -441,8 +441,10 @@ def settle_compute(database, action_id, started_at, now, reason):
 
     Settlement must never fail work that already succeeded, so a missing reservation, an already
     settled one or a post-reset booking credits 0 and says nothing. The CALLER owns the
-    transaction. Callers settle a completed phase, or (agent_worker) a booking refused before the
-    model ran; the unused tail of a committed failure is refunded too (owner, 2026-09-29).
+    transaction. Every worker settles every booking it made, however the run ended (owner T2,
+    2026-11-19): finished cleanly, failed (error, crash, non-zero exit, unreadable answer) or
+    interrupted (shutdown, stop, sleep), the unused tail goes back at once. A run that hit its
+    time limit measures ~its whole booking and so credits ~0 by the arithmetic alone.
     """
     try:
         return refund_compute(database, action_id, started_at, now, now, reason)
@@ -450,8 +452,44 @@ def settle_compute(database, action_id, started_at, now, reason):
         return 0
 
 
+def give_back_compute(database, action_id, started_at, ended_at, reason):
+    """`settle_compute` in its own transaction, for an exit path (owner T2, 2026-11-19).
+
+    For `except`/`finally` branches: commits the credit when no caller transaction is open and
+    otherwise leaves it to the caller's. Never raises: a refund never changes what the work did.
+    """
+    try:
+        if database.in_transaction:
+            return settle_compute(database, action_id, started_at, ended_at, reason)
+        with database:
+            return settle_compute(database, action_id, started_at, ended_at, reason)
+    except Exception:
+        return 0
+
+
+def unsettled_booking(database, action_id):
+    """The booking id to reserve under: `action_id`, or a numbered successor once it was settled.
+
+    Some workers derive their booking from what the work is (a packet hash, a task attempt, a day),
+    so a retry can arrive with the id of a booking a finished run already used. `reserve_compute`
+    admits an existing id without charging again, so that retry would run uncharged. Every
+    finished run now settles (owner T2, 2026-11-19), with a zero-credit row when it hit its time
+    limit (owner Z1 a), so such a retry books `action_id#2`, `#3`, ... instead: every run is
+    charged once and settled at most once. A booking still running has no settlement row and is
+    never skipped past, so its own run keeps settling it.
+    """
+    try:
+        candidate, number = action_id, 1
+        while database.execute("SELECT 1 FROM worker_compute_refunds WHERE action_id=?", (candidate,)).fetchone():
+            number += 1
+            candidate = action_id + "#" + str(number)
+        return candidate
+    except Exception:
+        return action_id
+
+
 def refund_compute(database, action_id, started_at, completed_at, now, reason):
-    """Credit back the unused tail of a CLEANLY COMPLETED reservation. Returns the seconds credited.
+    """Credit back the unused tail of a finished reservation. Returns the seconds credited.
 
     Reservations are pessimistic: a worker books its timeout up front, so a phase that books
     120 seconds and finishes in 31 strands 89 for the rest of the service day, protecting nothing.
@@ -470,12 +508,13 @@ def refund_compute(database, action_id, started_at, completed_at, now, reason):
        was measured and why, and admission subtracts it -- the same shape as
        worker_compute_resets.prior_seconds. The refund is keyed by action_id, so it is
        idempotent: a replay credits nothing further.
-    4. CLEAN COMPLETION, WITH TWO MEASURED EXCEPTIONS. The caller decides. A clean completion
-       refunds its tail; so does a committed browser session's failure (owner, 2026-09-29) and a
-       contact-finder run that started and returned a failure (owner, 2026-10-22, CM1 b), and a
-       failed follow-up writer attempt (owner, 2026-10-27, D4 a). Every
-       other failure keeps its whole charge (AGENTS.md: "other workers' failed attempts keep
-       their charge"), as does an interrupted, killed or uncertain outcome.
+    4. EVERY ENDING REFUNDS ITS TAIL (owner T2, 2026-11-19). A clean completion, a failure
+       (error, crash, non-zero exit, unreadable answer) and an interruption (shutdown, stop,
+       sleep) all refund the measured unused tail. This replaces the earlier rule that only a
+       clean completion and a few named failures refunded ("other workers' failed attempts keep
+       their charge"; CM1 b 2026-10-22; D4 a 2026-10-27). A run that hit its time limit
+       measures its whole booking and credits ~0. A process killed outright refunds nothing,
+       because nothing measured when it ended.
 
     The credit belongs to the day the reservation was charged to, not the day the refund is
     recorded, so a phase that ends just after the day start still credits the day it spent.
@@ -504,9 +543,11 @@ def refund_compute(database, action_id, started_at, completed_at, now, reason):
             return 0
         elapsed = math.ceil((completed - started).total_seconds())
         credited = max(0, min(row["seconds"], row["seconds"] - elapsed))
-        if credited:
-            database.execute("INSERT INTO worker_compute_refunds VALUES (?,?,?,?,?,?,?)",
-                             (action_id, row["day"], credited, row["seconds"], elapsed, now, reason))
+        # A zero credit (the run hit its time limit) is recorded too (owner Z1 a, 2026-11-19): the
+        # row marks the booking as used by a finished run, so `unsettled_booking` gives the next
+        # attempt its own id and charge, and it subtracts nothing from the day.
+        database.execute("INSERT INTO worker_compute_refunds VALUES (?,?,?,?,?,?,?)",
+                         (action_id, row["day"], credited, row["seconds"], elapsed, now, reason))
         database.execute("RELEASE SAVEPOINT compute_refund")
         return credited
     except BaseException:
@@ -585,12 +626,14 @@ def settle_browser_reservations(database, job_key, now):
     for the rest of the service day") and only two other workers called it.
 
     A reservation settles on what actually ran (rules below the docstring): a request that was
-    never claimed ran nothing and is refunded in full; a started session must have COMMITTED a
-    result (`RESULT_COMMITTED` or `BROWSER_CONSUMER_COMPLETED`, recorded after `desktop_adapter.complete`
-    succeeds) before its tail is credited - a committed failure, a timeout included, counts (owner,
-    2026-09-29) - so only a session that was killed or never returned keeps its whole charge. The credit is measured
-    from the reservation's own timestamp to the last commit, never declared by any worker, and
-    `refund_compute` clamps it to the booking and refuses to go negative.
+    never claimed ran nothing and is refunded in full; a started session ends either when it
+    COMMITTED a result (`RESULT_COMMITTED` or `BROWSER_CONSUMER_COMPLETED`, recorded after
+    `desktop_adapter.complete` succeeds; a committed failure, a timeout included, counts, owner
+    2026-09-29) or, if it never committed (killed, lost, interrupted), when its claim lease ran
+    out and the request can no longer be claimed again. Either way its unused tail is credited
+    (owner T2, 2026-11-19; until then an uncommitted session kept its whole charge). The credit is
+    measured from the reservation's own timestamp to the last session's end, never declared by
+    any worker, and `refund_compute` clamps it to the booking and refuses to go negative.
 
     Contractually non-raising: a failure to credit compute back must never fail an application.
     """
@@ -608,17 +651,18 @@ def settle_browser_reservations(database, job_key, now):
     # 2026-09-28's 21,000 seconds to browser work that never ran. The requests a reservation
     # covers are this job's requests created from its start until the job's next reservation.
     #   - none started (never claimed, and expired/superseded/cancelled): refund it all;
-    #   - every started session committed and nothing is still queued: refund the unused tail;
-    #   - a started session never committed anything (killed, lost, uncertain): keep the whole
-    #     charge; a committed failure (a timeout included) settles like any commit (2026-09-29);
-    #   - a request still queued and unexpired: wait, it may yet run.
+    #   - every started session ended and nothing is still queued: refund the unused tail. A
+    #     committed failure (a timeout included) ends at its commit (2026-09-29); a session that
+    #     never committed (killed, lost, interrupted) ends when its lease ran out and its request
+    #     can no longer be claimed, and is refunded the tail after that (owner T2, 2026-11-19);
+    #   - a request still queued and unexpired, or a session still inside its lease: wait.
     for row in rows:
         try:
             following = database.execute(
                 """SELECT MIN(started_at) FROM application_browser_reservations
                    WHERE job_key=? AND started_at > ?""", (job_key, row["started_at"])).fetchone()[0]
             requests = list(database.execute(
-                """SELECT request_id, state, claims, expires_at FROM desktop_requests
+                """SELECT request_id, state, claims, expires_at, lease_until FROM desktop_requests
                    WHERE job_key=? AND created_at >= ? AND (? IS NULL OR created_at < ?)""",
                 (job_key, row["started_at"], following, following)))
             # CONSUMED with no claim is a read no session picked up that was replaced (2026-09-28).
@@ -641,19 +685,38 @@ def settle_browser_reservations(database, job_key, now):
                 credited += refund_compute(database, row["reservation"], row["started_at"], row["started_at"],
                                            now, "BROWSER_RESERVATION_NEVER_STARTED") or 0
             else:
-                # A session counts as committed once its result is stored, a failure included (owner,
-                # 2026-09-29: the unused tail of a failed session "should be refunded"). Only a
-                # session that never committed anything (killed, or timed out without committing, or lost) keeps its whole
-                # charge. One commit per request: the latest of either marker.
-                commits = sorted(event["at"] for event in database.execute(
-                    """SELECT MAX(event.at) AS at FROM desktop_events AS event
+                # A session ends at its commit, a failure included (owner, 2026-09-29: the unused
+                # tail of a failed session "should be refunded"). One commit per request: the latest
+                # of either marker. A session that never committed (killed, lost, interrupted) ends
+                # when its lease ran out and its request can no longer be claimed again; its tail
+                # after that is refunded too (owner T2, 2026-11-19). The lease is Sidedoor's own
+                # clock and caps the session (`application_browser.consume`), so the credit never
+                # covers time the session might still have been running.
+                commits = {event["request_id"]: event["at"] for event in database.execute(
+                    """SELECT event.request_id, MAX(event.at) AS at FROM desktop_events AS event
                        WHERE event.event IN ('BROWSER_CONSUMER_COMPLETED','RESULT_COMMITTED')
                        AND event.request_id IN (%s) GROUP BY event.request_id""" % ",".join("?" * len(started)),
-                    [item["request_id"] for item in started]))
-                if len(commits) < len(started) or len(commits) < row["operations"] and not cycle_over:
+                    [item["request_id"] for item in started])}
+                ends = []
+                for item in started:
+                    if item["request_id"] in commits:
+                        ends.append(commits[item["request_id"]])
+                    elif (item["lease_until"] and instant(item["lease_until"]) <= instant(now)
+                          and (item["state"] not in {"PENDING", "CLAIMED"} or instant(item["expires_at"]) <= instant(now))):
+                        ends.append(item["lease_until"])
+                    elif (not item["lease_until"] and item["state"] not in {"PENDING", "CLAIMED"}
+                          and instant(item["expires_at"]) <= instant(now)):
+                        # An earlier claim lapsed uncommitted and a later one was refused and handed
+                        # back (`application_browser`: lease cleared, expires_at = hand-back time).
+                        # A claim is only granted once every earlier lease ran out, so the earlier
+                        # session was over by the hand-back: it ends then (owner K1 a, 2026-11-19).
+                        ends.append(item["expires_at"])
+                if len(ends) < len(started) or len(ends) < row["operations"] and not cycle_over:
                     continue
-                credited += refund_compute(database, row["reservation"], row["started_at"], commits[-1], now,
-                                           "BROWSER_SESSION_COMMITTED") or 0
+                last = max(ends, key=instant)
+                credited += refund_compute(database, row["reservation"], row["started_at"], last, now,
+                                           "BROWSER_SESSION_COMMITTED" if len(commits) == len(started)
+                                           else "BROWSER_SESSION_ENDED_UNCOMMITTED") or 0
             database.execute("UPDATE application_browser_reservations SET settled_at=? WHERE reservation=?",
                              (now, row["reservation"]))
         except Exception:

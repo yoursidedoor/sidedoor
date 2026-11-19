@@ -278,7 +278,9 @@ def check_openrouter(home, config, online=False, transport=None):
 
 
 CREDENTIAL_LABELS = {"openrouter": "OpenRouter key", "license": "license key", "openai": "OpenAI API key",
-                     "anthropic": "Anthropic API key"}
+                     "anthropic": "Anthropic API key",
+                     # vault (E15.T4): made by Sidedoor, never typed; named only when it needs attention.
+                     "vault": "key that protects your saved sign-ins"}
 
 
 def check_credentials(home):
@@ -315,7 +317,7 @@ def check_credentials(home):
         return _line(WARN, "Credentials", "Your %s %s still in a file in %s, not yet in %s." % (
             " and ".join(files), verb, shown_path(home), store),
             "Restart Sidedoor; it moves the key at start. If this stays, " + SUPPORT)
-    saved = [CREDENTIAL_LABELS[name] for name, value in states.items() if value == "store"]
+    saved = [CREDENTIAL_LABELS[name] for name, value in states.items() if value == "store" and name != "vault"]
     if not saved:
         return _line(OK, "Credentials", "No keys saved yet; they will be kept in %s." % store)
     return _line(OK, "Credentials", "Your %s %s kept in %s." % (" and ".join(saved), "is" if len(saved) == 1 else "are",

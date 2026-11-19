@@ -172,7 +172,10 @@ class OrchestratorTests(unittest.TestCase):
         with patch.object(runner.subprocess, "Popen", return_value=worker) as launch, patch.object(runner.os, "killpg") as terminate, \
                 patch("parallel_research.initial_deadline_seconds", return_value=1):
             result = runner.research(self.root, config, self.database, self.pipeline, {})
-            self.assertEqual(result["state"], "FAILED")
+            # R1 (owner, 2026-11-18): the run's deadline passing is a wait for a later run, not a failure;
+            # a coordinator call cut off by the same deadline is a wait too (W1). Y5: strict.
+            self.assertEqual(result["state"], "PARTIAL")
+            self.assertEqual(result["abandoned_industries"], [])
             # One research session: the discovery that timed out, never retried and never followed by a
             # qualification. When the timed-out discovery ends a moment before the one-second run deadline,
             # the recovery coordinator may still make its (tools-disabled) decision call, a session of its
@@ -190,10 +193,11 @@ class OrchestratorTests(unittest.TestCase):
             self.assertIn("--ignore-user-config", command)
             self.assertIn("features.shell_tool=false", command)
             self.assertTrue(all(call.kwargs["start_new_session"] for call in launch.call_args_list))
-            self.assertEqual(runner.research(self.root, config, self.database, self.pipeline, {})["state"], "EXHAUSTED")
+            # R1 (owner, 2026-11-18): timing never ends the day; it waits for the next research tick.
+            self.assertEqual(runner.research(self.root, config, self.database, self.pipeline, {})["state"], "RETRY_WAIT")
             self.assertIsNone(self.database.execute("SELECT completed_at FROM research_days").fetchone()[0])
-            self.assertFalse(result["retryable"])
-            self.assertEqual(launch.call_count, len(commands))   # the EXHAUSTED day started nothing
+            self.assertTrue(result["retryable"])
+            self.assertEqual(launch.call_count, len(commands))   # the waiting day started nothing yet
 
     def test_missing_profile_never_triggers_unfiltered_inbox_read(self):
         self.database.execute("UPDATE history SET profile=NULL WHERE recipient='Remy'")

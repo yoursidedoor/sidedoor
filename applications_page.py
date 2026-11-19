@@ -113,6 +113,8 @@ CODE_WORDS = {
     "REQUISITION_MISMATCH": "The application page did not match this posting.",
     "REQUISITION_UNKNOWN": "The posting's job number could not be confirmed.",
     "IDENTITY_MISMATCH": "The posting moved to another page; Sidedoor is following it.",
+    # Shown only while a listing-link verdict could not be used (FU11 review I3): state and next step only.
+    "LISTING_LINK_IDENTITY": "The apply link leads to a posting Sidedoor could not confirm is this job. It reads the listing again later.",
     "INSPECTION_INCOMPLETE": "Sidedoor could not finish reading the posting.",
     "FORM_REVIEW_INCOMPLETE": "Sidedoor could not finish reading the application form.",
     "REQUIRED_QUESTIONS_UNKNOWN": "Sidedoor could not read all of the form's questions.",

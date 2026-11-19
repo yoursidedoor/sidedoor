@@ -144,6 +144,22 @@ def audit(database, action_id, phase, kind, observed_at, record):
     return identifier
 
 
+def _give_back(database, booking, started, repairs, outcome):
+    """Settle a judgment's or composition's main booking and its repair turns, however it ended.
+
+    Owner T2, 2026-11-19: completed, failed or interrupted, each booking's measured unused tail
+    goes back at once; a call that hit its timeout credits ~0. Repair turns of a completed call
+    were settled since 2026-10-02 (booked at the full timeout, 6 x 600 s on 09-29..10-02). Never
+    raises and never changes the outcome.
+    """
+    if booking:
+        workflow_tasks.give_back_compute(database, booking, started, outreach_provider._now(),
+                                         outcome + "; unused tail of its reservation")
+    for repair, repair_started in repairs:
+        workflow_tasks.give_back_compute(database, repair, repair_started, outreach_provider._now(),
+                                         outcome + " (repair turn); unused tail of its reservation")
+
+
 def _direct_proof(action, config, now):
     contexts = config.get("outreach_promotion_contexts", {})
     if not isinstance(contexts, dict):
@@ -531,24 +547,25 @@ class Adapter(outreach.HeyReachActionAdapter):
         timeout = settings.get("timeout_seconds", 60)
         if type(timeout) is not int or not 1 <= timeout <= 600 or len(prompt.encode()) > prompt_limit(config):
             raise ValueError("OUTREACH_AGENT_INPUT_OR_TIME_BOUND")
+        # A retry that would reuse an already refunded booking books a numbered successor (owner T2, 2026-11-19).
+        booking, repairs, booked = workflow_tasks.unsettled_booking(self.database, "outreach-ai:" + reference), [], False
         try:
             with self.database:
-                if not workflow_tasks.reserve_compute(self.database, "outreach-ai:" + reference, now.isoformat(), timeout,
+                if not workflow_tasks.reserve_compute(self.database, booking, now.isoformat(), timeout,
                         config.get("timezone", "America/Los_Angeles"), config.get("daily_compute_seconds", 10800)):
                     raise SharedBudgetExhausted(config, now)
+            booked = True
             raw = execute(config, prompt, schema, timeout)
             def _record(turn, reason):
                 audit(self.database, audit_id, phase, "DECISION_REPAIR", now.isoformat(),
                       {"observation_id": reference, "turn": turn, "rejection_reason": reason})
 
-            repairs = []
-
             def _reserve(turn):
-                booking = "outreach-ai-repair:" + reference + ":" + str(turn)
-                repairs.append((booking, outreach_provider._now()))
+                repair = workflow_tasks.unsettled_booking(self.database, "outreach-ai-repair:" + reference + ":" + str(turn))
+                repairs.append((repair, outreach_provider._now()))
                 with self.database:
                     return bool(workflow_tasks.reserve_compute(
-                        self.database, booking, now.isoformat(),
+                        self.database, repair, now.isoformat(),
                         timeout, config.get("timezone", "America/Los_Angeles"),
                         config.get("daily_compute_seconds", 10800)))
 
@@ -567,17 +584,15 @@ class Adapter(outreach.HeyReachActionAdapter):
                 with self.database:
                     self.database.execute("INSERT OR REPLACE INTO outreach_judgment_reuse VALUES (?,?,?,?)",
                                           (reuse_key, now.isoformat(), decision_id, encoded(decision)))
-            with self.database:
-                workflow_tasks.settle_compute(self.database, "outreach-ai:" + reference, now.isoformat(),
-                                              outreach_provider._now(),
-                                              "outreach judgment completed; shared daily pool: unused tail of a cleanly completed reservation")
-                # Repair turns of a completed judgment are settled too (2026-10-02): they were
-                # booked at the full timeout and never credited, 6 x 600 s on 09-29..10-02.
-                for booking, started in repairs:
-                    workflow_tasks.settle_compute(self.database, booking, started, outreach_provider._now(),
-                                                  "outreach judgment repair turn completed; shared daily pool: unused tail of a cleanly completed reservation")
+            _give_back(self.database, booking if booked else None, now.isoformat(), repairs, "outreach judgment completed")
             return observation, packet["direct_history"], decision, reference
-        except Exception as error:
+        except BaseException as error:
+            # Failed or interrupted: the main booking and every repair turn give back their unused
+            # tail too (owner T2, 2026-11-19; until then a failed call kept its whole booking).
+            _give_back(self.database, booking if booked else None, now.isoformat(), repairs,
+                       "outreach judgment ended " + type(error).__name__)
+            if not isinstance(error, Exception):
+                raise
             audit(self.database, audit_id, phase, "FAILURE", now.isoformat(),
                   {"observation_id": reference, "error_type": type(error).__name__,
                    "code": getattr(error, "code", None), "error": str(error)[:300],
@@ -1375,21 +1390,22 @@ def _compose_text(root, database, config, row, execute, now, repair):
     # reserve_compute refuses ("Compute reservation identity cannot change"), spending a try with
     # no model call (2026-10-02). Same-day retries still share one booking, as before.
     day = workflow_tasks.budget_day(now, config.get("timezone", "America/Los_Angeles"))
-    booking = "outreach-compose:" + reference + ":" + day
+    # A retry that would reuse an already refunded booking books a numbered successor (owner T2, 2026-11-19).
+    booking = workflow_tasks.unsettled_booking(database, "outreach-compose:" + reference + ":" + day)
     with database:
         if not workflow_tasks.reserve_compute(database, booking, now.isoformat(), timeout,
                 config.get("timezone", "America/Los_Angeles"), config.get("daily_compute_seconds", 10800)):
             raise SharedBudgetExhausted(config, now)
+    repairs = []
     try:
         raw = execute(config, prompt, schema, timeout)
         def _record(turn, reason):
             audit(database, key, "COMPOSITION", "REPAIR", now.isoformat(),
                   {"observation_id": reference, "turn": turn, "rejection_reason": reason})
 
-        repairs = []
-
         def _reserve(turn):
-            repair_booking = "outreach-compose-repair:" + reference + ":" + day + ":" + str(turn)
+            repair_booking = workflow_tasks.unsettled_booking(
+                database, "outreach-compose-repair:" + reference + ":" + day + ":" + str(turn))
             repairs.append((repair_booking, outreach_provider._now()))
             with database:
                 return bool(workflow_tasks.reserve_compute(
@@ -1400,14 +1416,12 @@ def _compose_text(root, database, config, row, execute, now, repair):
         output, packet = _output_with_repair_turns(
             execute, config, template, schema, timeout, packet, raw, _validate_composition,
             record=_record, reserve=_reserve)
-        with database:
-            workflow_tasks.settle_compute(database, booking, now.isoformat(),
-                                          outreach_provider._now(),
-                                          "outreach composition completed; shared daily pool: unused tail of a cleanly completed reservation")
-            for repair_booking, started in repairs:
-                workflow_tasks.settle_compute(database, repair_booking, started, outreach_provider._now(),
-                                              "outreach composition repair turn completed; shared daily pool: unused tail of a cleanly completed reservation")
-    except Exception as error:
+        _give_back(database, booking, now.isoformat(), repairs, "outreach composition completed")
+    except BaseException as error:
+        # Failed or interrupted: the unused tails go back too (owner T2, 2026-11-19).
+        _give_back(database, booking, now.isoformat(), repairs, "outreach composition ended " + type(error).__name__)
+        if not isinstance(error, Exception):
+            raise
         # The reason is recorded, not just the class: "Held" alone hid whether the model call
         # timed out, failed at the provider or returned nothing (2026-09-28).
         audit(database, key, "COMPOSITION", "FAILURE", now.isoformat(),

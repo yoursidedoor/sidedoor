@@ -1043,13 +1043,19 @@ def _run_one(root, database, config, item, now, executor=None):
             database.execute("UPDATE linkedin_contact_runs SET state=?,finished_at=?,result=? WHERE run_id=?",
                              ("PROVIDER_WAIT" if limit else "FAILED", finished, browser.encoded(summary), run_id))
             # The run started and returned (a failure included), so its unused tail goes back,
-            # measured from its own timestamps, as for a committed browser failure (owner,
-            # 2026-09-29: "yeah they should be refunded"; 2026-10-22). A run that was killed never
-            # gets here and keeps its whole charge (`cycle` marks a stale RUNNING row FAILED).
+            # measured from its own timestamps (owner, 2026-09-29: "yeah they should be refunded";
+            # 2026-10-22; every worker, owner T2, 2026-11-19). An interrupted run is settled in
+            # `finally` below; only a process killed outright refunds nothing, since nothing
+            # measured when it ended (`cycle` marks its stale RUNNING row FAILED).
             workflow_tasks.settle_compute(database, reservation, started.isoformat(), finished,
                                           "linkedin contact read refused by the provider for usage" if limit
                                           else "linkedin contact read failed; unused tail of a finished run")
     finally:
+        # Interrupted (shutdown, stop): the unused tail still goes back (owner T2, 2026-11-19). A
+        # run settled above already has its credit; a second settle adds nothing.
+        workflow_tasks.give_back_compute(database, reservation, started.isoformat(),
+                                         dt.datetime.now(dt.timezone.utc).isoformat(),
+                                         "linkedin contact read interrupted; unused tail of its reservation")
         if own:
             _settle_session(result)
     return summary

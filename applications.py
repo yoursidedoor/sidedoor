@@ -110,6 +110,14 @@ ROLE_CLOSED_CODE = "ROLE_CLOSED"
 # (declared in the submit prompt; owner's pick Y1 a, 2026-11-14). Submit-time only: a read never stops
 # on it (the read's own already-applied signals were deleted on 2026-09-27). Exact code only.
 ALREADY_APPLIED_CODE = "ALREADY_APPLIED"
+# The code an inspect read returns when the listing's own Apply link leads to a posting for the same
+# employer and role on another URL or ATS that shows a DIFFERENT real requisition id (declared in the
+# inspect prompt; owner's pick R1 a, 2026-11-17, FU11: YC lists Beam's role as CnrHNaM, its Apply link
+# opens Work at a Startup posting 98389). The job is re-recorded under that posting
+# (`identity_reconciliation.rebind_listing_link`), as a placeholder job is on IDENTITY_MISMATCH. Inspect
+# only: a submit session returning it is a stop like any other (`hold_submission_blocker`), never a
+# re-record. Exact code only; not investigable (`application_recovery.RECOVERABLE` leaves it out).
+LISTING_LINK_CODE = "LISTING_LINK_IDENTITY"
 # Pre-arm submit stops that close the job at once, and the close each makes (`access_outcomes.close_plain`).
 PREARM_CLOSES = {ROLE_CLOSED_CODE: "POSTING_CLOSED", ALREADY_APPLIED_CODE: "ALREADY_APPLIED"}
 ACCESS_GIVE_UP_CODE = "ACCESS_BLOCKED_3_TIMES"
@@ -548,6 +556,10 @@ def add_alias(database, alias_role, canonical_key, evidence):
     prior = database.execute("SELECT canonical_key FROM application_aliases WHERE alias_key=?", (alias_key,)).fetchone()
     if prior and prior[0] != canonical_key:
         raise ValueError("Conflicting identity alias")
+    if prior:
+        # Already this job's: recorded by an explicit takeover (`identity_reconciliation.take_over_keys`),
+        # which may move a released job's own key here (owner's picks D1/D2, 2026-11-18); nothing to add.
+        return
     existing = database.execute("SELECT * FROM application_jobs WHERE job_key=?", (alias_key,)).fetchone()
     if existing and alias_key != canonical_key:
         raise ValueError("Existing job identity needs explicit ledger reconciliation, not silent alias replacement")
@@ -3174,11 +3186,13 @@ BLOCKING_FACTS = tuple(field for field in REQUIRED_FACTS if field not in INFORMA
 # them is not reused and every job is read again with one verdict per location option.
 # 2026-11-14: bumped with the declared ROLE_CLOSED code (a closed posting closes the job at the first
 # read), so a read recorded as inconclusive under the old contract does not suppress the next one.
-READ_CONTRACT_REVISION = "inspect-contract-2026-11-14-role-closed-code"
+# 2026-11-17: bumped with the declared LISTING_LINK_IDENTITY code (FU11): a listing whose Apply link leads
+# to the same role under another id is followed instead of ending REQUISITION_MISMATCH.
+READ_CONTRACT_REVISION = "inspect-contract-2026-11-17-listing-link-identity"
 # When READ_CONTRACT_REVISION last changed (at or before its install). Inspect claims made
 # before it were read under a superseded contract and do not count toward the per-scope
 # inspect cap (`application_connection.inspect_scope_start`). Bump both together.
-READ_CONTRACT_REVISION_AT = "2026-11-14T00:00:00+00:00"
+READ_CONTRACT_REVISION_AT = "2026-11-17T00:00:00+00:00"
 # Seven days, deliberately (owner, 2026-09-22, after trying two). This is how long an
 # inconclusive read suppresses the next one. Shortening it treats the symptom: the suppression
 # is keyed on the job's INPUT and cannot see that the reading code changed, so a shorter window
@@ -4545,6 +4559,63 @@ def _waiting_jobs_to_reconcile(database, now, listed):
     return [job for job in rows if job["job_key"] not in listed and _waiting_job_reconciles(database, dict(job))]
 
 
+LISTING_LINK_REFUSED_EVENT = "LISTING_LINK_REFUSED"
+# A copy closed because another job owns the destination is recorded as the same-posting judge records
+# a copy (SAME_POSTING_LINKED, with `basis` telling the two apart), so the Applications page shows which
+# job carries it (`applications_page.closing_reason`) with no page change.
+LISTING_LINK_DUPLICATE_EVENT = "SAME_POSTING_LINKED"
+
+
+def follow_listing_link(database, job, verdict, policy, now):
+    """Act on an inspect read's LISTING_LINK_IDENTITY verdict (owner's pick R1 a, 2026-11-17). Call inside a
+    transaction. Returns what was done: "RECONCILED" (the job now carries the destination's id and URL,
+    queued for its next read there), "DUPLICATE" (another job that applied, may have, or is still open
+    already owns that posting: this job is a copy of it, closed DUPLICATE, nothing submitted; owner's pick
+    D1, 2026-11-18) or "REFUSED" (the verdict could not be honoured, for instance a destination not
+    reached from the listing on file: the job keeps its identity and waits, with the ordinary backoff,
+    for another read)."""
+    import identity_reconciliation
+    try:
+        identity_reconciliation.rebind_listing_link(database, job["job_key"], verdict, now)
+    except identity_reconciliation.PostingOwned as owned:
+        close_as_copy(database, job, owned, now, {"reason": verdict.get("reason"), "verdict": verdict,
+                                                  "basis": "LISTING_LINK_DESTINATION_OWNED"})
+        return "DUPLICATE"
+    except ValueError as error:
+        return _listing_link_refused(database, job, verdict, policy, now, error)
+    return "RECONCILED"
+
+
+def close_as_copy(database, job, owned, now, detail):
+    """Close `job` as a copy of the job that owns its posting (`identity_reconciliation.PostingOwned`):
+    DUPLICATE, nothing submitted, never retried. Call inside a transaction. The next action says what is
+    true of that job (FU11 review I1): it applied, it holds an application already on record (the history
+    gate's copy), its submission may have reached the employer, or it is open and carries the application
+    (owner's pick D1, 2026-11-18). Recorded as SAME_POSTING_LINKED, so the Applications page shows which
+    job carries it; `detail` adds the read's own reason and the `basis`."""
+    import posting_judge
+    existing = database.execute("SELECT state FROM application_jobs WHERE job_key=?", (owned.owner,)).fetchone()
+    state = existing[0] if existing else None
+    hold(database, job, posting_judge.SAME_JOB_BLOCKER, "Same posting as " + owned.owner + (
+         "; that job carries this application" if not owned.applied else
+         "; that job applied to it" if state == "SUBMITTED" else
+         "; an application to it is already on record there" if state == "DUPLICATE" else
+         "; that job may already have applied to it, so this one never applies"), now, "DUPLICATE")
+    event(database, job["job_key"], LISTING_LINK_DUPLICATE_EVENT,
+          dict(detail, same_as=owned.owner, existing_state=state, before_submit=False), now)
+
+
+def _listing_link_refused(database, job, verdict, policy, now, error):
+    """The verdict could not be honoured: the job keeps its identity and reads again after the backoff."""
+    event(database, job["job_key"], LISTING_LINK_REFUSED_EVENT, {"reason": str(error), "verdict": verdict}, now)
+    delays = policy["retry_delays_seconds"]
+    next_at = (dt.datetime.fromisoformat(now) + dt.timedelta(
+        seconds=delays[min(max(job["attempts"], 0), len(delays) - 1)])).isoformat()
+    hold(database, job, LISTING_LINK_CODE, "The read's listing-link verdict could not be used; read the posting again",
+         now, "BLOCKED", next_at)
+    return "REFUSED"
+
+
 def process(database, job, adapter, policy, root, now, clock=None, config=None):
     import application_recovery
     config = config or {}
@@ -4771,6 +4842,14 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         action = (stated.get("next_action") if isinstance(stated.get("next_action"), str) and stated["next_action"].strip()
                   else "The read stopped with " + code + "; act on its saved partial review")
         blocker = dict(stated, code=code, next_action=action)
+        if code == LISTING_LINK_CODE:
+            # The listing's Apply link leads to this job's posting under another id (FU11): the job is
+            # re-recorded there and read again, ends as a copy of the job that already owns that posting,
+            # or, when the verdict cannot be honoured, waits for another read. Before `final`: Python has
+            # a rule for this code, so the read's own verdict on finality is never applied to it.
+            with database:
+                follow_listing_link(database, job, blocker, policy, now)
+            return
         if code in ACCESS_BLOCK_CODES:
             # The job waits on the user or closes (E15.T1); no retry on its own.
             with database:
@@ -5378,8 +5457,9 @@ def cycle(database, config, root, adapter=None, now=None, only=None, should_stop
                      "RECONCILE" if current["state"] in UNCERTAIN else "BLOCKED")
         # Credit back whatever this job's finished browser reservations did not use (owner,
         # 2026-09-22). Runs for a failed job too: `settle_browser_reservations` settles a
-        # reservation once its sessions all committed a result, a failure included (2026-09-29);
-        # only a session that never committed anything keeps its whole charge. Outside the try/except above deliberately - it is
+        # reservation once its sessions all ended: committed a result, a failure included
+        # (2026-09-29), or, never committed, had their lease run out (owner T2, 2026-11-19: the
+        # tail after that goes back too). Outside the try/except above deliberately - it is
         # contractually non-raising, and a compute credit must never decide a job's outcome.
         import workflow_tasks
         # The transaction wraps the SETTLE, not just the event. `settle_browser_reservations`

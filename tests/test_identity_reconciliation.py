@@ -421,3 +421,69 @@ class IdentityReconciliationTests(unittest.TestCase):
         self.assertTrue(self.database.execute(
             "SELECT requisition FROM application_jobs WHERE job_key=?", (key,)).fetchone()[0].startswith("unresolved:"))
         self.assertEqual(self.database.execute("SELECT COUNT(*) FROM application_aliases").fetchone()[0], 0)
+
+
+class PostingHolderRuleTests(unittest.TestCase):
+    """Owner's picks D1/D2 (2026-11-18) on the placeholder path: a job with no id resolved to a posting
+    another job holds. A holder that applied, may have, or is open makes this job its copy (PostingOwned);
+    a holder closed without applying, including one the user rejected or abandoned, hands the posting over.
+    Worked example: a CoreWeave listing with no id resolved to the Greenhouse posting a job the user had
+    rejected on Approvals already held, and every resolution was refused until the claims ran out."""
+    setUp = fixtures.ApplicationEndToEndTests.setUp
+    prepare_browser = IdentityReconciliationTests.prepare_browser
+    identity_state = IdentityReconciliationTests.identity_state
+
+    def holder(self, url, state, blocker=None):
+        with self.database:
+            key = applications.ingest(self.database, dict(fixtures.role(), url=url, requisition_id="known-posting"), fixtures.NOW)
+            self.database.execute("UPDATE application_jobs SET state=?,blocker=? WHERE job_key=?", (state, blocker, key))
+        return key
+
+    def browser_job(self):
+        """A placeholder job found on a listing; the read verified the official posting OFFICIAL."""
+        key, role, evidence = self.prepare_browser()
+        with self.database:
+            self.database.execute("UPDATE application_jobs SET payload=? WHERE job_key=?",
+                                  (json.dumps(dict(role, url=self.LISTING)), key))
+        return key, dict(evidence, official_url=self.OFFICIAL)
+
+    LISTING = "https://listings.example/jobs/view/staff-engineer-4461835364"
+    OFFICIAL = "https://official.example/careers/known-posting"
+
+    def test_a_holder_you_rejected_or_closed_without_applying_hands_the_posting_over(self):
+        for state, blocker in (("ABANDONED", applications.APPLICATION_REJECTED), ("ABANDONED", "ABANDONED_BY_YOU"),
+                               ("INELIGIBLE", None)):
+            with self.subTest(blocker or state):
+                with self.database:
+                    for table in ("application_aliases", "application_jobs", "application_source_keys", "application_events"):
+                        self.database.execute("DELETE FROM " + table)
+                other = self.holder(self.OFFICIAL, state, blocker)
+                key, evidence = self.browser_job()
+                result = identity_reconciliation.reconcile_requisition(self.database, key, "known-posting", evidence, fixtures.NOW)
+                self.assertEqual(result["state"], "IDENTITY_RECONCILED_GATES_UNCHANGED")
+                job = self.database.execute("SELECT * FROM application_jobs WHERE job_key=?", (key,)).fetchone()
+                self.assertEqual((job["state"], job["requisition"]), ("QUEUED", "known-posting"))
+                self.assertEqual(self.database.execute("SELECT state,blocker FROM application_jobs WHERE job_key=?",
+                                                       (other,)).fetchone()[:], (state, blocker))
+                # A later copy found by the official URL is this job now, not the closed one.
+                with self.database:
+                    self.assertEqual(applications.ingest(self.database, dict(fixtures.role(), url=self.OFFICIAL,
+                                                                             requisition_id=""), fixtures.NOW), key)
+                taken = [row[0] for row in self.database.execute(
+                    "SELECT job_key FROM application_events WHERE event='LISTING_LINK_POSTING_TAKEN_OVER' ORDER BY id")]
+                self.assertEqual(sorted(taken), sorted([key, other]))
+
+    def test_a_holder_that_is_open_or_applied_makes_this_job_its_copy(self):
+        for state, blocker, applied in (("QUEUED", None, False), ("SUBMITTED", None, True),
+                                        ("BLOCKED", "SUBMISSION_OUTCOME_UNKNOWN", True)):
+            with self.subTest(state):
+                with self.database:
+                    for table in ("application_aliases", "application_jobs", "application_source_keys", "application_events"):
+                        self.database.execute("DELETE FROM " + table)
+                other = self.holder(self.OFFICIAL, state, blocker)
+                key, evidence = self.browser_job()
+                before = self.identity_state()
+                with self.assertRaises(identity_reconciliation.PostingOwned) as raised:
+                    identity_reconciliation.reconcile_requisition(self.database, key, "known-posting", evidence, fixtures.NOW)
+                self.assertEqual((raised.exception.owner, raised.exception.applied), (other, applied))
+                self.assertEqual(self.identity_state(), before)

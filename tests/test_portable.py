@@ -610,3 +610,72 @@ class PnpmYarnShimTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StayAwakeTests(unittest.TestCase):
+    """R2 (owner, 2026-11-18): the computer stays awake while a job runs AI workers or browser sessions."""
+
+    def test_macos_spawns_caffeinate_for_this_process_and_kills_it(self):
+        from unittest import mock
+        held = mock.Mock()
+        popen = mock.Mock(return_value=held)
+        with mock.patch.object(portable, "WINDOWS", False), mock.patch.object(portable.sys, "platform", "darwin"):
+            with portable.stay_awake(popen=popen):
+                held.kill.assert_not_called()
+        self.assertEqual(popen.call_args.args[0], ["/usr/bin/caffeinate", "-i", "-w", str(portable.os.getpid())])
+        held.kill.assert_called_once()
+
+    def test_windows_sets_and_resets_the_execution_state(self):
+        from unittest import mock
+        kernel = mock.Mock()
+        kernel.SetThreadExecutionState.return_value = 0x80000000
+        with mock.patch.object(portable, "WINDOWS", True), mock.patch.object(portable, "_kernel32", return_value=kernel):
+            with portable.stay_awake():
+                kernel.SetThreadExecutionState.assert_called_once_with(0x80000001)
+        self.assertEqual(kernel.SetThreadExecutionState.call_args.args, (0x80000000,))
+
+    def test_failure_to_keep_awake_never_stops_the_work(self):
+        from unittest import mock
+        ran = []
+        with mock.patch.object(portable, "WINDOWS", False), mock.patch.object(portable.sys, "platform", "darwin"):
+            with portable.stay_awake(popen=mock.Mock(side_effect=FileNotFoundError("no caffeinate"))):
+                ran.append(True)
+        kernel = mock.Mock()
+        kernel.SetThreadExecutionState.return_value = 0
+        with mock.patch.object(portable, "WINDOWS", True), mock.patch.object(portable, "_kernel32", return_value=kernel):
+            with portable.stay_awake():
+                ran.append(True)
+        self.assertEqual(ran, [True, True])
+
+
+class WindowsSleepWatchTests(unittest.TestCase):
+    """Y2 (owner, 2026-11-19): on Windows time.monotonic keeps counting through a hibernation, so the
+    watch compares the wall clock with QueryUnbiasedInterruptTime (100 ns units)."""
+
+    def kernel(self, ticks):
+        class Kernel:
+            def QueryUnbiasedInterruptTime(self, reference):
+                reference._obj.value = ticks[0]
+                return 1
+        return Kernel()
+
+    def test_the_unbiased_clock_measures_a_hibernation(self):
+        ticks = [10 ** 9]
+        wall = [1000.0]
+        with mock.patch.object(portable, "WINDOWS", True), \
+                mock.patch.object(portable, "_kernel32", return_value=self.kernel(ticks)):
+            watch = portable.SleepWatch(wall=lambda: wall[0])
+            wall[0] += 120          # two minutes passed, all of them hibernating
+            ticks[0] += 2 * 10 ** 7  # the unbiased clock moved 2 s
+            self.assertAlmostEqual(watch.slept(), 118, places=3)
+            wall[0] += 5
+            ticks[0] += 5 * 10 ** 7
+            self.assertEqual(watch.slept(), 0)
+
+    def test_a_failing_call_falls_back_to_monotonic(self):
+        kernel = mock.Mock()
+        kernel.QueryUnbiasedInterruptTime.return_value = 0
+        with mock.patch.object(portable, "WINDOWS", True), mock.patch.object(portable, "_kernel32", return_value=kernel):
+            watch = portable.SleepWatch(wall=time.time)
+        self.assertIs(watch.awake, time.monotonic)
+        self.assertEqual(watch.slept(), 0)

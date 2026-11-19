@@ -326,8 +326,21 @@ request.job.requisition:
   page shows no id, continue there and apply there. Never stop in an inspect read over any
   other identity, destination or listing-versus-official-page difference.
 - A real id: the job's own URL (and its form) is its destination as always; a page on
-  another URL or ATS is this job's destination only when it shows that same requisition id (in its text or its URL; letter case alone is not a difference). If it
-  shows a different id or none, it may be another posting: return blocked with code
+  another URL or ATS is this job's destination only when it shows that same requisition id (in its text or its URL; letter case alone is not a difference).
+  One exception (owner, 2026-11-17), in an inspect read only: when you reached that page by
+  following the listing's own Apply link (the Apply button or link on the job's own URL, and
+  nothing else: not a search, not a link you guessed, not a careers page you navigated to
+  yourself), the page is for the same employer and the same role, and it shows a different real
+  requisition id (in its text or its URL), that posting is where this job is applied to: finish
+  the read, then return blocked with code LISTING_LINK_IDENTITY, reporting inside blocked:
+  destination_url (that page's URL as you read it), destination_requisition (the id it shows,
+  verbatim), reached_from (the job's own URL, the listing whose Apply link you followed),
+  employer_matches_expected and role_matches_expected (true only when that page's company and
+  role are this job's, judged as this section defines them below) and reason. The job is
+  re-recorded under that posting before anyone applies, so a later copy of either posting can
+  never be applied to twice. Never return LISTING_LINK_IDENTITY for a page reached any other
+  way, for a different employer or role, or for a page that shows no id. In every other case, if
+  the page shows a different id or none, it may be another posting: return blocked with code
   REQUISITION_MISMATCH naming what you found, and never submit there.
 In an inspect read, otherwise stop only for a real barrier: the role is closed, a login is
 required, human verification as above, or the page cannot be used. When the role is closed (the
@@ -539,7 +552,8 @@ Report official_url as the application page you actually read. In an inspect rea
 listing that leads to the employer's application page for the same role on another URL or
 ATS is the same job under the identity rules above (a placeholder id: always, returning
 IDENTITY_MISMATCH first when that other page shows a real id; a real id: only when the page
-shows that same id). A form inside an embedded frame from another site (an ATS embedded in the
+shows that same id, or, reached from the listing's own Apply link and showing a different real
+id for the same employer and role, LISTING_LINK_IDENTITY first). A form inside an embedded frame from another site (an ATS embedded in the
 careers page) is this posting's form: read it there as usual; the frame's own address is where
 submit fills it (see the submit section when present). Never treat an ATS brand or an old
 identity investigation as fresh form/account verification.
@@ -674,7 +688,9 @@ application page for this role, reached from the listing on file, is this job's
 destination under the identity rules above (owner, 2026-09-30); that is not a changed destination. When
 request.job.requisition is a real id and you are on a page other than the job's own URL
 (or its form) that does not show that same id, STOP before arming with blocked.code
-REQUISITION_MISMATCH and report what you found. When request.job.requisition is a placeholder
+REQUISITION_MISMATCH and report what you found; that holds in a submit even when the listing's
+own Apply link led there (LISTING_LINK_IDENTITY belongs to an inspect read alone: a submit
+session never re-records a job, and a submit returning it is only a stop). When request.job.requisition is a placeholder
 and you are on a page other than the job's own URL (or its form) that shows a real requisition
 id, STOP before arming with blocked.code
 IDENTITY_MISMATCH reporting the URL and id (the job is re-recorded first). Only when a tool or

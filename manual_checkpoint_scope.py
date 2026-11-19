@@ -182,11 +182,12 @@ def run_scenario(mode="fresh_recovery"):
             fixture.clock_base += dt.timedelta(seconds=2 * parallel_research.SESSION_CEILING_SECONDS
                                                + parallel_research.RETRY_MARGIN_SECONDS + 60)
             repeated = fixture.run_research("scope-expired")
-            assert fixture.states(repeated)["AI"]["recovery_state"] == "ABANDONED"
-            assert "deadline exhausted" in fixture.states(repeated)["AI"]["abandonment_reason"]
-            assert not fixture.calls and len(decisions) == decision_count
-            assert fixture.count("worker_compute_reservations") == reservation_count
-            assert json.loads(path.read_text())["deadline_at"] == deadlines["AI"]
+            # R1 (owner, 2026-11-18): a later run gives the resumed industry its own fresh deadline,
+            # so the saved, long-past one never closes it; it re-enters recovery for its failure.
+            reason = fixture.states(repeated)["AI"].get("abandonment_reason") or ""
+            assert "deadline" not in reason.lower() and not reason.startswith("RECOVERY_UNAVAILABLE"), reason
+            assert len(decisions) > decision_count
+            assert json.loads(path.read_text())["deadline_at"] > deadlines["AI"]
         else:
             repeated = fixture.run_research("scope-replay")
             assert repeated["state"] == result["state"]

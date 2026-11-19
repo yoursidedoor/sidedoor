@@ -182,11 +182,13 @@ class TheAICannotBeReached(Case):
                                                               clock=lambda: at)
         day = workflow_tasks.budget_day(at, "America/Los_Angeles")
         packet = {"job": self.job()}
-        for raised, spent in ((executor_error(TimeoutError("t")), 0), (executor_error(text_model.TextModelHTTPError(401, "x")), 0),
-                              (executor_error(text_model.TextModelHTTPError(400, "x")), 30), (ValueError("unusable"), 60)):
+        # Owner T2, 2026-11-19: every call, unreachable or failed, gives back its unused tail; the
+        # clock does not move here, so each 30-second booking comes back whole.
+        for raised in (executor_error(TimeoutError("t")), executor_error(text_model.TextModelHTTPError(401, "x")),
+                       executor_error(text_model.TextModelHTTPError(400, "x")), ValueError("unusable")):
             with mock.patch.object(application_recovery_decision, "decide", side_effect=raised), self.assertRaises(Exception):
                 adapter.recovery_decision(packet)
-            self.assertEqual(workflow_tasks.compute_used(self.db, day), spent, raised)   # only an answered call keeps its 30 seconds
+            self.assertEqual(workflow_tasks.compute_used(self.db, day), 0, raised)
 
     def test_a_bare_timeout_or_dropped_connection_from_any_route_is_unreachable_too(self):
         for error in (TimeoutError("Research attempt time budget exhausted"), ConnectionResetError("reset")):

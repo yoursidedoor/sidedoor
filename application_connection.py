@@ -266,7 +266,9 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
         if self.coordinator_cap_reached(job_key):
             raise RuntimeError(COORDINATOR_CAP_CODE)
         self.last_reservation = None
+        booked_at = self.clock()
         self.reserve(1, job_key, seconds_per_operation=30, purpose="orchestrator_recovery")
+        booked = self.last_reservation
         try:
             # The coordinator sees the whole raw résumé text saved at upload (owner, 2026-10-21, E4.T2).
             try:
@@ -294,6 +296,13 @@ class HostedDesktopAdapter(desktop_adapter.DesktopAdapter):
                 self.provider_waited(job_key, limit.detail(), self.clock(), purpose="orchestrator_recovery",
                                      artifacts=getattr(error, "artifacts", None))
             raise desktop_adapter.ProviderUsageWait("coordinator:" + job_key, limit.next_at) from error
+        finally:
+            # Answered, failed or interrupted: the unused tail of the 30-second booking goes back,
+            # measured from the booking to now (owner T2, 2026-11-19). A call with no answer was
+            # already credited whole above; a credit is recorded once, so this adds nothing then.
+            if booked:
+                workflow_tasks.give_back_compute(self.database, booked, booked_at, self.clock(),
+                                                 "coordinator call ended; unused tail of its reservation")
 
     def prepare_submission(self, job):
         if self.prepaid.get(job["job_key"], 0) < SUBMIT_OPERATIONS:

@@ -955,7 +955,12 @@ class ParallelResearchTests(unittest.TestCase):
         self.assertTrue(all(state["discovery_limit"] == 5 for state in result["industries"]))
         self.assertEqual(result["company_usage"], 40)
 
-    def test_compute_ceiling_blocks_new_phases_without_refunding_completed_discovery(self):
+    def test_compute_ceiling_blocks_new_phases_when_sessions_use_their_whole_booking(self):
+        # Every session here uses its whole booking, so nothing comes back when it ends (the
+        # immediate refunds of owner T1/T2, 2026-11-19, are tested in test_parallel_research).
+        whole = patch.object(parallel_research.workflow_tasks, "refund_compute", return_value=0)
+        whole.start()
+        self.addCleanup(whole.stop)
         # Compute arithmetic below is written in 120-second sessions; the session sizes themselves
         # (300 s discovery, 120 + 1.5 x slow end x companies) are tested in test_parallel_research.
         for name, value in (("DISCOVERY_SECONDS", 120), ("qualification_seconds", lambda database, companies: 120)):
@@ -1108,9 +1113,320 @@ class ParallelResearchTests(unittest.TestCase):
 
     def test_expired_deadline_launches_no_workers(self):
         result = self.run_research(deadline=time.monotonic() - 1)
-        self.assertEqual(result["state"], "FAILED")
+        # R1 (owner, 2026-11-18): a passed deadline is a wait for the next run, never a failure.
+        self.assertEqual(result["state"], "PARTIAL")
+        self.assertIs(result["compute_wait"], True)
+        self.assertEqual(result["abandoned_industries"], [])
+        self.assertTrue(all(state["compute_wait"]["reason"] == parallel_research.DEADLINE_WAIT
+                            for state in result["industries"]))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.count("worker_compute_reservations"), 0)
+
+    def run_discovery_tail(self, hook):
+        """One run with each industry's first session under `hook`, its discovery booked at the full
+        900 s (owner T1). Returns the result, the target, its refunds by sequence and what the
+        target's qualification found refunded when it reserved."""
+        target = self.industries[0]
+        self.worker_hook = lambda industry, phase: hook(industry, phase) if industry == target else None
+        seen = {}
+        original = workflow_tasks.reserve_compute
+
+        def reserve(database, identity, *args, **kwargs):
+            if ":" + parallel_research._label(target) + ":" in identity and not identity.endswith(":1"):
+                seen[identity] = database.execute("SELECT COALESCE(SUM(seconds),0) FROM worker_compute_refunds "
+                                                  "WHERE action_id LIKE ?", (identity.rsplit(":", 1)[0] + ":%",)).fetchone()[0]
+            return original(database, identity, *args, **kwargs)
+        with patch.object(parallel_research.workflow_tasks, "reserve_compute", side_effect=reserve):
+            result = parallel_research.run(self.root, self.config, self.database, self.pipeline, {}, "tail",
+                                           runtime=self.runtime, deadline=time.monotonic() + 3000)
+        label = ":" + parallel_research._label(target) + ":"
+        refunds = {int(row[0].rsplit(":", 1)[1]): row[1] for row in self.database.execute(
+            "SELECT action_id,seconds FROM worker_compute_refunds WHERE action_id LIKE ?", ("%" + label + "%",))}
+        booked = {int(row[0].rsplit(":", 1)[1]): row[1] for row in self.database.execute(
+            "SELECT action_id,seconds FROM worker_compute_reservations WHERE action_id LIKE ?", ("%" + label + "%",))}
+        return result, target, refunds, booked, seen
+
+    def advance(self, seconds):
+        with self.lock:
+            self.clock_base += dt.timedelta(seconds=seconds)
+
+    def test_a_clean_discovery_gives_back_its_tail_before_the_next_reservation(self):
+        """Owner T1, 2026-11-19: discovery is booked at 900 s; one that finishes in 30 s gives ~870 s
+        back at once, before the qualification that follows reserves."""
+        self.assertEqual(parallel_research.DISCOVERY_SECONDS, 900)
+        self.assertEqual(parallel_research.initial_deadline_seconds(), 2100)
+        done = set()
+
+        def hook(industry, phase):
+            if phase == "discovery" and not done:
+                done.add(phase)
+                self.advance(30)
+        result, target, refunds, booked, seen = self.run_discovery_tail(hook)
+        self.assertEqual(booked[1], 900)
+        self.assertTrue(860 <= refunds[1] <= 871, refunds)
+        self.assertTrue(seen and min(seen.values()) >= refunds[1], "refunded before the qualification reserved")
+        self.assertEqual(self.states(result)[target]["compute_refunded_seconds"], sum(refunds.values()))
+
+    def test_a_failed_discovery_gives_back_its_tail_and_a_timed_out_one_nothing(self):
+        """Owner T2, 2026-11-19: a session that fails before its limit returns its measured tail; one
+        stopped at its limit has none."""
+        failed = set()
+
+        def failing(industry, phase):
+            if phase == "discovery" and not failed:
+                failed.add(phase)
+                self.advance(40)
+                raise RuntimeError("fixture discovery failure")
+        _, _, refunds, booked, _ = self.run_discovery_tail(failing)
+        self.assertEqual(booked[1], 900)
+        self.assertTrue(850 <= refunds[1] <= 861, refunds)
+
+    def test_a_timed_out_discovery_gives_back_nothing(self):
+        timed = set()
+
+        def timing_out(industry, phase):
+            if phase == "discovery" and not timed:
+                timed.add(phase)
+                raise subprocess.TimeoutExpired("fixture", 900)
+        _, _, refunds, booked, _ = self.run_discovery_tail(timing_out)
+        self.assertIn(1, booked)
+        self.assertNotIn(1, refunds)
+
+    def test_a_slept_through_discovery_and_its_rerun_are_each_settled_once(self):
+        slept = set()
+
+        def sleeping(industry, phase):
+            if phase == "discovery" and not slept:
+                slept.add(phase)
+                self.advance(92 * 60)
+                raise parallel_research.portable.SleptThrough(92 * 60)
+        result, target, refunds, booked, _ = self.run_discovery_tail(sleeping)
+        state = self.states(result)[target]
+        self.assertEqual(state["state"], "COMPLETE")
+        self.assertTrue(set(refunds) <= set(booked))
+        self.assertEqual(state.get("compute_refunded_seconds", 0), sum(refunds.values()))
+        self.assertTrue(800 <= refunds[2] <= 900, refunds)   # the re-run's own tail, once
+
+    def test_recovery_after_the_deadline_passed_waits_and_the_next_run_renews_the_deadline(self):
+        """The 2026-11-18 incident: recovery's reserve() met a deadline 80 minutes in the past and
+        every industry was abandoned. Now it waits; the next run gets a fresh deadline and recovers."""
+        packets = []
+        self.runtime.research_recovery_methods = lambda root, config: {"public_search": "fixture"}
+        self.runtime.research_recovery_decision = lambda root, config, packet, timeout: packets.append(
+            (packet, self.utcnow())) or {"action": "ABANDON", "reason": "fixture decision", "method": "",
+                                         "instructions": "", "progress": False}
+        failing = {"on": True}
+        target = self.industries[0]
+
+        def hook(industry, phase):
+            if industry == target and phase == "qualification" and failing["on"]:
+                with self.lock:
+                    self.clock_base += dt.timedelta(hours=3)   # the wall clock is far past the deadline
+                raise RuntimeError("fixture session failure")
+        self.worker_hook = hook
+        with patch.object(parallel_research.portable, "SLEEP_DRIFT_SECONDS", 10 ** 9):   # not a sleep
+            first = self.run_research()
+        self.assertEqual(first["abandoned_industries"], [])
+        state = self.states(first)[target]
+        self.assertEqual(state["state"], "COMPUTE_WAIT")
+        self.assertEqual(state["compute_wait"]["reason"], parallel_research.DEADLINE_WAIT)
+        self.assertEqual(state["compute_wait"]["resume"], "RECOVERY")
+        self.assertEqual(len(state["failures"]), 1)
+        self.assertEqual(state["recovery_decisions"], [])
+        self.assertEqual(state["compute_wait"]["backoff_seconds"], 300)   # B2: a deadline wait, 5 min
+        self.assertFalse(json.loads(self.cache_path(target).read_text()).get("next_run_streak"))
+        for other in first["industries"]:   # the rest finished or wait for the next run; none failed
+            self.assertIn(other["state"], ("COMPLETE", "COMPUTE_WAIT"))
+        self.assertEqual(packets, [])
+        failing["on"] = False
+        with self.lock:
+            self.clock_base += dt.timedelta(minutes=6)   # its 5-minute retry has come (B1)
+        self.run_research(attempt="second")
+        self.assertEqual(len(packets), 1, "the next run re-enters recovery for the waiting industry")
+        for packet, at in packets:
+            self.assertGreater(dt.datetime.fromisoformat(packet["deadline_at"]), dt.datetime.fromisoformat(at))
+            self.assertEqual(len(packet["failures"]), 1)
+
+    def test_a_day_change_during_recovery_reads_as_interrupted_not_failed(self):
+        """W4 (owner, 2026-11-19): the research day ends while an industry is in recovery: it is closed
+        for that day as interrupted, never abandoned, and the Failures page shows no cause for the run."""
+        import failures_page
+        target = self.industries[0]
+        self.runtime.research_recovery_methods = lambda root, config: {"public_search": "fixture"}
+        self.runtime.research_recovery_decision = lambda root, config, packet, timeout: {
+            "action": "RETRY", "method": "public_search", "instructions": "x", "reason": "x", "progress": True}
+
+        def hook(industry, phase):
+            if industry == target and phase == "discovery":
+                with self.lock:
+                    self.clock_base += dt.timedelta(days=1)   # the next research day has begun
+                raise RuntimeError("fixture failure")
+        self.worker_hook = hook
+        with patch.object(parallel_research.portable, "SLEEP_DRIFT_SECONDS", 10 ** 9):   # not a sleep
+            result = self.run_research()
+        state = self.states(result)[target]
+        self.assertEqual(state["state"], "INTERRUPTED")
+        self.assertEqual(state["interruption_reason"], parallel_research.DAY_CHANGED)
+        self.assertNotIn("abandonment_reason", state)
+        self.assertEqual(result["abandoned_industries"], [])
+        self.assertEqual(result["state"], "INTERRUPTED")
+        self.assertEqual(state["recovery_decisions"], [])
+        self.assertIn("research day ended", failures_page.FAILURE_REASONS["SERVICE_DAY_CHANGED"]
+                      if hasattr(failures_page, "FAILURE_REASONS") else
+                      next(value for value in vars(failures_page).values()
+                           if isinstance(value, dict) and "SERVICE_DAY_CHANGED" in value)["SERVICE_DAY_CHANGED"])
+
+    def test_failed_coordinator_calls_back_off_and_progress_resets_it(self):
+        """N1 (owner, 2026-11-19): five failed calls in a row retry after 5, 10, 20, 40 and 80 minutes;
+        an answered decision starts it again at 5. N4: the stored entry is short."""
+        target = self.industries[0]
+        self.runtime.research_recovery_methods = lambda root, config: {"public_search": "fixture"}
+        answer = {"next": False}
+
+        def coordinator(root, config, packet, timeout):
+            if answer["next"]:
+                answer["next"] = False
+                return {"action": "RETRY", "method": "public_search", "instructions": "x", "reason": "x", "progress": True}
+            raise ConnectionError("fixture: unreachable")
+        self.runtime.research_recovery_decision = coordinator
+
+        def hook(industry, phase):
+            if industry == target and phase == "discovery":
+                raise RuntimeError("fixture discovery failure")
+        self.worker_hook = hook
+        backoffs = []
+        for number in range(6):
+            answer["next"] = number == 5
+            if backoffs:   # B1: the next run comes once this industry's own back-off has passed
+                self.clock_base += dt.timedelta(minutes=backoffs[-1], seconds=30)
+            result = self.run_research(attempt="run-%d" % number)
+            state = self.states(result)[target]
+            self.assertEqual(state["state"], "COMPUTE_WAIT")
+            wait = state["compute_wait"]
+            backoffs.append(wait["backoff_seconds"] // 60)
+            retry = dt.datetime.fromisoformat(wait["next_retry_at"]) - dt.datetime.fromisoformat(self.utcnow())
+            self.assertTrue(abs(retry.total_seconds() - wait["backoff_seconds"]) < 30, retry)
+            self.assertEqual(result["next_retry_at"], wait["next_retry_at"])
+            self.assertNotIn("packet", wait["refused_recovery_decision"])
+        self.assertEqual(backoffs, [5, 10, 20, 40, 80, 5])
+
+    def test_an_industry_still_backing_off_is_not_resumed_when_another_is_due(self):
+        """B1 (owner, 2026-11-19): A's failed calls have backed off to 80 minutes; B's 5-minute wait is
+        due. A run then takes B and leaves A waiting with its records, and the day retries at the
+        earliest industry's time."""
+        first, second = self.industries[0], self.industries[1]
+        self.runtime.research_recovery_methods = lambda root, config: {"public_search": "fixture"}
+        calls = []
+
+        def coordinator(root, config, packet, timeout):
+            calls.append(packet["industry"])
+            raise ConnectionError("fixture: unreachable")
+        self.runtime.research_recovery_decision = coordinator
+        self.worker_hook = lambda industry, phase: (_ for _ in ()).throw(RuntimeError("fixture")) \
+            if industry == first and phase == "discovery" else None
+        backoff = 0
+        for number in range(5):
+            self.clock_base += dt.timedelta(minutes=backoff, seconds=30)
+            result = self.run_research(attempt="a-%d" % number)
+            backoff = self.states(result)[first]["compute_wait"]["backoff_seconds"] // 60
+        self.assertEqual(backoff, 80)
+        held = self.states(result)[first]["compute_wait"]
+        # B is put in a deadline wait that is already due.
+        path = self.cache_path(second)
+        cache = json.loads(path.read_text())
+        due = (dt.datetime.fromisoformat(self.utcnow()) - dt.timedelta(minutes=1)).isoformat()
+        cache["result"].update(state="COMPUTE_WAIT", compute_wait={
+            "reason": parallel_research.DEADLINE_WAIT, "resume": "RESEARCH", "next_retry_at": due})
+        path.write_text(json.dumps(cache))
+        calls.clear()
+        self.clock_base += dt.timedelta(minutes=6)
+        result = self.run_research(attempt="b")
+        self.assertEqual(calls, [], "A was not resumed: its own back-off has not passed")
+        state = self.states(result)[first]
+        self.assertEqual((state["state"], state["compute_wait"]["next_retry_at"]), ("COMPUTE_WAIT", held["next_retry_at"]))
+        self.assertEqual(len(state["failures"]), 1)
+        self.assertNotEqual(self.states(result)[second]["state"], "COMPUTE_WAIT")
+        self.assertEqual(result["next_retry_at"], held["next_retry_at"])
+
+        # Review of B1: A's time comes while a long run for B is going; the day's next retry is
+        # never already past (a past one made the day spend an investigation try). B waits on a failed
+        # recovery call that is due; its coordinator call takes 3 hours and fails again.
+        cache = json.loads(path.read_text())
+        cache["failures"] = [{"action_id": "b", "stage": "discovery", "error_class": "RuntimeError",
+                              "diagnostic": "fixture", "observed_at": self.utcnow(), "attempt": 1}]
+        cache["result"].update(state="COMPUTE_WAIT", compute_wait={
+            "reason": parallel_research.RECOVERY_CALL_WAIT, "resume": "RECOVERY",
+            "next_retry_at": (dt.datetime.fromisoformat(self.utcnow()) - dt.timedelta(minutes=1)).isoformat()})
+        path.write_text(json.dumps(cache))
+
+        def slow_failing_call(root, config, packet, timeout):
+            calls.append(packet["industry"])
+            self.clock_base += dt.timedelta(hours=3)
+            raise ConnectionError("fixture: unreachable")
+        self.runtime.research_recovery_decision = slow_failing_call
+        calls.clear()
+        result = self.run_research(attempt="c")
+        self.assertEqual(calls, [second])
+        now = dt.datetime.fromisoformat(self.utcnow())
+        self.assertGreater(dt.datetime.fromisoformat(result["next_retry_at"]), now)
+        self.assertGreater(dt.datetime.fromisoformat(self.states(result)[first]["compute_wait"]["next_retry_at"]), now)
+
+    def test_a_refund_that_cannot_be_made_never_stops_the_run(self):
+        """Y4 (owner, 2026-11-19): e.g. a clock stepped backwards makes the refund window invalid."""
+        with patch.object(parallel_research.workflow_tasks, "refund_compute",
+                          side_effect=ValueError("Compute refunds require a measured window")):
+            result = self.run_research()
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertFalse(any(state.get("compute_refunded_seconds") for state in result["industries"]))
+
+    def test_a_failed_coordinator_call_waits_and_is_not_a_spent_decision(self):
+        """W1 (owner, 2026-11-19): the coordinator's call failing is a wait; a later run asks again."""
+        target = self.industries[0]
+        answers = []
+        self.runtime.research_recovery_methods = lambda root, config: {"public_search": "fixture"}
+
+        def unreachable(root, config, packet, timeout):
+            answers.append(packet)
+            raise ConnectionError("fixture: the coordinator could not be reached")
+        self.runtime.research_recovery_decision = unreachable
+        self.worker_hook = lambda industry, phase: (_ for _ in ()).throw(RuntimeError("fixture failure")) \
+            if industry == target and phase == "discovery" else None
+        first = self.run_research()
+        state = self.states(first)[target]
+        self.assertEqual(state["state"], "COMPUTE_WAIT")
+        self.assertEqual(state["compute_wait"]["reason"], parallel_research.RECOVERY_CALL_WAIT)
+        self.assertEqual(state["compute_wait"]["resume"], "RECOVERY")
+        self.assertEqual(state["recovery_decisions"], [])
+        self.assertEqual(len(state["failures"]), 1)
+        self.assertNotIn(target, first["abandoned_industries"])
+        self.worker_hook = lambda industry, phase: None
+        self.runtime.research_recovery_decision = lambda root, config, packet, timeout: answers.append(packet) or {
+            "action": "RETRY", "method": "public_search", "instructions": "Try again", "reason": "fixture", "progress": True}
+        self.clock_base += dt.timedelta(minutes=6)   # its 5-minute retry has come (B1)
+        second = self.run_research(attempt="second")
+        self.assertEqual(answers[-1]["decision_number"], 1, "the failed call was not a spent decision")
+        self.assertEqual(self.states(second)[target]["state"], "COMPLETE")
+
+    def test_a_sleep_moves_the_deadline_and_reruns_the_session_once_without_a_failure(self):
+        """R2: the computer slept 92 minutes during a discovery session. The wall clock jumped while the
+        monotonic one did not: the deadline moves with it and the session runs once more."""
+        target = self.industries[0]
+        slept = {"done": False}
+
+        def hook(industry, phase):
+            if industry == target and phase == "discovery" and not slept["done"]:
+                slept["done"] = True
+                with self.lock:
+                    self.clock_base += dt.timedelta(minutes=92)
+                raise parallel_research.portable.SleptThrough(92 * 60)
+        self.worker_hook = hook
+        result = self.run_research()
+        state = self.states(result)[target]
+        self.assertEqual(state["state"], "COMPLETE")
+        self.assertEqual(state["failures"], [])
+        self.assertEqual(state["recovery_decisions"], [])
+        self.assertEqual([entry["phase"] for entry in state["sleep_interruptions"]], ["discovery"])
+        self.assertEqual(self.calls.count((target, "discovery")), 2)
 
     def test_a_persistence_error_is_recorded_and_never_stops_the_other_industries(self):
         """Owner, 2026-09-23: "Fix 6. Should never exist. gracefully handle the file writing error."

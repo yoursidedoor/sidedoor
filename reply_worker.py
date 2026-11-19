@@ -1382,6 +1382,8 @@ def cycle(root, database, config, now=None):
         handoff = None
         failure = None
         reserved_at = None
+        # A retry that would reuse an already refunded booking books a numbered successor (owner T2, 2026-11-19).
+        booking = workflow_tasks.unsettled_booking(database, "reply:" + task["task_id"] + ":" + str(attempt))
         feedback = None
         tools = {"root": str(root), "task_id": task["task_id"], "calls": []}
         try:
@@ -1399,7 +1401,7 @@ def cycle(root, database, config, now=None):
             remaining = (workflow_tasks.instant(claim["lease_until"]) - workflow_tasks.instant(current())).total_seconds()
             if remaining < timeout + 5:
                 raise Held("CLASSIFICATION_DEADLINE_TOO_CLOSE")
-            if not workflow_tasks.reserve_compute(database, "reply:" + task["task_id"] + ":" + str(attempt),
+            if not workflow_tasks.reserve_compute(database, booking,
                                                    stamp, timeout, config.get("timezone", "America/Los_Angeles"), budget):
                 raise Held("DAILY_COMPUTE_BUDGET_EXHAUSTED", retry=True)
             database.commit()
@@ -1423,6 +1425,19 @@ def cycle(root, database, config, now=None):
             failure = error
         except Exception:
             failure = Held("CLASSIFICATION_LOCAL_VALIDATION_FAILED")
+        except BaseException:
+            if reserved_at is not None:   # interrupted outright: the tail still goes back (owner T2, 2026-11-19)
+                workflow_tasks.give_back_compute(database, booking, reserved_at, current(),
+                                                 "reply classification interrupted; unused tail of its reservation")
+            raise
+        if reserved_at is not None:
+            # Completed, failed (error, unreadable answer) or interrupted: the unused tail goes back
+            # now, measured from the booking, not from `stamp` (re-read after the call, which credited
+            # nearly the whole booking back, 2026-10-22). Owner T2, 2026-11-19: a failure no longer
+            # keeps its charge; a call that hit its timeout credits ~0.
+            workflow_tasks.give_back_compute(database, booking, reserved_at, current(),
+                                             "reply classification " + ("ended " + failure.code if failure else "completed")
+                                             + "; unused tail of its reservation")
         interrupted = failure is not None and failure.code == "CLASSIFICATION_INTERRUPTED"
         stamp = current()
         if workflow_tasks.instant(stamp) >= workflow_tasks.instant(claim["lease_until"]):
@@ -1477,11 +1492,6 @@ def cycle(root, database, config, now=None):
                     state = workflow_tasks.compute_wait(database, task["task_id"], claim["token"], stamp,
                                                         reset.astimezone(dt.timezone.utc).isoformat(), failure.code, result)
                 else:
-                    # Measured from the booking, not from `stamp` (re-read after the call, which
-                    # credited nearly the whole booking back, 2026-10-22). A failure keeps its charge.
-                    if status == "COMPLETE" and reserved_at is not None:
-                        workflow_tasks.settle_compute(database, "reply:" + task["task_id"] + ":" + str(attempt),
-                                                      reserved_at, current(), "reply classification completed; shared daily pool: unused tail of a cleanly completed reservation")
                     state = workflow_tasks.finish(database, task["task_id"], claim["token"], stamp, result, evidence,
                                                   status=status, blocker=blocker,
                                                   next_action=handoff["required_next_action"] if handoff and not failure

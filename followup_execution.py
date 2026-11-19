@@ -935,6 +935,11 @@ def type_fit_turn(root, database, config, adapter, row, action, proof, now=None,
         swapped = database.execute("SELECT * FROM outreach_actions WHERE action_id=?", (action["action_id"],)).fetchone()
     except Exception as error:
         return unused(error.code if isinstance(error, reply_worker.Held) else type(error).__name__)
+    except BaseException:
+        if reservation:   # interrupted: the unused tail still goes back (owner T2, 2026-11-19)
+            workflow_tasks.give_back_compute(database, reservation, current.isoformat(), _now(None).isoformat(),
+                                             "followup type-fit rewrite interrupted; unused tail of its reservation")
+        raise
     try:
         with database:
             workflow_tasks.settle_compute(database, reservation, current.isoformat(), _now(None).isoformat(),
@@ -1048,7 +1053,8 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
                 claim = None
                 continue
             started += 1
-            followup_reservation = "followup:" + task_id + ":" + str(task["attempts"] + 1)
+            # A retry that would reuse an already refunded booking books a numbered successor (owner T2, 2026-11-19).
+            followup_reservation = workflow_tasks.unsettled_booking(database, "followup:" + task_id + ":" + str(task["attempts"] + 1))
             followup_reserved_at = current.isoformat()
             with database:
                 reserved = workflow_tasks.reserve_compute(database, followup_reservation,
@@ -1088,15 +1094,17 @@ def promote(root, database, config, adapter, *, candidates=None, execute=None, n
                 # failed rewrite try), and that read is parked at INVALID_PROOF. The rewrite is a new
                 # text with its own writer output: its inspection starts again.
                 outreach.resume_read(database, action_id, "INSPECTION", current, new_text=True)
-        except (ValueError, KeyError, TypeError, IndexError, OSError, TimeoutError, reply_worker.Held) as error:
+        except BaseException as error:
+            if followup_reservation:
+                # Failed (any error) or interrupted: the unused tail goes back (owner, 2026-09-29;
+                # every failure and interruption, owner T2, 2026-11-19). An already settled
+                # reservation keeps its first credit.
+                workflow_tasks.give_back_compute(database, followup_reservation, followup_reserved_at, _now(None).isoformat(),
+                                                 "followup judgment ended " + type(error).__name__ + "; unused tail of its reservation")
+            if not isinstance(error, (ValueError, KeyError, TypeError, IndexError, OSError, TimeoutError, reply_worker.Held)):
+                raise
             if item not in items:
                 items.append(item)
-            if followup_reservation:
-                # The unused tail of a failed attempt is refunded too (owner, 2026-09-29); an
-                # already settled reservation credits 0.
-                with database:
-                    workflow_tasks.settle_compute(database, followup_reservation, followup_reserved_at,
-                                                  _now(None).isoformat(), "followup judgment failed; shared daily pool: unused tail of a failed attempt")
             item.update(state="HELD", blocker=error.code if isinstance(error, reply_worker.Held) else
                         str(error) if isinstance(error, ValueError) else type(error).__name__)
             provider = provider_limits.wait_of(error)
@@ -1264,11 +1272,14 @@ class FollowupAdapter(reply_execution.Adapter):
         reference = outreach_agent.audit(self.database, audit_id, phase, "OBSERVATION", now.isoformat(),
             {"packet": packet, "original_observation": original, "source_sha256": outreach_agent.digest(packet),
              "provenance": provenance})
+        # A retry that would reuse an already refunded booking books a numbered successor (owner T2, 2026-11-19).
+        booking, booked = workflow_tasks.unsettled_booking(self.database, "outreach-ai:" + reference), False
         try:
             with self.database:
-                if not workflow_tasks.reserve_compute(self.database, "outreach-ai:" + reference, now.isoformat(), timeout,
+                if not workflow_tasks.reserve_compute(self.database, booking, now.isoformat(), timeout,
                         config.get("timezone", "America/Los_Angeles"), config.get("daily_compute_seconds", 10800)):
                     raise outreach_agent.SharedBudgetExhausted(config, now)
+            booked = True
             raw = self.text_execute("followup_send_judge")(config, prompt, schema, timeout)
             output_ref = outreach_agent.audit(self.database, audit_id, phase, "RAW_OUTPUT", now.isoformat(),
                                                {"observation_id": reference, "output": raw})
@@ -1277,11 +1288,15 @@ class FollowupAdapter(reply_execution.Adapter):
             _require(saved and json.loads(saved[0]) == side.get("queued", action), "FOLLOWUP_ACTION_CHANGED_DURING_JUDGMENT")
             outreach_agent.audit(self.database, audit_id, phase, "DECISION", now.isoformat(),
                 {"observation_id": reference, "output_ref": output_ref, "decision": decision})
-            with self.database:
-                workflow_tasks.settle_compute(self.database, "outreach-ai:" + reference, now.isoformat(),
-                                              _now(None).isoformat(), "followup judgment completed; shared daily pool: unused tail of a cleanly completed reservation")
+            workflow_tasks.give_back_compute(self.database, booking, now.isoformat(), _now(None).isoformat(),
+                                             "followup judgment completed; unused tail of its reservation")
             return observation, packet["direct_history"], decision, reference
-        except Exception as error:
+        except BaseException as error:
+            if booked:   # failed or interrupted: the unused tail goes back too (owner T2, 2026-11-19)
+                workflow_tasks.give_back_compute(self.database, booking, now.isoformat(), _now(None).isoformat(),
+                                                 "followup judgment ended " + type(error).__name__ + "; unused tail of its reservation")
+            if not isinstance(error, Exception):
+                raise
             outreach_agent.audit(self.database, audit_id, phase, "FAILURE", now.isoformat(),
                                   {"observation_id": reference, "error_type": type(error).__name__,
                                    **({"executor": reply_worker.executor_detail(error)} if reply_worker.executor_detail(error) else {})})

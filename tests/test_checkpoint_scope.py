@@ -197,7 +197,7 @@ class CheckpointScopeTests(unittest.TestCase):
             self.assertEqual("COMPLETE", result["state"])
             self.assertEqual(1, len(decisions))
             self.assertIn("SAVED DOMAIN IDENTITY CONFLICT", decisions[0]["failure"]["prior_result"]["saved_result_excerpt"])
-            self.assertEqual(deadline, json.loads(path.read_text())["deadline_at"])
+            self.assertNotEqual(deadline, json.loads(path.read_text())["deadline_at"])   # R1: this run's deadline
             self.assertEqual([], fixture.calls)
             manual.verify_preserved(fixture, prior, preserved)
         finally:

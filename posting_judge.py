@@ -260,23 +260,17 @@ def cycle(root, database, config, now=None, executor=None, runtime=None):
             waited = provider_limits.wait_of(error)
         else:
             waited = None
-        finished = dt.datetime.now(dt.timezone.utc).isoformat()
+        finally:
+            # Judged, failed, waited or interrupted: the unused tail goes back now (owner T2, 2026-11-19).
+            finished = dt.datetime.now(dt.timezone.utc).isoformat()
+            workflow_tasks.give_back_compute(database, action, started.isoformat(), finished, "POSTING_JUDGMENT_FINISHED")
         if waited:
             # A provider wait (OpenRouter out of credit, 2026-10-23) is not a try: nothing is
             # recorded against the evidence, and the rest waits for the next cycle.
-            with database:
-                try:
-                    workflow_tasks.refund_compute(database, action, started.isoformat(), finished, finished, "POSTING_JUDGMENT_FINISHED")
-                except ValueError:
-                    pass
             results.append({"evidence_id": value["evidence_id"], "job_key": value["job_key"], "state": provider_limits.CODE,
                             "verdict": None})
             break
         with database:
-            try:
-                workflow_tasks.refund_compute(database, action, started.isoformat(), finished, finished, "POSTING_JUDGMENT_FINISHED")
-            except ValueError:
-                pass
             database.execute("INSERT INTO posting_judgment_attempts VALUES (?,?,?,?)",
                              (value["evidence_id"], digest, finished, outcome))
             if judged:
@@ -467,12 +461,11 @@ def same_job(root, database, config, job, now, executor=None, runtime=None, befo
         waited = provider_limits.wait_of(error)
     else:
         waited = None
-    finished = dt.datetime.now(dt.timezone.utc).isoformat()
+    finally:
+        # Judged, failed, waited or interrupted: the unused tail goes back now (owner T2, 2026-11-19).
+        finished = dt.datetime.now(dt.timezone.utc).isoformat()
+        workflow_tasks.give_back_compute(database, action, started.isoformat(), finished, "SAME_JOB_JUDGMENT_FINISHED")
     with database:
-        try:
-            workflow_tasks.refund_compute(database, action, started.isoformat(), finished, finished, "SAME_JOB_JUDGMENT_FINISHED")
-        except ValueError:
-            pass
         if waited:   # a provider wait spends none of the day's MAX_ATTEMPTS (2026-10-23)
             return None
         database.execute("INSERT INTO same_job_attempts VALUES (?,?,?,?)", (job["job_key"], digest, finished, outcome))

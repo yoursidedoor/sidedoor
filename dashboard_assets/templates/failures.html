@@ -37,6 +37,7 @@
   {% endif %}
   {% if f.log_href and not (f.reasons and f.reasons[0].log_href == f.log_href) %}<p class="fail-log-link"><a href="{{ f.log_href }}">See its log</a></p>{% endif %}
   {% if f.fix %}<a class="button button-quiet fail-fix" href="{{ f.fix.href }}">{{ f.fix.label }}</a>{% endif %}
+  {% if f.details_href %}<a class="button button-quiet fail-details-download" href="{{ f.details_href }}">Download details</a>{% endif %}
   {% if f.detail %}<details class="fail-detail"><summary>Technical details</summary><code>{{ f.detail }}</code></details>{% endif %}
   {% if f.log %}<details class="fail-detail" open><summary>The end of its error log</summary><pre class="log-lines">{% for line in f.log %}{{ line }}
 {% endfor %}</pre></details>{% endif %}
@@ -170,7 +171,21 @@
     </label>
     <button class="button" type="submit">Show</button>
   </form>
-  <p><a class="button button-quiet" href="/failures/logs.txt" download>Download for a support issue</a></p>
+  <p><a class="button button-quiet" href="/failures/support.zip">Download for a support issue</a>
+    <span class="muted">A .zip of every log and report from the last 2 days, with saved keys removed. Send it to support when asked.</span></p>
+  <h3 id="files-title">Files</h3>
+  {% if log_files %}
+  <table class="metrics-table log-files-table">
+    <thead><tr><th scope="col">Name</th><th scope="col">When</th><th scope="col">Part</th><th scope="col">Kind</th><th scope="col"><span class="visually-hidden">Download</span></th></tr></thead>
+    <tbody>
+      {% for file in log_files %}
+      <tr><td>{{ file.label }}</td><td>{{ file.when }}</td><td>{{ file.component_label }}</td><td>{{ file.level_label }}</td>
+        <td><a class="button button-quiet" href="/failures/file?id={{ file.id | urlencode }}" aria-label="Download {{ file.label }}">Download</a></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if log_files_paging.pages > 1 %}{{ pager(log_files_paging, "files-title", "Files", "log_files_page") }}{% endif %}
+  {% else %}<p class="muted">No log or report files are kept{% if l.day or l.component != "all" or l.level != "all" %} for this choice{% endif %}.</p>{% endif %}
   <h3 id="runs-title">Runs</h3>
   {% if runs %}
   <ul class="fail-runs">{% for r in runs %}<li><a href="{{ r.href }}">{{ r.label }}</a> <span class="muted">· {{ v.when(r.at) if v else r.at }}</span></li>{% endfor %}</ul>
