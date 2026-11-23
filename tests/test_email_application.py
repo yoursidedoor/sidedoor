@@ -248,20 +248,5 @@ class TheSentFolderConfirmsAnEmailApplication(unittest.TestCase):
         self.assertEqual([("APPLICATION",)], [tuple(row) for row in fixture.database.execute(
             "SELECT kind FROM application_history WHERE employer='synthetic'")])
 
-    def test_a_sent_message_that_does_not_prove_this_attempt_is_refused(self):
-        for label, change in (("different recipient", {"email_to": ["attacker@elsewhere.example"]}),
-                              ("extra recipient", {"email_to": [self.ADDRESS, "someone@else.example"]}),
-                              ("sent before the arm", {"sent_at": desktop_adapter.later(receipts.NOW, -60)})):
-            with self.subTest(label):
-                fixture = self.build()
-                with self.assertRaises(ValueError):
-                    self.confirm(fixture, self.sent(fixture, **change))
-
-    def test_a_sent_message_cannot_prove_a_form_application(self):
-        fixture = self.build(email=False)
-        with self.assertRaises(ValueError):
-            self.confirm(fixture, self.sent(fixture))
-
-
 if __name__ == "__main__":
     unittest.main()

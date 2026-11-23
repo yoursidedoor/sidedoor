@@ -15,7 +15,7 @@
   <input class="approval-a-toggle approval-a-show" type="checkbox" id="show-{{ a.dom }}"{% if email %} checked{% endif %}>
   <input class="approval-a-toggle approval-a-editing" type="checkbox" id="edit-{{ a.dom }}">
   <p class="approval-m-head"><strong class="approval-who">{{ a.company }}</strong> <span class="muted">· {% if a.url %}<a href="{{ a.url }}" rel="noopener noreferrer" target="_blank">{{ a.role }}</a>{% else %}{{ a.role }}{% endif %}</span>
-    <span class="chip chip-info">{{ "Email application" if email else "Application" }}</span></p>
+    <span class="chip chip-info">{{ "Email application" if email else "Application" }}</span> <a class="card-logs" href="/failures?job={{ a.id | urlencode }}#files-title">Logs</a></p>
   <dl class="approval-a-facts">
     <dt>{{ "Sent to" if email else "Submitted on" }}</dt><dd>{% if email %}{{ a.destination }}{% else %}{{ a.site }} <span class="muted">({{ a.destination }})</span>{% endif %}</dd>
     <dt>Résumé</dt><dd>{{ a.resume }} <a href="/settings#resume">Change</a></dd>

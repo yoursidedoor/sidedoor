@@ -7,7 +7,7 @@
 {% set over = m.limit and text|length > m.limit %}
 <article class="approval-card" id="{{ m.dom }}">
   <p class="approval-m-head"><strong class="approval-who">{% if m.linkedin %}<a href="{{ m.linkedin }}" rel="noopener noreferrer" target="_blank">{{ m.recipient }}</a>{% else %}{{ m.recipient }}{% endif %}</strong>{% if m.role %} <span class="muted">· {{ m.role }}</span>{% endif %}
-    <span class="chip chip-info">{{ m.kind }}</span>{% if m.edited %} <span class="chip chip-muted">Edited by you</span>{% endif %}</p>
+    <span class="chip chip-info">{{ m.kind }}</span>{% if m.edited %} <span class="chip chip-muted">Edited by you</span>{% endif %}{% if m.dom %} <a class="card-logs" href="/failures?about={{ m.dom | urlencode }}#files-title">Logs</a>{% endif %}</p>
   {% if m.why or m.held_at %}<p class="muted approval-m-small">{% if m.why %}Why this person: {% for line in m.why %}{{ line.rstrip('. ') }}{{ '; ' if not loop.last }}{% endfor %}.{% endif %}{% if m.held_at %} Waiting since {{ v.when(m.held_at) }}.{% endif %}</p>{% endif %}
   {% if m.conversation %}
   <details class="approval-thread" open><summary>The conversation so far ({{ m.conversation|length }} message{{ "s" if m.conversation|length != 1 }})</summary>

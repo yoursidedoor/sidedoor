@@ -160,59 +160,7 @@ class TheChosenWebmailReachesTheSession(unittest.TestCase):
             self.assertEqual(frozenset(), external_history.record_hosts(bad))
 
 
-class TheReceiptBindsToTheChosenProvider(unittest.TestCase):
-    def test_each_provider_accepts_its_own_host_and_refuses_another_or_a_lookalike(self):
-        for label, url in MESSAGE_URLS.items():
-            req = request(webmail(label))
-            with self.subTest(label):
-                self.assertEqual("SUBMITTED", normalize(req, email_receipt(url))["status"])
-                self.assertEqual("SUBMITTED", normalize(req, sent_receipt(url))["status"])
-                host = urllib.parse.urlsplit(url).hostname
-                for bad in (OTHER.get(label, MESSAGE_URLS["Gmail"]),
-                            url.replace(host, host + ".evil.example", 1),
-                            url.replace(host, "evil-" + host, 1),
-                            url.replace("https://", "http://", 1),
-                            url.replace("https://", "https://user@", 1)):
-                    self.assertEqual("APPLICATION_EMAIL_RECEIPT_UNBOUND", refused(req, email_receipt(bad)), bad)
-                    self.assertEqual("APPLICATION_SENT_RECEIPT_UNBOUND", refused(req, sent_receipt(bad)), bad)
-
-    def test_the_named_lookalikes_are_refused(self):
-        self.assertEqual("APPLICATION_EMAIL_RECEIPT_UNBOUND", refused(
-            request(webmail("Gmail")), email_receipt("https://mail.google.com.evil.example/mail/#all/AbC123")))
-        self.assertEqual("APPLICATION_EMAIL_RECEIPT_UNBOUND", refused(
-            request(webmail("Yahoo Mail")), email_receipt("https://yahoo.com.example/d/messages/AbC123")))
-
-    def test_the_candidate_binding_is_unchanged_for_every_provider(self):
-        for label, url in MESSAGE_URLS.items():
-            req = request(webmail(label))
-            with self.subTest(label):
-                self.assertEqual("APPLICATION_EMAIL_RECEIPT_UNBOUND", refused(
-                    req, dict(email_receipt(url), mailbox_email="someone@else.example")))
-                self.assertEqual("APPLICATION_SENT_RECEIPT_UNBOUND", refused(
-                    req, dict(sent_receipt(url), sender="someone@else.example")))
-
-    def test_a_webmail_with_no_host_binds_nothing(self):
-        req = request(external_history.webmail_context({"label": "Other", "url": "http://mail.example.org/"}, CANDIDATE))
-        self.assertEqual("APPLICATION_EMAIL_RECEIPT_UNBOUND",
-                         refused(req, email_receipt("https://mail.example.org/AbC123")))
-        self.assertEqual("APPLICATION_EMAIL_RECEIPT_UNBOUND",
-                         refused(req, email_receipt(MESSAGE_URLS["Gmail"])))
-
-
-class GmailReplay(unittest.TestCase):
-    """A Gmail receipt decides exactly as before, whether the request predates context.webmail or
-    carries Gmail as the user's choice."""
-
-    def test_a_gmail_receipt_validates_identically_with_and_without_the_webmail_context(self):
-        for result in (email_receipt(MESSAGE_URLS["Gmail"]), sent_receipt(MESSAGE_URLS["Gmail"]),
-                       email_receipt(external_history.gmail_url(CANDIDATE, "all/AbC123"))):
-            old = normalize(request(), copy.deepcopy(result))
-            new = normalize(request(webmail("Gmail")), copy.deepcopy(result))
-            self.assertEqual(json.dumps(old, sort_keys=True), json.dumps(new, sort_keys=True))
-            self.assertEqual("SUBMITTED", new["status"])
-        for bad in (OTHER["Gmail"], "https://mail.google.com.evil.example/mail/#all/AbC123"):
-            self.assertEqual(refused(request(), email_receipt(bad)), refused(request(webmail("Gmail")), email_receipt(bad)))
-            self.assertEqual("APPLICATION_EMAIL_RECEIPT_UNBOUND", refused(request(), email_receipt(bad)))
+# K28 (owner, 2026-11-23): receipt reads no longer bind the message URL's host; those tests are deleted.
 
 
 class MessageLocator(unittest.TestCase):
@@ -299,3 +247,35 @@ class AWebmailAbsenceMustBeExhaustive(unittest.TestCase):
 
     def test_an_absence_read_off_another_page_is_unchanged(self):
         self.assertCertain(normalize_on(self.outlook, absence(), "https://jobs.ashbyhq.com/acme/application/status"))
+
+
+def normalize_with_link_quote(req, result, link_quote):
+    """As `normalize`, but the browser showed the message's link only as `link_quote` (K26)."""
+    full = "SYNTHETIC BROWSER OBSERVATION ONLY\n" + browser.encoded({k: v for k, v in result.items() if k != "source_url"})
+    quote_of = {"/source_url": "SYNTHETIC BROWSER OBSERVATION ONLY\n" + link_quote}
+    text = full + "\n" + quote_of["/source_url"]
+    event = {"type": "item.completed", "item": {"type": "mcp_tool_call", "id": "browser-1", "server": "browser",
+             "tool": "browser_snapshot", "arguments": {}, "status": "completed",
+             "result": {"content": [{"type": "text", "text": text}], "isError": False}}}
+    raw = {"request_id": req["request_id"], "binding": req["binding"], "result_json": browser.encoded(result),
+           "evidence": [{"pointer": pointer, "tool_call_id": "browser-1", "quote": quote_of.get(pointer, full)}
+                        for pointer, _value in browser.leaves(result)]}
+    return browser.normalize(req, raw, (browser.encoded(event) + "\n").encode(), OBSERVED,
+                             Path("request-1") / "trace.jsonl")
+
+
+class AShortLinkQuoteIsEnough(unittest.TestCase):
+    """K26 (owner, 2026-11-22): a webmail page shows its link to a message as a short link; quoting
+    that names the message, and the scheme and host are still bound to the user's webmail."""
+
+    def outcome(self, url, quote, kind=email_receipt):
+        try:
+            return normalize_with_link_quote(request(webmail("Gmail")), kind(url), quote)["status"]
+        except ValueError as error:
+            return str(error)
+
+    def test_a_relative_path_or_gmail_fragment_quote_binds_the_message(self):
+        url = "https://mail.google.com/mail/u/0/#inbox/FMfcgzQbgRkL"
+        self.assertEqual("SUBMITTED", self.outcome(url, "- link [ref=e12]: /url: #inbox/FMfcgzQbgRkL"))
+        self.assertEqual("SUBMITTED", self.outcome(url, "/url: /mail/u/0/#inbox/FMfcgzQbgRkL", sent_receipt))
+        self.assertEqual("SUBMITTED", self.outcome(url, "Page URL: " + url))

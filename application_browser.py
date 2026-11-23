@@ -815,7 +815,10 @@ carries, source_url as the message's own URL in that webmail and receipt_id as i
 only when that message went to the application address, after context.current_attempt.armed_at,
 with the resume attached. A draft, an unsent or failed message, or one to anyone else is not;
 if no such message is in Sent, the email was not sent - report that as NOT_SUBMITTED with the
-absence evidence below, never guess.""",
+absence evidence below, never guess.
+A verify or reconcile read that stops on AUTHENTICATION_REQUIRED, MFA_REQUIRED or CAPTCHA_REQUIRED
+also says where it met that wall, as blocked.on: "MAILBOX" when it was the candidate's webmail
+(context.webmail), "SITE" when it was the employer's site or applicant account.""",
     'receipt': """Owner decision, 2026-09-22: bind such a receipt to this attempt by EMPLOYER and TIMING, and
 judge it yourself. Many ATS confirmations name only the employer - Ashby's is "Thank you for
 applying to Vandelay Security!" and nothing more - so requiring the role rejected a genuine receipt
@@ -829,6 +832,17 @@ application to this employer could have produced it. Say in `reason` which of th
 relied on. Still not a receipt, whatever the timing: a message predating the arm, one of our
 own drafts, a forward, a job alert or marketing mail, or an acknowledgment from anyone but
 this employer. If you cannot tie it to this attempt, return UNKNOWN as before.
+Owner decision, 2026-11-23: employer mail that clearly concerns THIS application also proves the
+employer received it, for a form or an email application alike: a rejection, an interview
+invitation, or any other reply from the employer about this role. Report it exactly as an employer
+confirmation email (evidence_kind employer_confirmation_email, with every field and binding above)
+and set employer_outcome to REJECTED, INTERVIEW or REPLY for what it says; leave employer_outcome
+null for a plain confirmation. The employer-and-timing allowance above (a message that never names
+the role) covers a plain "thanks for applying" confirmation ONLY. A rejection, an interview
+invitation or any other reply settles this job only when it names this role or otherwise clearly
+identifies this application. If context.local_history shows another application to this employer
+that the message could be answering, return UNKNOWN. Mail from the same employer about a different
+role, or one you cannot tie to this application, is not a receipt for it (return UNKNOWN).
 Include the request's exact job_key and attempt_id, and candidate_email verified
 from the authenticated account. Host observed_at follows this claimed read.
 For the email route in verify/reconcile - and, for the emailed-verification-code step
@@ -1020,6 +1034,9 @@ def result_contract(operation):
                 "authoritative_absence": False, "no_inflight": False, "next_action": "Investigate unknown outcome",
                 # sent_application_email only: the message the candidate SENT (owner, 2026-09-24).
                 "email_to": [], "sent_at": None, "attachment_names": [],
+                # employer_confirmation_email only: REJECTED, INTERVIEW or REPLY when the employer's
+                # mail about this application said more than "received" (K10, owner 2026-11-23).
+                "employer_outcome": None,
                 # A "not submitted" read off the webmail: the search it ran, or the oldest message
                 # browsing reached (owner, 2026-10-24, W1; application_browser.mailbox_absence).
                 "mailbox_search": {"query": None, "results": None, "covers_employer": False},
@@ -2430,11 +2447,16 @@ def normalize(request, raw, trace, observed_at, trace_path):
             # and submitted with no answers). Structural keys only; the session's own next_action is kept.
             result["status"] = "BLOCKED"
             normalize_stop(result, operation)
+    # K28 (owner, 2026-11-23, picks a+b): a verify/reconcile read that does not claim NOT_SUBMITTED is
+    # taken as the AI gave it. Its evidence quotes are recorded, never compared, and none of the
+    # structured receipt checks below second-guess it. A NOT_SUBMITTED read (which could open a second
+    # application) keeps every check, quote and binding as before.
+    receipt_read = operation in {"verify", "reconcile"} and result.get("status") != "NOT_SUBMITTED"
     for field, expected in (("job_key", request["payload"]["job"]["job_key"]),
                             ("attempt_id", request["payload"].get("attempt_id"))):
-        if field in result and result[field] not in {None, expected}:
+        if field in result and result[field] not in {None, expected} and not receipt_read:
             raise ValueError("APPLICATION_RESULT_BINDING_INVALID")
-    if result.get("history", {}).get("job_key") not in {None, request["payload"]["job"]["job_key"]}:
+    if result.get("history", {}).get("job_key") not in {None, request["payload"]["job"]["job_key"]} and not receipt_read:
         raise ValueError("APPLICATION_RESULT_BINDING_INVALID")
     quotable = quotable_request(request)
     observations, failed_observations, calls, sequence = {}, {}, set(), []
@@ -2502,7 +2524,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
     # whole read"); the entries past it are dropped, counted, and treated as never reported.
     evidence_dropped = 0
     if len(evidence) > EVIDENCE_LIMIT:
-        if operation in {"verify", "reconcile"}:
+        if operation in {"verify", "reconcile"} and not receipt_read:
             raise ValueError("APPLICATION_EVIDENCE_LIMIT")
         evidence_dropped = len(evidence) - EVIDENCE_LIMIT
         evidence = evidence[:EVIDENCE_LIMIT]
@@ -2517,18 +2539,46 @@ def normalize(request, raw, trace, observed_at, trace_path):
     # Only verify and reconcile still refuse a whole result over one bad quote (owner, 2026-09-27, items 1
     # and 3): they decide whether an application went through, which is what stops a second one.
     partial_binding = operation not in {"verify", "reconcile"}
+    # K28: on a receipt read (see `receipt_read`) an unmatched quote is only recorded. Kept on every
+    # verify/reconcile read: a NOT_SUBMITTED / authoritative_absence / no_inflight claim citing only
+    # the request context is refused (APPLICATION_SUBMISSION_STATE_NEEDS_LIVE_EVIDENCE).
 
     def reject(index, entry, reason):
-        if not partial_binding:
+        if not partial_binding and (not receipt_read or reason == "APPLICATION_SUBMISSION_STATE_NEEDS_LIVE_EVIDENCE"):
             raise ValueError(reason)
         rejected.append({"index": index, "pointer": entry["pointer"], "tool_call_id": entry["tool_call_id"],
                          "quote_excerpt": entry["quote"][:300], "reason": reason})
+
+    def bind_context(index, entry, reference):
+        if operation in {"verify", "reconcile"} and entry["pointer"] in {"/status", "/authoritative_absence", "/no_inflight"}:
+            try:
+                claimed = at_pointer(result, entry["pointer"])
+            except (KeyError, IndexError, ValueError, TypeError):
+                claimed = None
+            if claimed is True or claimed == "NOT_SUBMITTED":
+                # A "not submitted" claim is read off the live page or inbox, never out of the
+                # request context: a context quote here could open a second application. An
+                # honest UNKNOWN / false ("do not resubmit") may still cite the context.
+                reject(index, entry, "APPLICATION_SUBMISSION_STATE_NEEDS_LIVE_EVIDENCE")
+                return
+        try:
+            # Checked against the copy with every unverified lead removed (`quotable_request`),
+            # so a verify can never quote a rejected "not submitted" as its own proof.
+            observed = at_pointer(quotable, reference[len("context:"):])
+        except (KeyError, IndexError, ValueError, TypeError):
+            reject(index, entry, "APPLICATION_UNVERIFIED_CARRIED_CONTEXT")
+            return
+        observed = observed if isinstance(observed, str) else encoded(observed)
+        if not quote_observed(entry["quote"], observed):
+            reject(index, entry, "APPLICATION_UNOBSERVED_CONTEXT_QUOTE")
+            return
+        bound.setdefault(entry["pointer"], []).append(dict(entry))
 
     for index, entry in enumerate(evidence):
         if (not isinstance(entry, dict) or set(entry) != {"pointer", "tool_call_id", "quote"}
                 or not isinstance(entry["pointer"], str) or not isinstance(entry["quote"], str)
                 or not entry["quote"].strip()):
-            if not partial_binding:
+            if not partial_binding and not receipt_read:
                 raise ValueError("APPLICATION_EVIDENCE_INVALID")
             # On an inspect a malformed entry drops only itself (owner, 2026-09-27: nothing
             # small throws out a whole read); every other operation still refuses.
@@ -2539,29 +2589,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
             continue
         reference = entry["tool_call_id"]
         if isinstance(reference, str) and reference.startswith("context:/context/"):
-            if operation in {"verify", "reconcile"} and entry["pointer"] in {"/status", "/authoritative_absence", "/no_inflight"}:
-                try:
-                    claimed = at_pointer(result, entry["pointer"])
-                except (KeyError, IndexError, ValueError, TypeError):
-                    claimed = None
-                if claimed is True or claimed == "NOT_SUBMITTED":
-                    # A "not submitted" claim is read off the live page or inbox, never out of the
-                    # request context: a context quote here could open a second application. An
-                    # honest UNKNOWN / false ("do not resubmit") may still cite the context.
-                    reject(index, entry, "APPLICATION_SUBMISSION_STATE_NEEDS_LIVE_EVIDENCE")
-                    continue
-            try:
-                # Checked against the copy with every unverified lead removed (`quotable_request`),
-                # so a verify can never quote a rejected "not submitted" as its own proof.
-                observed = at_pointer(quotable, reference[len("context:"):])
-            except (KeyError, IndexError, ValueError, TypeError):
-                reject(index, entry, "APPLICATION_UNVERIFIED_CARRIED_CONTEXT")
-                continue
-            observed = observed if isinstance(observed, str) else encoded(observed)
-            if not quote_observed(entry["quote"], observed):
-                reject(index, entry, "APPLICATION_UNOBSERVED_CONTEXT_QUOTE")
-                continue
-            bound.setdefault(entry["pointer"], []).append(dict(entry))
+            bind_context(index, entry, reference)
             continue
         eligible_observations = observations
         diagnostic = entry["pointer"] in {"/blocked/code", "/blocked/reason", "/blocked/next_action", "/blocker/code", "/blocker/reason", "/blocker/next_action", "/error/code", "/error/reason"}
@@ -2591,7 +2619,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
     # second application). Inspect, investigate and submit results keep what the AI reported.
     # One exception: an email application's address is where the owner's resume is SENT, with
     # no form or page check after it, so an address the page never showed is still dropped.
-    if rejected:
+    if rejected and not receipt_read:
         unbind_rejected(result, bound, rejected if operation in {"verify", "reconcile"} else [
             entry for entry in rejected
             if entry.get("pointer", "").removeprefix("/partial_review").startswith("/email_application/")])
@@ -2602,7 +2630,7 @@ def normalize(request, raw, trace, observed_at, trace_path):
     # over an optional question's id (gringotts industries, three times) or a "blocked" status
     # (lumon), and from submit and investigate results (items 1 and 3). It stays where an
     # unquoted "authoritatively not submitted" could otherwise open a second application.
-    if factual_result and operation in {"verify", "reconcile"}:
+    if factual_result and operation in {"verify", "reconcile"} and not receipt_read:
         for pointer, value in leaves(factual_result):
             if control_field(pointer, value, request):
                 continue
@@ -2736,74 +2764,22 @@ def normalize(request, raw, trace, observed_at, trace_path):
                 not absence and result.get("evidence_kind") != "authenticated_ats_application_record"
                 and not email_receipt and not sent_receipt):
             raise ValueError("APPLICATION_INDEPENDENT_RECEIPT_REQUIRED")
-        # An employer confirmation email names the role and carries no requisition id, so
-        # requiring one quoted VERBATIM from the mail rejected every real email receipt
-        # before verified_receipt ever ran. provider_message_or_application_id is dropped
-        # as a requirement everywhere (owner, 2026-09-21): no code reads it to decide
-        # anything; it stays in the schema so it is still recorded when the page shows one.
-        fields = ["employer", "candidate_email"] if email_receipt or sent_receipt else [
-            "employer", "requisition", "candidate_email"]
-        # The user's webmail from Setup (Gmail for a request made before context.webmail existed).
-        mailbox_hosts = external_history.request_webmail_hosts(request.get("context"))
-        if result["status"] == "SUBMITTED":
-            fields.append("receipt_id")
-        if email_receipt:
-            fields.extend(["mailbox_email", "recipient", "sender", "source_url"])
-            candidate = request["payload"]["job"]["candidate_email"]
-            attempt = request.get("context", {}).get("current_attempt")
-            received_at = dt.datetime.fromisoformat(result.get("received_at", "").replace("Z", "+00:00"))
-            source_url = urllib.parse.urlsplit(result.get("source_url", ""))
-            if (not attempt or attempt["attempt_id"] != request["payload"].get("attempt_id")
-                    or received_at.tzinfo is None
-                    or not dt.datetime.fromisoformat(attempt["started_at"]) <= received_at <= dt.datetime.fromisoformat(observed_at)
-                    or result.get("sender_authenticated") is not True
-                    or result.get("mailbox_email", "").casefold() != candidate.casefold()
-                    or result.get("recipient", "").casefold() != candidate.casefold()
-                    or source_url.scheme != "https" or source_url.hostname not in mailbox_hosts
-                    or source_url.username or source_url.password):
-                raise ValueError("APPLICATION_EMAIL_RECEIPT_UNBOUND")
-            for field in ("received_at", "sender_authenticated"):
-                if not any(not entry["tool_call_id"].startswith("context:") for entry in bound.get("/" + field, [])):
-                    raise ValueError("APPLICATION_EMAIL_RECEIPT_UNOBSERVED")
-        if sent_receipt:
-            # The mirror of a confirmation email: read in the candidate's OWN mailbox, SENT by the
-            # candidate, inside this attempt's window, in the user's webmail. Who it went to and
-            # whether it followed the arm are checked against this attempt's saved review in
-            # desktop_adapter.validate_read_result, which holds the authoritative target.
-            fields.extend(["mailbox_email", "sender", "source_url"])
-            candidate = request["payload"]["job"]["candidate_email"]
-            attempt = request.get("context", {}).get("current_attempt")
-            try:
-                sent_at = dt.datetime.fromisoformat(str(result.get("sent_at") or "").replace("Z", "+00:00"))
-            except ValueError:
-                sent_at = None
-            source_url = urllib.parse.urlsplit(result.get("source_url", ""))
-            recipients = result.get("email_to")
-            attachments = result.get("attachment_names")
-            if (not attempt or attempt["attempt_id"] != request["payload"].get("attempt_id")
-                    or sent_at is None or sent_at.tzinfo is None
-                    or not dt.datetime.fromisoformat(attempt["started_at"]) <= sent_at <= dt.datetime.fromisoformat(observed_at)
-                    or str(result.get("mailbox_email", "")).casefold() != candidate.casefold()
-                    or str(result.get("sender", "")).casefold() != candidate.casefold()
-                    or not isinstance(recipients, list) or not recipients
-                    or not all(isinstance(item, str) and item.strip() for item in recipients)
-                    or not isinstance(attachments, list) or not attachments
-                    or source_url.scheme != "https" or source_url.hostname not in mailbox_hosts
-                    or source_url.username or source_url.password):
-                raise ValueError("APPLICATION_SENT_RECEIPT_UNBOUND")
-            # Each of these must come from something the browser actually showed of the message.
-            for pointer, values in (("/sent_at", [result["sent_at"]]), ("/email_to", recipients),
-                                    ("/attachment_names", attachments)):
-                entries = [entry for key, items in bound.items() if key == pointer or key.startswith(pointer + "/")
-                           for entry in items if not entry["tool_call_id"].startswith("context:")]
-                if not entries:
-                    raise ValueError("APPLICATION_SENT_RECEIPT_UNOBSERVED")
-        for field in fields:
-            value = result.get(field)
-            if not value or not any(not entry["tool_call_id"].startswith("context:")
-                                    and str(value).casefold() in entry["quote"].casefold()
-                                    for entry in bound.get("/" + field, [])):
-                raise ValueError("APPLICATION_RECEIPT_IDENTITY_UNOBSERVED")
+        # K28 (owner, 2026-11-23, picks a+b): a SUBMITTED receipt is the AI's answer, taken as given.
+        # The checks that second-guessed it are deleted: mailbox/recipient/sender equal to the
+        # candidate, the webmail host of source_url, received_at/sent_at inside the attempt window,
+        # sender_authenticated, and every "quoted VERBATIM in a browser quote" requirement
+        # (APPLICATION_EMAIL_RECEIPT_UNBOUND/UNOBSERVED, APPLICATION_SENT_RECEIPT_UNBOUND/UNOBSERVED,
+        # APPLICATION_RECEIPT_IDENTITY_UNOBSERVED). A SUBMITTED read can never open a second application.
+        # Kept for NOT_SUBMITTED, which can: employer, requisition and candidate_email must each
+        # appear in a real (non-context) browser quote.
+        if absence:
+            for field in ("employer", "requisition", "candidate_email"):
+                value = result.get(field)
+                shown = [str(value)] if value else []
+                if not shown or not any(not entry["tool_call_id"].startswith("context:")
+                                        and any(form.casefold() in entry["quote"].casefold() for form in shown)
+                                        for entry in bound.get("/" + field, [])):
+                    raise ValueError("APPLICATION_RECEIPT_IDENTITY_UNOBSERVED")
     source = "application-browser:" + hashlib.sha256(trace).hexdigest()
     def stamp(value, pointer=""):
         if isinstance(value, dict):

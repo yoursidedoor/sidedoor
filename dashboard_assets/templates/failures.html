@@ -173,19 +173,41 @@
   </form>
   <p><a class="button button-quiet" href="/failures/support.zip">Download for a support issue</a>
     <span class="muted">A .zip of every log and report from the last 2 days, with saved keys removed. Send it to support when asked.</span></p>
-  <h3 id="files-title">Files</h3>
-  {% if log_files %}
-  <table class="metrics-table log-files-table">
-    <thead><tr><th scope="col">Name</th><th scope="col">When</th><th scope="col">Part</th><th scope="col">Kind</th><th scope="col"><span class="visually-hidden">Download</span></th></tr></thead>
-    <tbody>
-      {% for file in log_files %}
-      <tr><td>{{ file.label }}</td><td>{{ file.when }}</td><td>{{ file.component_label }}</td><td>{{ file.level_label }}</td>
-        <td><a class="button button-quiet" href="/failures/file?id={{ file.id | urlencode }}" aria-label="Download {{ file.label }}">Download</a></td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% if log_files_paging.pages > 1 %}{{ pager(log_files_paging, "files-title", "Files", "log_files_page") }}{% endif %}
-  {% else %}<p class="muted">No log or report files are kept{% if l.day or l.component != "all" or l.level != "all" %} for this choice{% endif %}.</p>{% endif %}
+  <h3 id="files-title">What Sidedoor did</h3>
+  <p class="muted">One row for each thing Sidedoor did, newest first. Open a row to see its files. Download gives all of them in one .zip, with saved keys removed.</p>
+  <form class="log-filters log-find" method="post" action="/failures/find">
+    {% if l.component != "all" %}<input type="hidden" name="component" value="{{ l.component }}">{% endif %}
+    {% if l.day %}<input type="hidden" name="day" value="{{ l.day }}">{% endif %}
+    {% if link_job %}<input type="hidden" name="job" value="{{ link_job }}">{% endif %}
+    {% if link_about %}<input type="hidden" name="about" value="{{ link_about }}">{% endif %}
+    <label class="log-search">Find a company, role or person
+      <input type="search" name="find" value="{{ log_find }}" maxlength="200">
+    </label>
+    <button class="button" type="submit">Find</button>
+  </form>
+  {% if log_job %}<p class="log-ops-for">Showing only {{ log_job_words or ("this job" if link_job else "this contact") }}. <a href="{{ link(anchor="files-title", job=None, about=None, search=None, log_files_page=None) }}">Show everything</a></p>{% elif log_search_ended %}<p class="log-ops-for">That search has ended. Search again.</p>{% elif log_find %}<p class="log-ops-for"><a href="{{ link(anchor="files-title", search=None, log_files_page=None) }}">Clear the search</a></p>{% endif %}
+  {% if log_ops %}
+  <ul class="log-ops">
+    {% for op in log_ops %}
+    <li class="card log-op">
+      <details>
+        <summary><span class="log-op-label">{{ op.label }}</span> <span class="muted log-op-when">{{ op.when }}</span>{% if op.outcome %} <span class="log-op-outcome">{{ op.outcome }}</span>{% endif %}
+          {% if op.files or op.records %}<a class="button button-quiet log-op-download" href="/failures/operation.zip?id={{ op.id | urlencode }}" aria-label="Download the files of {{ op.label }}, {{ op.when }}">Download</a>{% endif %}</summary>
+        {% if op.files %}
+        <table class="metrics-table log-files-table">
+          <thead><tr><th scope="col">File</th><th scope="col">Written</th><th scope="col"><span class="visually-hidden">Download</span></th></tr></thead>
+          <tbody>{% for file in op.files %}
+            <tr><td>{{ file.label }}</td><td>{{ file.when }}</td><td><a class="button button-quiet" href="/failures/file?id={{ file.id | urlencode }}" aria-label="Download {{ file.label }}">Download</a></td></tr>
+          {% endfor %}</tbody>
+        </table>
+        {% elif op.records %}<p class="muted">Sidedoor keeps no files for this. Download gives its saved records, with saved keys removed.</p>
+        {% else %}<p class="muted">Its files are no longer on this computer.</p>{% endif %}
+      </details>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if log_ops_paging.pages > 1 %}{{ pager(log_ops_paging, "files-title", "Rows", "log_files_page") }}{% endif %}
+  {% else %}<p class="muted">{% if log_find or log_job %}Nothing matches this search.{% else %}No log or report files are kept{% if l.day or l.component != "all" %} for this choice{% endif %}.{% endif %}</p>{% endif %}
   <h3 id="runs-title">Runs</h3>
   {% if runs %}
   <ul class="fail-runs">{% for r in runs %}<li><a href="{{ r.href }}">{{ r.label }}</a> <span class="muted">· {{ v.when(r.at) if v else r.at }}</span></li>{% endfor %}</ul>

@@ -27,6 +27,10 @@ WAIT_SECONDS = WAIT_DAYS * 86400
 # ASK_EACH_TIME (every account wall while Sidedoor cannot sign in itself, see `effective_setting`) and
 # PASSKEY; SIGN_IN is what an account wall is once the access step exists, and stays readable on rows
 # written before the setting. The rest are the extension points the later stages and T8 fill.
+MAILBOX = "MAILBOX_SIGN_IN"
+MAILBOX_WORDS = "Sign in to %s in Sidedoor's browser."
+# K7: the mailbox asked for a second step (a code or a "verify it's you" check) on the candidate's account.
+MAILBOX_CHECK_WORDS = "Finish signing in to %s in Sidedoor's browser."
 WAIT_REASONS = {
     "SIGN_IN": "The site needs you to sign in.",
     "HUMAN_CHECK": "The site needs a human check.",
@@ -54,6 +58,10 @@ WAIT_REASONS = {
     "ASK_EACH_TIME": "This site needs an account.",
     # Owner's pick R8 b, 2026-11-12, his words exactly.
     "PASSKEY": "This site signs in with a passkey. Apply yourself if you want this job.",
+    # K1 (owner's pick K1 a): an email application's session found the candidate's own mailbox not signed
+    # in to Sidedoor's browser. Never Sidedoor's own step (it never signs in to the user's mailbox); the
+    # card names the address (`mailbox_words`); these words only where the address is not on record.
+    MAILBOX: "Sign in to your application email in Sidedoor's browser.",
 }
 # The session stop codes this task handles, each mapped to its wait reason.
 WALL_REASONS = {"AUTHENTICATION_REQUIRED": "SIGN_IN", "MFA_REQUIRED": "SIGN_IN", "CAPTCHA_REQUIRED": "HUMAN_CHECK"}
@@ -545,6 +553,25 @@ def description(wait):
     return value if isinstance(value, dict) else None
 
 
+def mailbox_email(wait):
+    """The candidate mailbox a MAILBOX wait is for (its stored description), or None."""
+    email = (description(wait) or {}).get("mailbox_email") if dict(wait).get("reason") == MAILBOX else None
+    return email if isinstance(email, str) and "@" in email and not any(ch.isspace() for ch in email) else None
+
+
+def mailbox_url(email):
+    """Where the candidate's mailbox opens in Sidedoor's browser: Setup's webmail for that address."""
+    import external_history
+    return external_history.webmail_context(external_history.chosen_webmail(), email).get("mailbox_url")
+
+
+def mailbox_words(wait):
+    email = mailbox_email(wait)
+    if not email:
+        return WAIT_REASONS[MAILBOX]
+    return (MAILBOX_CHECK_WORDS if dict(wait).get("wall") == "MFA_REQUIRED" else MAILBOX_WORDS) % email
+
+
 def present(database):
     return bool(database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone())
 
@@ -596,6 +623,7 @@ def waiting(database, now=None):
                       "host": row["host"], "wall": row["wall"], "reason": row["reason"],
                       "words": (held_words(row["reason"]) if host_held(row)
                                 else check_words(row) if row["reason"] == "HUMAN_CHECK"
+                                else mailbox_words(row) if row["reason"] == MAILBOX
                                 else WAIT_REASONS.get(row["reason"], WAIT_REASONS["SIGN_IN"])),
                       "since": row["since"], "deadline": row["deadline"], "state": row["state"],
                       "job_state": row["job_state"], "description": description(row)})
@@ -746,7 +774,7 @@ def _end(database, wait, state, outcome, now):
 
 
 def record(database, job, code, now, reason=None, source="session", config=None, deadline=None, since=None, notice=None,
-           result=None):
+           result=None, mailbox=None):
     """A wall stopped a session (or `wait_on_host` found the host already waiting): the job waits on
     the user for WAIT_DAYS, or, for an account wall under the "Skip" setting, closes at once. Call
     inside a transaction. `result` is the session's result, for its wall description.
@@ -764,6 +792,14 @@ def record(database, job, code, now, reason=None, source="session", config=None,
         return None
     since = since or now   # when the wall was met; a result read late still counts its 7 days from then
     described = None
+    host = None
+    if mailbox and WALL_REASONS.get(code) == "SIGN_IN" and not source.startswith("host:"):
+        # K1: the wall is the candidate's own mailbox (an email application), not the posting's site:
+        # the user's sign-in whatever the account setting (Sidedoor's own step and Skip are for job sites).
+        # The wait's site is the mailbox's, so its card opens the mailbox and nothing on the posting's
+        # site is held behind it.
+        reason, described = MAILBOX, {"mailbox_email": mailbox}
+        host = site(urllib.parse.urlsplit(mailbox_url(mailbox) or "").hostname)
     if reason is None and WALL_REASONS.get(code, "SIGN_IN") == "SIGN_IN":
         described = description_of(result)
         setting = effective_setting(database)
@@ -790,7 +826,9 @@ def record(database, job, code, now, reason=None, source="session", config=None,
     known = check_of(database, job, code, result) if reason == "HUMAN_CHECK" and not source.startswith("host:") else None
     import form_check_hold
     action = held_words(reason) if source.startswith("host:") else WAIT_REASONS["PASSKEY"] if reason == "PASSKEY" else (
-        (form_check_hold.TIMED_OUT_WORDS if known and known.get("timed_out") else WAIT_REASONS.get(reason, WAIT_REASONS["SIGN_IN"]))
+        (form_check_hold.TIMED_OUT_WORDS if known and known.get("timed_out")
+         else mailbox_words({"reason": reason, "wall": code, "description": json.dumps(described)}) if reason == MAILBOX
+         else WAIT_REASONS.get(reason, WAIT_REASONS["SIGN_IN"]))
         + " Sidedoor waits %d days, then closes this application." % WAIT_DAYS)
     # Route ORDINARY as today (the dashboard's words and counts are unchanged until the Needs you
     # cards, T2); `process` starts nothing for a job with an open wait. The hold comes first: a
@@ -809,17 +847,17 @@ def record(database, job, code, now, reason=None, source="session", config=None,
         return None
     if current is None:
         # A repeated wall on one job after a release brings the hold back: a new row, never a close.
-        _insert(database, job, code, reason, source, since, deadline, now, described, known)
+        _insert(database, job, code, reason, source, since, deadline, now, described, known, host=host)
         applications.event(database, job["job_key"], RECORDED_EVENT,
                            {"wall": code, "reason": reason, "source": source, "since": since, "deadline": deadline}, now)
     return WAITING
 
 
-def _insert(database, job, code, reason, source, since, deadline, now, described=None, known=None):
+def _insert(database, job, code, reason, source, since, deadline, now, described=None, known=None, host=None):
     return database.execute(
         f"INSERT INTO {TABLE}(job_key,host,wall,reason,source,since,deadline,state,updated_at,description,human_check) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (job["job_key"], host_of(job), code, reason, source, since, deadline, WAITING, now,
+        (job["job_key"], host or host_of(job), code, reason, source, since, deadline, WAITING, now,
          json.dumps(described, sort_keys=True) if described else None,
          json.dumps(known, sort_keys=True) if known else None)).lastrowid
 
@@ -1021,7 +1059,12 @@ def resume(database, job_key, now, siblings=True):
     if wait is None:
         return []
     released = [wait]
-    if siblings and wait["host"] and wait["reason"] in ACCOUNT_REASONS | PROFILE_REASONS:
+    if siblings and wait["host"] and wait["reason"] == MAILBOX:
+        # K1: one sign-in to the mailbox serves every email application waiting on that same address.
+        released += [dict(row) for row in database.execute(
+            f"SELECT * FROM {TABLE} WHERE state=? AND job_key<>? AND reason=?", (WAITING, job_key, MAILBOX)).fetchall()
+            if mailbox_email(row) and mailbox_email(row) == mailbox_email(wait)]
+    elif siblings and wait["host"] and wait["reason"] in ACCOUNT_REASONS | PROFILE_REASONS:
         # Every account wait on the site, whatever its reason (E15.T6): one left behind under another
         # reason (a row from before the setting) would hold the site against the job just released,
         # which would then wait again without its session. A passkey wait too (owner, 2026-11-12: "if

@@ -48,7 +48,7 @@
         {% if c.sequence %}<span class="muted net-sequence">{{ c.sequence }}</span>{% endif %}
       </summary>
       <div class="net-body">
-        {% if c.linkedin %}<p><a href="{{ c.linkedin }}" rel="noopener noreferrer" target="_blank">Open their LinkedIn profile</a></p>{% endif %}
+        <p>{% if c.linkedin %}<a href="{{ c.linkedin }}" rel="noopener noreferrer" target="_blank">Open their LinkedIn profile</a> · {% endif %}<a class="card-logs" href="/failures?about={{ c.dom | urlencode }}#files-title">Logs</a></p>
         {% if c.why %}<div class="net-why"><strong>Why this person</strong><ul>{% for line in c.why %}<li>{{ line }}</li>{% endfor %}</ul></div>{% endif %}
         <h3>Conversation</h3>
         {% if c.conversation %}

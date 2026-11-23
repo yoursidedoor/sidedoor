@@ -64,7 +64,6 @@ RESUME_DIRECTORY = "resume"
 RELAY_URL = "https://yoursidedoor-relay.fly.dev"
 WEBSITE_URL = "https://yoursidedoor.com"
 SUPPORT_EMAIL = "support@yoursidedoor.com"
-BROWSER_PROFILE = Path.home() / ".config" / "sidedoor" / "browser-profile"
 SINGLETONS = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 RESUME_MAX_BYTES = 10 * 1024 * 1024
 RESUME_EXTENSIONS = {".pdf": "PDF", ".docx": "Word"}  # resume_intake.FORMATS
@@ -2452,14 +2451,19 @@ class _Hold:
 class BrowserSession:
     """The Chrome window the dashboard opens on Sidedoor's profile (E6.T0 step 8's lock rule)."""
 
-    def __init__(self, root=None, profile=BROWSER_PROFILE, find_chrome=chrome_path, launch=subprocess.Popen,
+    def __init__(self, root=None, profile=None, find_chrome=chrome_path, launch=subprocess.Popen,
                  on_closed=None, run=subprocess.run, platform=None):
-        self.root, self.profile = paths.data(root), Path(profile)
+        self.root, self._profile = paths.data(root), (Path(profile) if profile is not None else None)
         self._find_chrome, self._launch, self._on_closed = find_chrome, launch, on_closed
         self._run, self._platform = run, platform or sys.platform
         self._mutex = threading.RLock()
         self.process = self.hold = None
         self.closed_once = threading.Event()
+
+    @property
+    def profile(self):
+        """The profile passed in, else this home's (user_profile.browser_profile, read at use time)."""
+        return self._profile if self._profile is not None else user_profile.browser_profile()
 
     def bring_forward(self):
         """Best effort: put the Chrome this dashboard opened in front. macOS asks System Events by
@@ -2725,7 +2729,7 @@ def run_email_check(home=None, read=None):
     application_email = state.get("locked_email") or saved_email(home)
     webmail = state.get("webmail") or {}
     try:
-        signed_in = (read or read_signed_in_account)(webmail.get("url"), state.get("codex_path"), BROWSER_PROFILE)
+        signed_in = (read or read_signed_in_account)(webmail.get("url"), state.get("codex_path"), user_profile.browser_profile())
     except CodexMissingForCheck as missing:
         return record(home, "email", "failed", str(missing), reason="codex_missing")
     except MailboxReadNotBuilt as missing:

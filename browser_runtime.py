@@ -153,8 +153,8 @@ def profile(config=None):
     configured = settings(config).get("profile")
     if configured:
         return Path(configured).expanduser()
-    import setup_steps
-    return setup_steps.BROWSER_PROFILE
+    import user_profile
+    return user_profile.browser_profile()
 
 
 def sidedoor_command():

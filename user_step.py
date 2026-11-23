@@ -99,6 +99,15 @@ def _page(database, job_key):
     job = database.execute("SELECT payload FROM application_jobs WHERE job_key=?", (job_key,)).fetchone()
     if wait is None or job is None:
         return None
+    if wait.get("reason") == access_outcomes.MAILBOX or (confirming and wait.get("mailbox")):
+        # K1: the candidate's own mailbox (an email application), opened at Setup's webmail for that
+        # address; the wait's site is that mailbox's site. K11: the same for a receipt check's wait.
+        email = wait["mailbox"] if confirming else access_outcomes.mailbox_email(wait)
+        url = access_outcomes.mailbox_url(email) if email else None
+        site = site_sessions.site_key(url) if isinstance(url, str) and url.startswith("https://") else None
+        if not site or site != access_outcomes.site(wait["host"]):
+            return None
+        return url, site, wait["wall"], wait["id"]
     try:
         url = desktop_adapter.destination({"payload": job[0]})
     except (ValueError, TypeError, KeyError, AttributeError):

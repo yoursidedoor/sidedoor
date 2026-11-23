@@ -54,7 +54,7 @@ for stand_in in (RUNTIME / "node" / ("node.exe" if os.name == "nt" else "bin/nod
     stand_in.parent.mkdir(parents=True, exist_ok=True)
     stand_in.write_text("")
 os.environ[browser_runtime.RUNTIME_VARIABLE] = str(RUNTIME)
-setup_steps.BROWSER_PROFILE = HOME / "browser-profile"
+# Sidedoor's Chrome profile is HOME/browser-profile through SIDEDOOR_HOME (user_profile.browser_profile, K2).
 # No test starts a real Chrome in the background (browser_runtime.background_launch); the tests of
 # that launch patch this back on and fake the `open` call.
 browser_runtime.BACKGROUND_ALLOWED = False
@@ -66,6 +66,13 @@ _run = unittest.TestCase.run
 # and each test starts with no recorded 429 cool-down or limit (the pacer's state lives in the home).
 import provider_pacing  # noqa: E402
 os.environ[provider_pacing.GAP_VARIABLE] = "0"
+
+# This computer's hardware id (license_clock.hardware_id, read once per process) is a fixed stand-in:
+# no test runs ioreg or reads the registry for it, and a test file run on its own
+# (tests/run_parallel.py) sees a remembered id as it does after other files in one discover. The
+# tests of the read itself clear this (test_license_clock) or patch hardware_id (license_fixtures).
+import license_clock  # noqa: E402
+license_clock._hardware["value"] = "00000000-5E5D-4D00-8000-0000000000AA"
 
 
 def _run_on_example_home(self, result=None):

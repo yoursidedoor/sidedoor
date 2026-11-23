@@ -60,21 +60,36 @@ def _ensure(database):
         id INTEGER PRIMARY KEY, job_key TEXT NOT NULL, host TEXT, wall TEXT NOT NULL, since TEXT NOT NULL,
         deadline TEXT NOT NULL, state TEXT NOT NULL, ended_at TEXT, outcome TEXT, updated_at TEXT NOT NULL)""")
     database.execute(f"CREATE INDEX IF NOT EXISTS application_confirm_waits_job ON {TABLE}(job_key, state)")
+    # K11: the candidate mailbox a sign-in wall of an email application's receipt check is on (None otherwise).
+    if "mailbox" not in [row[1] for row in database.execute(f"PRAGMA table_info({TABLE})")]:
+        database.execute(f"ALTER TABLE {TABLE} ADD COLUMN mailbox TEXT")
 
 
-def action(code):
+# K18: a sign-in wall on the candidate's own mailbox (K11, K17): the card's own words, less its full stop.
+MAILBOX_ACTION = "Sign in to %s in Sidedoor's browser. Do not apply again"
+
+
+def action(code, mailbox=None):
+    if mailbox and WALLS.get(code) == "SIGN_IN":
+        return MAILBOX_ACTION % mailbox
     return ACTION[WALLS.get(code, "SIGN_IN")]
 
 
-def record(database, job, code, now):
+def record(database, job, code, now, mailbox=None):
     """A confirming read stopped on `code`: one waiting row, and the deadline the job's next read is
-    due at (the caller holds the job in RECONCILE with it as next_at). Call inside a transaction."""
+    due at (the caller holds the job in RECONCILE with it as next_at). Call inside a transaction.
+    `mailbox` (K11): the candidate address when the read was an email application's receipt check and the
+    wall is a sign-in: the row's site is then the mailbox's, and the user's step opens that mailbox."""
     import access_outcomes
+    import urllib.parse
+    mailbox = mailbox if WALLS.get(code) == "SIGN_IN" else None
+    host = (access_outcomes.site(urllib.parse.urlsplit(access_outcomes.mailbox_url(mailbox) or "").hostname)
+            if mailbox else access_outcomes.host_of(job))
     _ensure(database)
     end(database, job["job_key"], now, READ_AGAIN)   # a row a read at the deadline left open
     deadline = (dt.datetime.fromisoformat(now) + dt.timedelta(seconds=access_outcomes.WAIT_SECONDS)).isoformat()
-    database.execute(f"INSERT INTO {TABLE}(job_key,host,wall,since,deadline,state,updated_at) VALUES (?,?,?,?,?,?,?)",
-                     (job["job_key"], access_outcomes.host_of(job), code, now, deadline, WAITING, now))
+    database.execute(f"INSERT INTO {TABLE}(job_key,host,wall,since,deadline,state,updated_at,mailbox) VALUES (?,?,?,?,?,?,?,?)",
+                     (job["job_key"], host, code, now, deadline, WAITING, now, mailbox))
     return deadline
 
 
@@ -126,7 +141,7 @@ def _card(row):
     return {"id": row["id"], "job_key": row["job_key"], "employer": payload.get("company") or row["employer"],
             "role": payload.get("role") or payload.get("title"), "url": payload.get("url"), "host": row["host"],
             "wall": row["wall"], "asks": WALLS.get(row["wall"], "SIGN_IN"), "since": row["since"],
-            "deadline": row["deadline"]}
+            "deadline": row["deadline"], "mailbox": row["mailbox"] if "mailbox" in row.keys() else None}
 
 
 def done(database, job_key, now, wait_id=None):

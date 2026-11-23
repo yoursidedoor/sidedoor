@@ -814,6 +814,34 @@ class PagesTest(Base):
         self.assertIn('<span class="chip chip-success">Done</span>', self.step10(response.text),
                       "step 9 is re-sent with the new state")
 
+    def started(self, home=None):
+        return setup_steps.record(home, "start", "done", "Sidedoor is running.")
+
+    def test_start_that_registers_goes_to_overview(self):
+        real = setup_steps.progress
+        with mock.patch.object(setup_steps, "progress", lambda home=None: dict(real(home), locked={})), \
+                mock.patch.object(setup_steps, "start_scheduler", self.started):
+            response = self.client.post("/setup/start", headers=HTMX)
+        self.assertTrue(self.plist.exists())
+        self.assertEqual(response.headers.get("hx-redirect"), "/")
+
+    def test_start_whose_registration_is_refused_stays_on_setup_with_step_9s_message(self):
+        self.runner.answers = [(["launchctl", "bootstrap"], (5, "Bootstrap failed: 5: Input/output error")),
+                               (["launchctl", "print"], (113, "Could not find service"))]
+        real = setup_steps.progress
+        with mock.patch.object(setup_steps, "progress", lambda home=None: dict(real(home), locked={})), \
+                mock.patch.object(setup_steps, "start_scheduler", self.started), \
+                contextlib.redirect_stderr(io.StringIO()):
+            response = self.client.post("/setup/start", headers=HTMX)
+            self.assertNotIn("hx-redirect", response.headers)
+            step = self.step10(response.text)   # step 9 re-sent out of band, as before the redirect
+            self.assertIn('id="step-9" hx-swap-oob="true"', response.text)
+            self.assertIn('<span class="chip chip-error">Failed</span>', step)
+            self.assertIn("Try again", self.step10(self.client.get("/setup?open=9").text))
+            setup_steps.update_state(lambda state: state["steps"].pop("login"), self.home)   # untouched again
+            response = self.client.post("/setup/start", headers=ORIGIN)
+        self.assertEqual((response.status_code, response.headers["location"]), (303, "/setup?open=10#step-10"))
+
     def test_item5_a_stale_entry_says_needs_updating_with_an_update_button(self):
         self.client.post("/setup/login", data={"enabled": "on"}, headers=HTMX)
         setup_steps.update_state(lambda state: state.update(codex_path=str(self.user_home / "moved" / "codex")), self.home)

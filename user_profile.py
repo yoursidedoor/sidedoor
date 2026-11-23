@@ -101,6 +101,21 @@ def profile_path():
     return home() / "profile.json"
 
 
+BROWSER_PROFILE_FOLDER = "browser-profile"
+
+
+def browser_profile():
+    """Sidedoor's own Chrome profile for this home (K2 a): `<home>/browser-profile`, so a second
+    home (a test copy, `SIDEDOOR_HOME=...`) never signs in to another home's browser. Read at use
+    time, never at import. A home in the legacy `~/.config/jobagent` folder keeps the profile it
+    has always had, `~/.config/sidedoor/browser-profile` (a moved profile would sign the user out)."""
+    base = home()
+    legacy = Path.home() / ".config" / LEGACY_CONFIG_DIRECTORY
+    if os.path.normcase(os.path.abspath(base)) == os.path.normcase(os.path.abspath(legacy)):
+        base = Path.home() / ".config" / CONFIG_DIRECTORY
+    return base / BROWSER_PROFILE_FOLDER
+
+
 def settings_path():
     return home() / "settings.json"
 

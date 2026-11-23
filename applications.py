@@ -2393,7 +2393,7 @@ class CommandAdapter:
         return json.loads(result.stdout)
 
 
-def finish_receipt(database, job, receipt, now):
+def finish_receipt(database, job, receipt, now, source="reconcile"):
     import desktop_adapter
     desktop = desktop_adapter.submission_request(database, job["job_key"])
     attempt_id = None
@@ -2401,7 +2401,46 @@ def finish_receipt(database, job, receipt, now):
         attempt_id = desktop_adapter.acknowledge_result(database, job, receipt, now)
     if not verified_receipt(receipt, job, now):
         raise ValueError("VERIFIED_RECEIPT_REQUIRED")
-    mark_submitted(database, job, receipt, attempt_id, now)
+    if mark_submitted(database, job, receipt, attempt_id, now):
+        record_employer_outcome(database, job, receipt, now, source)
+
+
+# K16 (owner, 2026-11-23): what the employer's reply said, as the conversion record has it (an OUTCOME event,
+# applied by `conversion.cycle` under its own identity and evidence rules), so a rejected role is terminal
+# for champions and outreach. REPLY has no conversion outcome of its own and records nothing.
+CONVERSION_OUTCOMES = {"REJECTED": "REJECTED", "INTERVIEW": "INTERVIEW"}
+
+
+def record_employer_outcome(database, job, receipt, now, source="reconcile"):
+    """Saves a settled receipt's employer outcome (`employer_outcome`) as conversion evidence and an OUTCOME
+    event, the way the other producers do (`pipeline_routing._route_role`). Call inside the settling
+    transaction. `source`: the read whose receipt settled the job ("reconcile", or "submit" for the submit
+    path's own result), recorded as `verified_by` (K22). Returns the event id, or None when there is nothing to record or no conversion store."""
+    import conversion
+    outcome = CONVERSION_OUTCOMES.get(receipt.get("employer_outcome"))
+    if outcome is None or receipt.get("evidence_kind") != "employer_confirmation_email":
+        return None
+    if database.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
+                        "('conversion_evidence','conversion_events')").fetchone()[0] != 2:
+        return None
+    identity = "employer-reply:" + hashlib.sha256(json.dumps([job["job_key"], receipt.get("receipt_id"), outcome]).encode()).hexdigest()
+    observed = conversion.timestamp(receipt.get("observed_at") or now)
+    occurred = conversion.timestamp(receipt.get("received_at") or observed)
+    conversion.record_evidence(database, {
+        "evidence_id": identity, "kind": "OUTCOME", "source_type": "employer_record",
+        "source_ref": str(receipt.get("source_url") or receipt.get("source") or "candidate mailbox"),
+        "source_locator": "receipt:" + str(receipt.get("receipt_id") or receipt.get("source_url") or job["job_key"]),
+        "source_sha256": hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest(),
+        "verified_by": "application_browser:%s-receipt" % source, "observed_at": observed,
+        "occurred_at": min(occurred, observed),
+        "facts": {"employer": job["employer"], "requisition": job["requisition"], "outcome": outcome,
+                  "observation": "independent_outcome_read",
+                  # K22: Sidedoor's own fixed summary, never the employer's words (the mail itself is at source_ref).
+                  "statement": "Sidedoor's summary, not the employer's words: an email from the employer about "
+                               "this application was read in the candidate's mailbox.",
+                  "statement_kind": "SIDEDOOR_SUMMARY"}})
+    conversion.enqueue_event(database, identity, "OUTCOME", job["job_key"], identity)
+    return identity
 
 
 def mark_submitted(database, job, receipt, attempt_id, now, notify_owner=True):
@@ -2416,7 +2455,7 @@ def mark_submitted(database, job, receipt, attempt_id, now, notify_owner=True):
                      (json.dumps(receipt), job["job_key"], attempt_id, attempt_id))
     event(database, job["job_key"], "SUBMISSION_VERIFIED", receipt, now)
     if notify_owner:
-        notify(database, job["job_key"] + ":submitted", f"Application verified: {job['employer']} / {job['requisition']}. Receipt: {receipt['receipt_id']}", now)
+        notify(database, job["job_key"] + ":submitted", f"Application verified: {job['employer']} / {job['requisition']}. Receipt: {receipt.get('receipt_id') or 'none given'}", now)
     return True
 
 
@@ -2562,39 +2601,19 @@ def __ad():
     return application_destination
 
 
-def verified_receipt(receipt, job, now):
-    if not isinstance(receipt, dict):
-        return False
-    metadata = receipt.get("_desktop_request")
-    evidence_time = metadata.get("accepted_at", now) if isinstance(metadata, dict) else now
-    if not (fresh(receipt, evidence_time)
-            and receipt.get("status") == "SUBMITTED" and receipt.get("independent_read") is True
-            and __ad().employer_accepted(receipt, job)
-            and receipt.get("candidate_email") == job["candidate_email"]
-            and bool(receipt.get("receipt_id"))):
-        return False
-    # `.get(key, "")` returns None when the key is PRESENT and null, and str(None) is "none" -
-    # a truthy string that sent a null requisition down the strict branch and compared "none"
-    # against the real id. An email receipt reports requisition null, so this rejected exactly
-    # the receipts CX exists to accept (dharma, 2026-09-21 09:10Z).
-    reported = receipt.get("requisition")
-    requisition = str(reported).casefold() if reported is not None else ""
-    if requisition:
-        return requisition == job["requisition"]
-    # Owner, 2026-09-21. An employer confirmation email is one of the two proofs this product
-    # asks for, and Ashby's ("Thank you for applying to the Member of Technical Staff - Systems
-    # position at Dharma!") names the ROLE and never the requisition id. Demanding one rejected a
-    # real receipt for lacking a field the evidence cannot contain, and dharma's verified
-    # submission sat at SUBMISSION_OUTCOME_UNKNOWN because of it. The email path instead binds to
-    # what an email CAN prove and Python can check without trusting the model: the job_key and
-    # attempt_id it echoes must equal the ones this product issued, and the provider's own
-    # message id must be present. An ATS record still carries a requisition and is unchanged.
-    # The candidate's own sent message (owner, 2026-09-24) binds the same way an employer's
-    # confirmation does: by the job_key this product issued, with no requisition to carry. Its
-    # recipient and send time are checked against the attempt in validate_read_result.
-    return (receipt.get("evidence_kind") in {"employer_confirmation_email", "sent_application_email"}
-            and receipt.get("job_key") == job["job_key"])
+# K10: what an employer's mail about this application said, when it was more than a confirmation
+# (`employer_outcome` of an employer_confirmation_email receipt; the AI's structured reading).
+EMPLOYER_OUTCOMES = ("REJECTED", "INTERVIEW", "REPLY")
 
+
+def verified_receipt(receipt, job, now):
+    """A SUBMITTED receipt read settles the job as the AI gave it (owner, 2026-11-23, K28 picks a+b).
+
+    Deleted: freshness, independent_read, employer/candidate/requisition matching, the receipt_id
+    presence and the job_key echo. A SUBMITTED answer can never open a second application; only
+    a NOT_SUBMITTED read (checked in desktop_adapter.validate_read_result and reconcile) can.
+    """
+    return isinstance(receipt, dict) and receipt.get("status") == "SUBMITTED"
 
 def retry(database, job, policy, now, reason):
     attempts = database.execute("SELECT attempts FROM application_jobs WHERE job_key=?", (job["job_key"],)).fetchone()[0]
@@ -2696,7 +2715,44 @@ def give_up_on_uploads(database, job, now):
     return True
 
 
-def hold_access_block(database, job, code, action, now, config=None, result=None):
+def submit_mailbox(database, submit):
+    """K1: the candidate mailbox a guarded submit session sends from, when that attempt's own saved review
+    applies by email (an email application has no form and no site account: the only sign-in its
+    session needs is the candidate's mailbox); None for every other submit."""
+    try:
+        row = database.execute("SELECT evidence FROM application_attempts WHERE attempt_id=?",
+                               (submit["attempt_id"],)).fetchone()
+        review = (json.loads(row[0]) or {}).get("review") if row and row[0] else None
+        email = ((json.loads(submit["payload"]) or {}).get("job") or {}).get("candidate_email")
+    except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+        return None
+    if email_application(review) is None or not isinstance(email, str) or not EMAIL_ADDRESS.fullmatch(email.strip()):
+        return None
+    return email.strip()
+
+
+def latest_submit_mailbox(database, job_key, on=None):
+    """The candidate mailbox a receipt check's wall was on, from the job's latest submit request (the one the
+    check confirms), or None. K11: an email application's wall is always its mailbox (`submit_mailbox`). K17:
+    any other application's wall is the mailbox when the read said so, as the structured `blocked.on`
+    MAILBOX (the AI's own report of where it met the wall; never read from text)."""
+    if not database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='desktop_requests'").fetchone():
+        return None
+    submit = database.execute("SELECT * FROM desktop_requests WHERE job_key=? AND operation='submit' "
+                              "ORDER BY created_at DESC,rowid DESC LIMIT 1", (job_key,)).fetchone()
+    if submit is None:
+        return None
+    mailbox = submit_mailbox(database, submit)
+    if mailbox or on != "MAILBOX":
+        return mailbox
+    try:
+        email = ((json.loads(submit["payload"]) or {}).get("job") or {}).get("candidate_email")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return email.strip() if isinstance(email, str) and EMAIL_ADDRESS.fullmatch(email.strip()) else None
+
+
+def hold_access_block(database, job, code, action, now, config=None, result=None, mailbox=None):
     """A sign-in, code or human-check wall on the ordinary path (E15.T1): the job waits on the user
     or, for an account wall under the Skip setting, closes at once; never retried on its own, never
     abandoned on a count. `action` is the session's own next step; the recorded hold words come from
@@ -2706,7 +2762,8 @@ def hold_access_block(database, job, code, action, now, config=None, result=None
     # One deadline for one wall (review round 8): a wall result the adapter handed back after its
     # ordinary reuse window counts its days from when the wall was met, as `unread_wall` does.
     return access_outcomes.record(database, job, code, now, config=config, result=result,
-                                  since=access_outcomes.reused_wall_since(database, job["job_key"], code, now))
+                                  since=access_outcomes.reused_wall_since(database, job["job_key"], code, now),
+                                  mailbox=mailbox)
 
 
 def hold_submission_blocker(database, job, result, now, config=None):
@@ -2745,7 +2802,8 @@ def hold_submission_blocker(database, job, result, now, config=None):
         event(database, job["job_key"], "RECONCILED_GUARD_NEVER_ARMED",
               {"request_id": submit["request_id"], "request_state": "CONSUMED"}, now)
         if not give_up_on_uploads(database, job, now):
-            hold_access_block(database, job, blocker["code"], blocker["next_action"], now, config, result)
+            hold_access_block(database, job, blocker["code"], blocker["next_action"], now, config, result,
+                              mailbox=submit_mailbox(database, submit))
         return
     if submit and blocker["code"] in PREARM_CLOSES:
         # The submit session found, before Submit, the posting closed (owner's pick Z2 a, 2026-11-14) or
@@ -2983,7 +3041,7 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
                         # A login/2FA/CAPTCHA stop before arming: the job waits on the user (E15.T1).
                         hold_access_block(database, job, blocked["code"], str(blocked.get("next_action") or "")
                                           or "Continue the application after the access wall", now, config,
-                                          json.loads(submit["result"]))
+                                          json.loads(submit["result"]), mailbox=submit_mailbox(database, submit))
                     else:
                         retry(database, job, policy, now, "RECONCILED_ABSENT")
             return
@@ -3066,8 +3124,9 @@ def reconcile(database, job, adapter, policy, now, clock=None, config=None):
                 confirm_read.end(database, job["job_key"], now, confirm_read.READ_AGAIN)
                 hold(database, job, blocker["code"], blocker["next_action"], now, "RECONCILE", None)
             else:
-                deadline = confirm_read.record(database, job, blocker["code"], now)
-                hold(database, job, blocker["code"], confirm_read.action(blocker["code"]), now, "RECONCILE", deadline)
+                mailbox = latest_submit_mailbox(database, job["job_key"], blocker.get("on"))
+                deadline = confirm_read.record(database, job, blocker["code"], now, mailbox=mailbox)
+                hold(database, job, blocker["code"], confirm_read.action(blocker["code"], mailbox), now, "RECONCILE", deadline)
                 event(database, job["job_key"], confirm_read.RECORDED_EVENT,
                       {"wall": blocker["code"], "deadline": deadline}, now)
             event(database, job["job_key"], "RECONCILE_ACCESS_BLOCKED", blocker, now)
@@ -5273,7 +5332,7 @@ def process(database, job, adapter, policy, root, now, clock=None, config=None):
         now = clock()
     with database:
         if verified_receipt(receipt, job, now):
-            finish_receipt(database, job, receipt, now)
+            finish_receipt(database, job, receipt, now, source="submit")
         else:
             hold(database, job, "SUBMISSION_OUTCOME_UNKNOWN", "Independently reconcile the receipt before retrying", now, "RECONCILE", now)
 

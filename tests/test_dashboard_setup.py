@@ -412,6 +412,10 @@ class SetupPageTest(unittest.TestCase):
         self.assertIn("<details class=\"guide-inline\" id=\"guide-codex\" open>", codex)   # S2: opens in place
         self.assertIn(">Sign in with ChatGPT</strong>", codex)
         self.assertNotIn("Create new secret key", codex)
+        if dashboard.GUIDE_PLATFORM == "mac":
+            # Owner, 2026-11-22: "y" fails under the piped install; run codex in a new Terminal window instead.
+            self.assertNotIn("type <code>y</code>", codex)
+            self.assertIn("open a new <strong>Terminal</strong> window, type <code><strong>codex</strong></code>", codex)
         self.assertEqual(("install.sh" in codex, "install.ps1" in codex), (dashboard.GUIDE_PLATFORM == "mac",
                                                                              dashboard.GUIDE_PLATFORM == "windows"))
         setup_steps.update_state(lambda state: state.update(codex_auth_view="api_key"), self.home)
@@ -649,8 +653,26 @@ class SetupPageTest(unittest.TestCase):
             check.assert_called_once_with(self.home, "https://relay.test")
             with mock.patch.object(license_clock, "check_now", side_effect=OSError("offline")):
                 response = self.client.post("/setup/start", headers=HTMX)
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('<span class="chip chip-success">Done</span>', response.text.split('id="step-10"')[1].split("</li>")[0])
+        self.assertEqual((response.status_code, response.headers.get("hx-redirect")), (200, "/"))
+        self.assertIn('<span class="chip chip-success">Done</span>', self.start_step(self.client.get("/setup?open=10").text))
+
+    def test_start_that_works_goes_to_overview_and_one_that_fails_stays(self):
+        # Owner, 2026-11-22: a successful Start opens Overview (htmx and plain form); a failed one stays.
+        self.unlock_start_step()
+        with mock.patch.object(setup_steps, "login_on_continue", return_value=None), \
+                mock.patch.object(dashboard, "sync_license_pause", return_value=None), \
+                mock.patch("license_clock.check_now", return_value="ok"):
+            with mock.patch("scheduler_loop.start", return_value=True):
+                response = self.client.post("/setup/start", headers=HTMX)
+                self.assertEqual((response.status_code, response.headers.get("hx-redirect")), (200, "/"))
+                response = self.client.post("/setup/start", headers=ORIGIN)
+                self.assertEqual((response.status_code, response.headers["location"]), (303, "/"))
+            with mock.patch("scheduler_loop.start", return_value=False):
+                response = self.client.post("/setup/start", headers=HTMX)
+                self.assertNotIn("hx-redirect", response.headers)
+                self.assertIn("couldn&#39;t start from this window", self.start_step(response.text))
+                response = self.client.post("/setup/start", headers=ORIGIN)
+                self.assertEqual((response.status_code, response.headers["location"]), (303, "/setup?open=10#step-10"))
 
     def unlock_start_step(self):
         license_fixtures.install(self.home, valid_until="2999-01-01T00:00:00Z")

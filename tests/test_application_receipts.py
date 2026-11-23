@@ -76,17 +76,6 @@ class ApplicationReceiptTests(unittest.TestCase):
                 applications.reconcile(fixture.database, fixture.job(), fixture.adapter, fixture.policy, fixture.now)
         self.assertEqual(fixture.database.execute("SELECT state FROM application_attempts WHERE attempt_id=?", (outstanding,)).fetchone()[0], "SUBMITTING")
 
-    def test_positive_receipt_requires_provider_source_and_account(self):
-        fixture = self.fixture
-        fixture.prepare()
-        request = fixture.claim(fixture.queue("verify", {"job": fixture.job()}))
-        # provider_message_or_application_id is no longer required (owner, 2026-09-21): nothing
-        # reads it to decide anything, so an empty one is not grounds to refuse a real receipt.
-        for field, value in {"source": "", "candidate_email": "wrong@example.invalid",
-                             "evidence_kind": "success_page", "observed_at": desktop_adapter.later(fixture.now, -1)}.items():
-            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "INDEPENDENT_EMPLOYER"):
-                desktop_adapter.complete(fixture.database, dict(request, result=dict(fixture.receipt(), **{field: value})), fixture.now)
-
     def test_the_reads_employer_judgement_settles_only_a_submitted_receipt(self):
         # Owner, 2026-10-07 (item 1): a confirmation email naming the employer's legal name is
         # accepted on the read's employer_matches_expected; a "not submitted" read never is.
@@ -98,9 +87,6 @@ class ApplicationReceiptTests(unittest.TestCase):
             desktop_adapter.complete(fixture.database, dict(
                 request, result=dict(fixture.receipt("NOT_SUBMITTED"), **legal)), fixture.now)
         email = dict(fixture.receipt(), evidence_kind="employer_confirmation_email", requisition=None, **legal)
-        with self.assertRaisesRegex(ValueError, "INDEPENDENT_EMPLOYER"):
-            desktop_adapter.complete(fixture.database, dict(
-                request, result=dict(email, employer_matches_expected=False)), fixture.now)
         desktop_adapter.complete(fixture.database, dict(request, result=email), fixture.now)
 
     def test_block_api_rejects_armed_read_expired_and_malformed_claims(self):

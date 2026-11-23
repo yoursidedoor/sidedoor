@@ -619,8 +619,11 @@ def revise_reply_context(database, task, config, now):
                 return None
             previous = json.loads(request_json, object_pairs_hook=reply_worker._unique_object)
             context_fields = {"conversation_context", "initial_invitation", "referral_context", "context_issues"}
-            if ({key: value for key, value in previous.items() if key not in context_fields}
-                    != {key: value for key, value in current.items() if key not in context_fields}
+            # A trimmed input (H2) may trim differently once the thread changes (owner H5, 2026-11-20).
+            trimmed = "context_trimmed_for_size" in previous or "context_trimmed_for_size" in current
+            same = reply_worker.without_trimmable if trimmed else (lambda packet: packet)
+            if ({key: value for key, value in same(previous).items() if key not in context_fields}
+                    != {key: value for key, value in same(current).items() if key not in context_fields}
                     or previous == current):
                 return None
             stored = one(database, "SELECT * FROM pipeline_routing_sources WHERE source_key=?", (bound["source_key"],))

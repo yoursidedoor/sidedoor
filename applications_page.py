@@ -7,8 +7,8 @@ Sources (why each is the record the product itself treats as that fact):
 - the job list: `application_jobs` (one row per posting: state, blocker, next_at, receipt,
   updated_at). Company, role and link come from its `payload` (the role `ingest` recorded).
 - buckets: the same code Overview counts with. "Blocked, needs you" is `overview_page._blocked`
-  (BLOCKED jobs split by `applications.job_route`, plus the spent SUBMISSION_OUTCOME_UNKNOWN test,
-  O19); "Waiting to retry" is `overview_page.retrying_keys` (every job whose badge says so: RETRY_WAIT
+  (BLOCKED jobs split by `applications.job_route`; a job whose receipt checks are spent,
+  `overview_page.outcome_check_spent`, is in neither list since K20 and shows "Not confirmed"); "Waiting to retry" is `overview_page.retrying_keys` (every job whose badge says so: RETRY_WAIT
   not being read now, plus `_blocked`'s automatic waits); "Queued" is QUEUED only; "Waiting for confirmation" is SUBMITTING/RECONCILE
   (`applications.UNCERTAIN`); "Submitted today" is `application_events` SUBMISSION_VERIFIED in the
   service day (`overview_page.submitted_today`'s rows).
@@ -245,6 +245,9 @@ RECEIPT_WORDS = {"page_confirmation": "The application page confirmed it",
                  "employer_confirmation_email": "Confirmation email from the employer",
                  "sent_application_email": "Sent by email from your mailbox",
                  "authenticated_ats_application_record": "Found in your applicant account"}
+EMPLOYER_OUTCOME_WORDS = {"REJECTED": "The employer replied: they are not moving forward",
+                          "INTERVIEW": "The employer invited you to interview",
+                          "REPLY": "The employer replied about this application"}
 
 
 def code_root(code):
@@ -431,6 +434,9 @@ def _receipt(state, text):
     found = {"words": RECEIPT_WORDS.get(kind, "Submission confirmed"),
              "confirmation": _text(receipt.get("confirmation_text")) if kind == "page_confirmation" else None,
              "at": overview._utc(moment) if isinstance(moment, str) else None, "to": None}
+    if kind == "employer_confirmation_email" and receipt.get("employer_outcome") in EMPLOYER_OUTCOME_WORDS:
+        # K10: the employer's mail that proved it was received said more (owner, 2026-11-23).
+        found["words"] = EMPLOYER_OUTCOME_WORDS[receipt["employer_outcome"]]
     recipients = receipt.get("email_to")
     if kind == "sent_application_email" and isinstance(recipients, list):
         found["to"] = ", ".join(value for value in recipients if isinstance(value, str)) or None
@@ -451,6 +457,11 @@ POSTING_CLOSED_TODO = "The posting has closed, so there is nothing for you to do
 def _awaits_answers(row, owner_hold):
     """An owner hold on the form's questions (UNKNOWN_REQUIRED_ANSWERS), not the unreadable-form note."""
     return bool(owner_hold) and overview.answers_hold(row["blocker"])
+
+
+# K20: a job whose outcome checks are spent (`overview.outcome_check_spent`): no action asked of anyone.
+SPENT_STATE = "Not confirmed"
+SPENT_TODO = "Sidedoor could not confirm whether this application went through. It will not submit it again."
 
 
 def group(state, needs_owner):
@@ -489,9 +500,6 @@ def _what_to_do(row, company, route, owner_hold, asked, fmt):
         if code == overview.PARKED_CODE:
             # Never retried on its own (owner, 2026-11-14): the reason line says why; Try again is beside it.
             return (PARKED_TODO, None, None)
-        if code == "SUBMISSION_OUTCOME_UNKNOWN":
-            return ("Check your applicant account or confirmation email at %s to see whether it went through. "
-                    "Sidedoor will not submit it again on its own." % company, None, None)
         if row["blocker"] == FORM_NOT_READABLE:
             return ("Sidedoor couldn't read this form's questions and will not guess them, so it holds this application"
                     + (". Answer its note on Approvals." if asked else " and asks you on Approvals."),
@@ -559,6 +567,8 @@ def job_view(row, owner_keys, asked, live_reading, fmt, waits=None):
     # this job, so it is In progress with "Waiting" and has no button of its own.
     behind = bool(wait and wait.get("behind")) and not unsure
     needs = overview.blocked_on_owner(owner_hold, asked_here, code) or (bool(wait) and not unsure and not behind)
+    spent = state == "BLOCKED" and overview.outcome_check_spent(
+        code, row["reconcile_attempts"] if "reconcile_attempts" in row.keys() else None)
     if unsure:
         words, tone = STATE_WORDS["RECONCILE"], STATE_TONES["RECONCILE"]
     elif behind:
@@ -579,6 +589,8 @@ def job_view(row, owner_keys, asked, live_reading, fmt, waits=None):
         words, tone = "Blocked, needs you", "error"
     elif reading:
         words, tone = "Reading now", "info"
+    elif spent:
+        words, tone = SPENT_STATE, "muted"   # K20: needs nobody, not retrying, never submitted again
     elif state == "BLOCKED" or (state in ("SUBMITTING", "RECONCILE") and "never_armed" in row.keys() and row["never_armed"]):
         # A submit that stopped before arming sent nothing: it waits to retry, not for a confirmation.
         words, tone = "Waiting to retry", "warning"
@@ -595,6 +607,8 @@ def job_view(row, owner_keys, asked, live_reading, fmt, waits=None):
         todo, href, label = wait["words"], wait["href"], wait["label"]
         if behind:
             href = label = None
+    elif spent:
+        todo, href, label = SPENT_TODO, None, None   # K20: one plain line, nothing to do, no reason line
     elif confirming and confirming.get("confirming"):
         # Its confirming read waits on the user's step (confirm_read): the card's own sentences, never
         # "Nothing to do." The job stays where it is: still being confirmed, not one of the waiting jobs.
@@ -1020,7 +1034,7 @@ def _rows_for(reader, keys):
         profile_held = ("(SELECT CASE WHEN %s THEN 'ASKED' ELSE 'STEP' END FROM application_access_waits AS wait "
                         "WHERE wait.job_key=application_jobs.job_key AND wait.state='WAITING' AND wait.reason='PROFILE_PENDING' LIMIT 1)" % asked
                         if reader.has("application_access_waits") else "NULL")
-        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,next_action,receipt,updated_at,%s AS approval,"
+        for row in reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,next_action,receipt,updated_at,reconcile_attempts,%s AS approval,"
                                "%s AS never_armed,%s AS host_released,%s AS passkey_wait,%s AS profile_held FROM application_jobs WHERE job_key IN (%s)"
                                % (approval, never_armed, host_released, passkey_wait, profile_held, ",".join("?" * len(chunk))),
                                tuple(chunk), "application_jobs"):

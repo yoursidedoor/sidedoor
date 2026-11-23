@@ -620,7 +620,8 @@ class EveryListPages(PageBase):
 
     def questions(self, count):
         decision_transport.initialize(self.db)
-        expires = int(NOW.timestamp() * 1000) + 30 * 86400000
+        # The page reads the real clock (approvals_page.gather), so expiry is relative to it, not NOW.
+        expires = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000) + 30 * 86400000
         with self.db:
             for index in range(count):
                 self.db.execute("INSERT INTO user_decisions(id,job_key,field,semantic,answer_type,choices,payload_hash,job_hash,"

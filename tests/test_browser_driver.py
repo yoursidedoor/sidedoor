@@ -39,6 +39,7 @@ import application_browser  # noqa: E402
 import applications  # noqa: E402
 import browser_guard  # noqa: E402
 import browser_runtime  # noqa: E402
+import user_profile  # noqa: E402
 import engines  # noqa: E402
 import linkedin_contacts  # noqa: E402
 import outreach_history_browser  # noqa: E402
@@ -445,7 +446,7 @@ class CommandTests(unittest.TestCase):
             mcp = args[args.index("--") + 1:]
             self.assertEqual(mcp[mcp.index("--output-dir") + 1], str(directory / "browser"))
             # Off in tests (profile_home); the macOS background form is tests/test_browser_focus.py's.
-            self.assertEqual(mcp[mcp.index("--user-data-dir") + 1], str(setup_steps.BROWSER_PROFILE))
+            self.assertEqual(mcp[mcp.index("--user-data-dir") + 1], str(profile_home.HOME / "browser-profile"))
             self.assertNotIn("--headless", mcp)
             launch = json.loads((directory / "browser-config.json").read_text())
             if sys.platform == "darwin":   # E7: the Chrome Setup found is named on a Mac (test_browser_offscreen)

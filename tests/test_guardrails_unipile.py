@@ -13,7 +13,6 @@ database and a frozen clock:
   `orchestrator.conversion_cycle`, the reply AI (`reply_classification_cycle`) and
   `reply_execution_cycle`.
 No sequence helper is called directly. Each scenario asserts the exact number of LinkedIn writes
-import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
 from `port.calls` (WRITES), never only the final state.
 
 Matrix (guardrail x purpose):
@@ -46,6 +45,7 @@ only the model scripted. Scenarios ported from the HeyReach suite
 
 `tests/mutate_guardrails_unipile.py` disables each guard in turn and shows this suite fails.
 """
+import profile_home  # noqa: F401 (a temporary SIDEDOOR_HOME, never the real one; E6.T2 P15)
 
 import contextlib
 import datetime as dt

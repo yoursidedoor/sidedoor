@@ -77,10 +77,11 @@ class InspectEvidenceBinding(unittest.TestCase):
                 inspect({"status": "BLOCKED", "next_action": "x"}, [], operation)
 
     def test_evidence_kind_needs_a_quote_unless_submitted(self):
-        for status, pointer in (("NOT_SUBMITTED", "/evidence_kind"), ("SUBMITTED", "/status")):
-            with self.assertRaises(ValueError) as refused:
-                inspect({"evidence_kind": "employer_confirmation_email", "status": status}, [], "verify")
-            self.assertEqual(getattr(refused.exception, "pointer", None), pointer)
+        with self.assertRaises(ValueError) as refused:
+            inspect({"evidence_kind": "employer_confirmation_email", "status": "NOT_SUBMITTED"}, [], "verify")
+        self.assertEqual(getattr(refused.exception, "pointer", None), "/evidence_kind")
+        # K28: a SUBMITTED receipt read is taken as the AI gave it; its quotes are recorded, not compared.
+        inspect({"evidence_kind": "employer_confirmation_email", "status": "SUBMITTED"}, [], "verify")
 
     def test_the_small_lexer_blanks_literals_and_gives_up_on_anything_else(self):
         # The checks of browser_run_code_unsafe code this lexer was written for went with that tool (owner,

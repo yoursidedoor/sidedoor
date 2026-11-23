@@ -100,6 +100,13 @@ To stop starting at login, untick the box in Settings > Start at login; records 
 /opt/homebrew/bin/python3.13 -m unittest discover -s tests -v
 ```
 
+The same tests with the test files run in parallel (about a minute; one combined summary, the full
+output of failing files only; timings kept in the gitignored `tests/.parallel_timings.json`):
+
+```sh
+/opt/homebrew/bin/python3.13 tests/run_parallel.py
+```
+
 Tests exercise DST, exact 08:00 eligibility, multi-day wake catch-up, concurrent claims, success versus failure, bounded retry/backoff, crash recovery, real subprocess output ingestion, restart deduplication, source preservation, outreach preflight, and uncertain sends. Sending tests use a fake provider; they do not prove new live delivery. Live validation performs read-only reconciliation of the existing campaign and reports unresolved gates without repeating outreach.
 
 Codex research integration follows [official non-interactive mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode) and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).

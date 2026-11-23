@@ -86,7 +86,7 @@ PROFILE_STEP_LABEL = "Open the site"
 # `access_outcomes.ACCOUNT_REASONS`: an account reason added there later gets no button until it is
 # named here (it shows its sentence, apply yourself and Abandon).
 SIGN_IN_REASONS = frozenset({"SIGN_IN", "ACCOUNT_EXISTS", "CODE_UNREADABLE", "SIGN_UP_FAILED", "SIGN_UP_UNCONFIRMED",
-                             "SIGN_IN_EMAIL_MISSING"})
+                             "SIGN_IN_EMAIL_MISSING", access_outcomes.MAILBOX})
 # The reasons that wait on a confirmation the user can do themselves ("I've confirmed it", E15.T8).
 CONFIRM_REASONS = frozenset({"CONFIRMATION_EMAIL_MISSING", "CONFIRMATION_LINK_UNOPENED"})
 LINK_HINT = "Open the link in the site's email. Then press I've confirmed it."
@@ -129,6 +129,8 @@ FINDER_PURPOSES = {"SIGN_IN": user_step.SIGN_IN, "HUMAN_CHECK": user_step.HUMAN_
 # text is one of these (the sign-in one follows his human-check sentence), with the step's button.
 CONFIRM_WORDS = {"HUMAN_CHECK": "The site needs a human check. Do not apply again.",
                  "SIGN_IN": "The site needs you to sign in. Do not apply again."}
+# K11: an email application's receipt check met the candidate's own mailbox signed out.
+CONFIRM_MAILBOX_WORDS = "Sign in to %s in Sidedoor's browser. Do not apply again."
 CONFIRM_GONE = "This application is no longer waiting for this step."
 CONFIRM_PURPOSES = {"SIGN_IN": user_step.SIGN_IN, "HUMAN_CHECK": user_step.HUMAN_CHECK}
 
@@ -367,7 +369,7 @@ def confirm_cards(database):
         opens = user_step.available(step) and user_step.openable(database, card_key)
         named = _named(wait)
         cards.append({"key": card_key, "company": named["company"], "role": named["role"], "url": None,
-                      "dom": dom(card_key), "closes": None, "need": CONFIRM_WORDS[wait["asks"]],
+                      "dom": dom(card_key), "closes": None, "need": (CONFIRM_MAILBOX_WORDS % wait["mailbox"]) if wait.get("mailbox") else CONFIRM_WORDS[wait["asks"]],
                       "others": [], "done_label": None, "hint": None, "apply": None, "abandon": False, "setting": False,
                       "step": {"purpose": step, "label": STEP_LABELS[step]} if opens else None,
                       "jobs": 1, "counted": True, "confirm": True})

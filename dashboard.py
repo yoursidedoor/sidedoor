@@ -1417,8 +1417,8 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
         if refused:
             return refused
         progress_share.save_shown_if_unchosen(home)   # an untouched box saves what it showed (one write, in the lock)
-        setup_steps.login_on_continue(home)  # step 9 ticked by default: registered when continuing past it
-        setup_steps.start_scheduler(home)
+        login = setup_steps.login_on_continue(home)  # step 9 ticked by default: registered when continuing past it
+        started = setup_steps.start_scheduler(home)
         # L1 (owner, 2026-11-08): one license check now, as [Check again] does, so the trial end the
         # relay set at first activation shows at once (not after the daily check). A refresh, never a
         # gate: offline or a failure leaves Start as it is.
@@ -1428,6 +1428,15 @@ def create_app(secret, port, home=None, root=None, config=None, browser=None, re
             sync_license_pause(root, home)
         except Exception as error:
             LOG.warning("license check after Start skipped: %s", type(error).__name__)
+        login_failed = isinstance(login, dict) and login["steps"].get("login", {}).get("status") == "failed"
+        if not login_failed and isinstance(started, dict) and started["steps"].get("start", {}).get("status") == "done":
+            # Owner, 2026-11-22: a Start that worked goes to Overview; one that failed, or whose start at
+            # login registration was refused in this click, stays here with its message.
+            if request.headers.get("hx-request") == "true":
+                response = HTMLResponse("")
+                response.headers["HX-Redirect"] = "/"
+                return response
+            return RedirectResponse("/", status_code=303)
         return setup_response(request, STEP["start"], also=(STEP["login"],))
 
     settings_page.register(app, templates, layout, pick_view, home=home, root=root, config=config, browser=browser,

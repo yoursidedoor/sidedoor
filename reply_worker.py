@@ -51,6 +51,75 @@ FACTS = {"SENDER_IDENTITY", "ROLE_ASSOCIATION", "QUOTED_CONTEXT", "FORWARDED_CON
 # ordinary replies went unread. The cap still exists and still holds anything larger unread:
 # it is what keeps an arbitrarily long message someone else wrote from reaching the model whole.
 MAX_INPUT_BYTES = 131072
+# Over the cap, background is left out, largest piece first, until the input fits (owner H2,
+# 2026-11-20: "cut only the job background, and any other larger pieces"). The instructions, the
+# reply format and the message being answered are never cut; the AI is told what was left out.
+TRIM_NOTE = ("Some background was left out so this input fits the size limit; left_out lists it. "
+             "Missing background is not evidence that something did not happen.")
+TRIMMED_JOB_FIELDS = ("role_context", "application_status_context", "application_interview_context")
+# Jobs given as reply context (owner H7, 2026-11-20). A job the contact was found for (a research
+# binding: rw_result_id set) is always given, and its background is never trimmed.
+MAX_JOB_SCOPE = 10
+ENDED_JOB_STATES = frozenset({"ABANDONED", "EXHAUSTED"})
+JOB_SCOPE_NOTE = ("More jobs at this company are on file than are listed in job_scope; count says how many "
+                  "were left out. A job not listed can still exist.")
+
+
+def without_trimmable(packet):
+    """`packet` without what fit() may leave out of it besides the conversation fields (owner H5,
+    2026-11-20): the background of jobs the contact was not found for, the résumé text and the trim note. A context revision
+    compares inputs this way when either was trimmed, since a changed thread can change what fit."""
+    packet = json.loads(routing.encoded(packet))
+    packet.pop("context_trimmed_for_size", None)
+    for scope in packet.get("job_scope") or []:
+        for field in TRIMMED_JOB_FIELDS:
+            if isinstance(scope, dict) and scope.get("rw_result_id") is None:
+                scope.pop(field, None)
+    if isinstance(packet.get("candidate_resume"), dict):
+        packet["candidate_resume"].pop("text", None)
+    return packet
+
+
+def fit(template, request):
+    """(request, prompt) within MAX_INPUT_BYTES, or (request, None) when trimming cannot get there.
+
+    Deterministic, so a retry rebuilds the same input and its saved hash still matches.
+    """
+    def build(packet):
+        prompt = template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + routing.encoded(packet)
+        return prompt if len(prompt.encode("utf-8")) <= MAX_INPUT_BYTES else None
+
+    prompt = build(request)
+    if prompt is not None:
+        return request, prompt
+    packet = json.loads(routing.encoded(request))
+    left_out = []
+    while True:
+        pieces = []   # (size, label, remove)
+        for scope in packet.get("job_scope") or []:
+            for field in TRIMMED_JOB_FIELDS:
+                # Never the background of a job this contact was found for (owner, 2026-11-20).
+                if isinstance(scope, dict) and field in scope and scope.get("rw_result_id") is None:
+                    pieces.append((len(routing.encoded(scope[field])), "job_scope." + str(scope.get("job_key")) + "." + field,
+                                   lambda scope=scope, field=field: scope.pop(field)))
+        resume = packet.get("candidate_resume")
+        if isinstance(resume, dict) and resume.get("text") is not None:
+            pieces.append((len(routing.encoded(resume["text"])), "candidate_resume.text", lambda: resume.update(text=None)))
+        for index, entry in enumerate(packet.get("conversation_context") or []):
+            pieces.append((len(routing.encoded(entry)), "conversation_context." + str((entry or {}).get("content_sha256")),
+                           lambda entry=entry: packet["conversation_context"].remove(entry)))
+        for field in ("initial_invitation", "referral_context"):
+            if packet.get(field):
+                pieces.append((len(routing.encoded(packet[field])), field, lambda field=field: packet.update({field: None})))
+        if not pieces:
+            return request, None
+        size, label, remove = max(pieces, key=lambda piece: (piece[0], piece[1]))
+        remove()
+        left_out.append(label)
+        packet["context_trimmed_for_size"] = {"note": TRIM_NOTE, "left_out": left_out}
+        prompt = build(packet)
+        if prompt is not None:
+            return packet, prompt
 # Recent messages of the thread given to the reply AI besides the initial invitation (owner, 2026-10-22:
 # "Lets make it last 16 messages + initial outreach message"; was 8).
 CONTEXT_MESSAGES = 16
@@ -100,10 +169,26 @@ _TRANSCRIPT_MARKERS = ("codex", "thinking")
 _KEY_FRAGMENT = 8
 
 
+def _holds_fragment(line, fragments):
+    """True when `line` holds any of `fragments`. Every piece `secret_fragments` makes is _KEY_FRAGMENT
+    long, so a set of them is checked by the line's own pieces (one set lookup each, L5: the Failures page
+    redacts ~1,300 lines a load); any other collection is scanned fragment by fragment."""
+    if not fragments:
+        return False
+    if isinstance(fragments, Fragments):
+        return not fragments.isdisjoint(line[index:index + _KEY_FRAGMENT]
+                                        for index in range(len(line) - _KEY_FRAGMENT + 1))
+    return any(fragment in line for fragment in fragments)
+
+
+class Fragments(frozenset):
+    """`secret_fragments`' pieces: each exactly _KEY_FRAGMENT characters long."""
+
+
 def secret_fragments(secrets):
     """Every 8-character piece of each configured secret (`redact_line` drops a line holding one)."""
-    return {secret[index:index + _KEY_FRAGMENT] for secret in secrets if secret and len(secret) >= _KEY_FRAGMENT
-            for index in range(len(secret) - _KEY_FRAGMENT + 1)}
+    return Fragments(secret[index:index + _KEY_FRAGMENT] for secret in secrets if secret and len(secret) >= _KEY_FRAGMENT
+            for index in range(len(secret) - _KEY_FRAGMENT + 1))
 
 
 def redact_line(line, secrets=(), fragments=()):
@@ -116,7 +201,7 @@ def redact_line(line, secrets=(), fragments=()):
             line = line.replace(secret, "<redacted>")
     line = _SCHEME_URL.sub("<url>", line)
     line = _BARE_URL.sub("<url>", line)
-    if any(fragment in line for fragment in fragments):
+    if _holds_fragment(line, fragments):
         return None  # part of a key outside a URL (e.g. split across lines): drop the line
     line = _COOKIE.sub(lambda match: match.group(1) + "<redacted>", line)
     line = _JWT.sub("<redacted-jwt>", line)
@@ -334,9 +419,25 @@ def _source(database, task, config, now):
     for person in people:
         for job_key, job in champion_composition.company_jobs(database, person).items():
             company_jobs.setdefault(job_key, job)
-    for job_key, job in company_jobs.items():
-        if job_key in bound_keys:
-            continue
+    # At most MAX_JOB_SCOPE jobs (owner H7, 2026-11-20): the jobs this contact was found for always,
+    # then the company's other jobs, submitted or in progress before abandoned, most recent first.
+    others = sorted((job for job_key, job in company_jobs.items() if job_key not in bound_keys), key=lambda job: job["job_key"])
+    others.sort(key=lambda job: str(job.get("updated_at") or ""), reverse=True)   # stable: ties keep job_key order
+    others.sort(key=lambda job: job.get("state") in ENDED_JOB_STATES)
+    room = max(0, MAX_JOB_SCOPE - len(request["job_scope"]))
+    if previous is not None and isinstance(previous.get("job_scope"), list):
+        # Pinned (owner H9, 2026-11-20): a read already saved keeps the jobs it was given, so a job's
+        # status changing mid-read cannot change the selection and hold the reply as changed.
+        pinned = {scope.get("job_key") for scope in previous["job_scope"] if isinstance(scope, dict)}
+        chosen = [job for job in others if job["job_key"] in pinned]
+        if previous.get("job_scope_left_out") is not None:
+            request["job_scope_left_out"] = previous["job_scope_left_out"]
+    else:
+        chosen = others[:room]
+        if len(others) > room:
+            request["job_scope_left_out"] = {"count": len(others) - room, "note": JOB_SCOPE_NOTE}
+    for job in chosen:
+        job_key = job["job_key"]
         try:
             payload = json.loads(job["payload"]) if job["payload"] else {}
         except (ValueError, TypeError):
@@ -450,7 +551,21 @@ def _source(database, task, config, now):
         # unavailability is recorded in the packet so the model knows not to quote from it.
         request["candidate_resume"] = {"source": None, "text": None,
                                        "unavailable": str(error)[:160]}
-    return request, message, holds
+    # Trimmed here, not in cycle, so every rebuild of this input (the after-call check, the saved
+    # input comparisons in pipeline_routing) sees the same trimmed packet the AI was given (H2).
+    try:
+        template = prompt_template()
+    except (OSError, ValueError):
+        return request, message, holds
+    return fit(template, request)[0], message, holds
+
+
+def prompt_template():
+    """The reply AI's instructions, referral policy and output schema: every prompt's fixed part."""
+    template = resources.read_text("reply-prompt.md") + "\n" + champion_composition.INDEPENDENT_REFERRAL_INSTRUCTIONS
+    # The schema is part of the saved prompt (it was when codex ran the tools without
+    # --output-schema), which stays exactly what the model was given.
+    return template + "\n" + TOOLS_OUTPUT_INSTRUCTIONS + "\n" + resources.read_text("reply-schema.json")
 
 
 def _environment():
@@ -1297,12 +1412,8 @@ def cycle(root, database, config, now=None):
     try:
         timeout, limit, budget = _options(config)
         root = Path(root)
-        prompt_template = resources.read_text("reply-prompt.md")
-        prompt_template += "\n" + champion_composition.INDEPENDENT_REFERRAL_INSTRUCTIONS
+        template = prompt_template()
         schema = resources.read_text("reply-schema.json")
-        # The schema is part of the saved prompt (it was when codex ran the tools without
-        # --output-schema), which stays exactly what the model was given.
-        prompt_template += "\n" + TOOLS_OUTPUT_INSTRUCTIONS + "\n" + schema
     except (Held, OSError, ValueError, TypeError) as error:
         return {"state": "BLOCKED", "blocker": error.code if isinstance(error, Held) else "REPLY_WORKER_ASSETS_UNAVAILABLE", "items": []}
     initialize(database)
@@ -1310,7 +1421,7 @@ def cycle(root, database, config, now=None):
     # A direct call (owner, 2026-10-27): no executable, the route and its settings recorded instead.
     provenance = {"model": text_model.model(config), "executable": None, "auth": text_model.auth(config),
                   "model_source": "configured_cli_argument", "output_version": VERSION,
-                  "prompt_sha256": sha(prompt_template), "schema_sha256": sha(schema),
+                  "prompt_sha256": sha(template), "schema_sha256": sha(schema),
                   "route": DIRECT_ROUTE, "reasoning_effort": DIRECT_EFFORT, "max_tokens": REPLY_MAX_TOKENS}
 
     def revise_context(task, stamp):
@@ -1388,8 +1499,8 @@ def cycle(root, database, config, now=None):
         tools = {"root": str(root), "task_id": task["task_id"], "calls": []}
         try:
             request, message, holds = _source(database, task, config, stamp)
-            prompt = prompt_template + "\n\nUNTRUSTED_SOURCE_JSON:\n" + routing.encoded(request)
-            if len(prompt.encode("utf-8")) > MAX_INPUT_BYTES:
+            request, prompt = fit(template, request)
+            if prompt is None:
                 raise Held("CLASSIFICATION_INPUT_EXCEEDS_LIMIT")
             input_hash = sha(prompt)
             saved = routing.one(database, "SELECT * FROM reply_worker_inputs WHERE task_id=?", (task["task_id"],))

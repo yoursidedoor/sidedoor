@@ -45,7 +45,7 @@ class ReadLabels(unittest.TestCase):
         self.assertEqual(result["evidence_dropped_over_limit"], 2)
         self.assertEqual(len(result["browser_evidence"]), 128)
         with self.assertRaisesRegex(ValueError, "APPLICATION_EVIDENCE_LIMIT"):
-            normalize({"status": "UNKNOWN"}, evidence, "verify")
+            normalize({"status": "NOT_SUBMITTED"}, evidence, "verify")
 
     def test_email_application_without_a_valid_address_is_not_refused(self):
         result = normalize({"verified": True, "employer": "Synthetic Company",

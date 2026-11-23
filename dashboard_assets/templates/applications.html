@@ -162,7 +162,7 @@
         <p class="app-attempts-line"><strong>Attempts:</strong>
           {% for a in j.attempts %}{{ a.outcome }}{% if a.at %} ({{ v.when(a.at) }}){% endif %}{{ "; " if not loop.last }}{% endfor %}</p>
         {% endif %}
-        <p><a href="{{ v.link(job=j.key) }}">Eligibility, answers used and full history</a></p>
+        <p><a href="{{ v.link(job=j.key) }}">Eligibility, answers used and full history</a> · <a class="card-logs" href="/failures?job={{ j.key | urlencode }}#files-title">Logs</a></p>
       </div>
     </details>
   </li>

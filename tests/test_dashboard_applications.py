@@ -112,7 +112,8 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(self.gather(show=show)["list"]["total"], expected, show)
         self.assertEqual(sorted(self.keys(show="needs_you")),
                          sorted(overview_page.blocked_on_owner_keys(overview_page.Reader(self.database), self.now)))
-        self.assertEqual(self.keys(show="needs_you"), ["spent"])   # the asked and the answered job are not here
+        # The asked and the answered job are not here, nor the job whose outcome checks are spent (K20).
+        self.assertEqual(self.keys(show="needs_you"), [])
         self.assertEqual(sorted(self.keys(show="retrying")), sorted(waiting))
         self.assertEqual(sorted(self.keys(show="confirming")), ["confirming", "submitting"])
         self.assertEqual(self.keys(show="submitted_today"), ["today"])
@@ -145,9 +146,10 @@ class GatherTest(unittest.TestCase):
         self.buckets()
         jobs = {item["key"]: item for item in self.gather()["list"]["jobs"]}
         spent = jobs["spent"]
-        self.assertTrue(spent["needs_you"])
-        self.assertEqual(spent["state"], "Blocked, needs you")
-        self.assertIn("Check your applicant account or confirmation email at Globex to see whether it went through.", spent["todo"])
+        # K20 (owner, 2026-11-23): its outcome checks are spent, so it needs nobody and asks nothing.
+        self.assertFalse(spent["needs_you"])
+        self.assertEqual((spent["state"], spent["todo"], spent["todo_href"], spent["problem"]),
+                         ("Not confirmed", applications_page.SPENT_TODO, None, None))
         self.assertNotIn("tell Sidedoor", spent["todo"])     # no control behind it (owner, 2026-10-22)
         login = jobs["login-1"]
         self.assertFalse(login["needs_you"])
@@ -598,7 +600,7 @@ class ApplicationsPageTest(unittest.TestCase):
         self.assertNotIn("javascript:alert", page)
         self.assertNotIn("<script>x</script>", page)
         self.assertIn("Receipt not readable", page)                                  # A3: the page still renders
-        self.assertIn("to see whether it went through", page)
+        self.assertIn("could not confirm whether this application went through", page)
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["orchestrator.sqlite3"])
 
@@ -625,13 +627,15 @@ class ApplicationsPageTest(unittest.TestCase):
             self.assertIn('href="/applications?show=%s"' % show, overview)
         # Overview's one Needs you card (owner, 2026-10-24): "3 applications blocked on you" [Open].
         needs = overview[overview.index('id="needs-title"'):overview.index('id="now-title"')]
-        self.assertRegex(needs, r'<span class="overview-number">3</span>\s*<span class="overview-needs-what">applications blocked on you</span>'
+        # The job whose outcome checks are spent ("three") is not one of them (K20).
+        self.assertRegex(needs, r'<span class="overview-number">2</span>\s*<span class="overview-needs-what">applications blocked on you</span>'
                                 r'\s*<a class="button overview-needs-go" href="/applications\?show=needs_you">Open</a>')
         self.assertNotIn("Blocked, needs you", overview)
         page = self.get(show="needs_you").text
-        self.assertEqual(page.count('class="card app-row'), 3)
-        for company in ("One Co", "Two Co", "Three Co"):
+        self.assertEqual(page.count('class="card app-row'), 2)
+        for company in ("One Co", "Two Co"):
             self.assertIn(company, page)
+        self.assertNotIn("Three Co", page)
         self.assertNotIn("Wall Co", page)
 
     def test_p2_page_hides_empty_filters_and_explains_closed_jobs(self):

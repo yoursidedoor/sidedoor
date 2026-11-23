@@ -927,7 +927,7 @@ def application_failures(reader, now, fmt, secrets=()):
             counts[key] = counts.get(key, 0) + 1
             # Never the event's next_action: it is a note for engineers, not a cause (owner 2026-10-24).
             recorded_causes.setdefault(key, []).append((recorded.get("code"), overview._utc(moment), _error_text(recorded)))
-    rows = reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,updated_at,receipt FROM application_jobs "
+    rows = reader.rows("SELECT job_key,employer,payload,state,blocker,next_at,updated_at,receipt,reconcile_attempts FROM application_jobs "
                        "WHERE state IN ('BLOCKED','RETRY_WAIT') ORDER BY updated_at DESC", (), "application_jobs")
     found = []
     for row in rows:
@@ -1422,6 +1422,11 @@ NEEDS_YOU = "needs-you"
 EARLIER_AFTER = dt.timedelta(hours=24)   # owner 2026-10-24: older items fold into "Earlier"
 
 
+def fp_paging():
+    """The paging of an empty list (`page_of`)."""
+    return page_of([], 1, RUNS_LISTED)[1]
+
+
 def page_of(entries, number, size=LIST_LIMIT):
     """(entries, paging) for page `number` (clamped) of `size` each: paging is {page, pages, total}."""
     pages = max(1, -(-len(entries) // size))
@@ -1720,12 +1725,29 @@ def _shown(kept, limit, chunk):
     return [line for _, line in shown], (older if older > 0 else None)
 
 
+_CHUNKS = {}          # L5: (path, end, limit, size, mtime, secrets) -> a redacted chunk, while the file is unchanged
+_CHUNKS_KEPT = 32
+
+
 def stream_chunk(path, secrets, end=None, limit=LOG_LINES):
-    """One log stream's lines ending at byte `end` (its tail when None): {"state", "lines", "older"}."""
+    """One log stream's lines ending at byte `end` (its tail when None): {"state", "lines", "older"}. An
+    unchanged file (same size and time) with the same secrets reuses the chunk redacted last time."""
+    try:
+        info = os.stat(path)
+        key = (str(path), end, limit, info.st_size, info.st_mtime_ns, tuple(secrets))
+    except (OSError, TypeError):
+        key = None
+    if key is not None and key in _CHUNKS:
+        found = _CHUNKS[key]
+        return {"state": found["state"], "lines": list(found["lines"]), "older": found["older"]}
     chunk = read_range(path, end)
     if chunk["state"] != "ok":
         return {"state": chunk["state"], "lines": [], "older": None}
     lines, older = _shown(_redacted_pairs(chunk["lines"], secrets), limit, chunk)
+    if key is not None:
+        if len(_CHUNKS) >= _CHUNKS_KEPT:
+            _CHUNKS.pop(next(iter(_CHUNKS)))
+        _CHUNKS[key] = {"state": "ok", "lines": list(lines), "older": older}
     return {"state": "ok", "lines": lines, "older": older}
 
 
@@ -2247,9 +2269,10 @@ def _redaction_complete(home):
         return False
 
 
-KEPT_PARAMS = ("component", "level", "q", "day", "run", "section", "page", "log", "before", "file", "file_before",
+KEPT_PARAMS = ("component", "level", "q", "search", "job", "about", "day", "run", "section", "page", "log", "before", "file", "file_before",
                "records_page", "files_page", "runs_part", "runs_page", "log_files_page")
 PAGE_NUMBER = re.compile(r"[0-9]{1,6}\Z")
+SEARCHES_KEPT = 200
 
 
 def href(params, path="/failures", anchor="", **changes):
@@ -2312,14 +2335,41 @@ def register(app, templates, layout, home, root, config, token, database, connec
             connect_read_only)
         return found if isinstance(found, dict) else None
 
+    searches = {}   # L8: a search's own token -> what was typed, so the words never sit in an address or history
+
+    def stashed(text):
+        import secrets as tokens
+        text = (text or "").strip()[:SEARCH_CHARACTERS]
+        if not text:
+            return None
+        while len(searches) >= SEARCHES_KEPT:
+            searches.pop(next(iter(searches)))
+        found = tokens.token_urlsafe(9)
+        searches[found] = text
+        return found
+
+    @app.post("/failures/find")
+    async def failures_find(request: Request):
+        """The logs search box (a POST, so the words stay out of the address): back to the list, the
+        search named by a token only."""
+        form = await request.form()
+        kept = {key: form.get(key) for key in ("component", "day", "job", "about") if isinstance(form.get(key), str)}
+        return RedirectResponse(href(kept, anchor="files-title", search=stashed(form.get("find"))), status_code=303)
+
     @app.get("/failures", name="failures")
     def failures(request: Request, component: str = "all", level: str = "all", q: str = "", day: str = "", run: str = "",
                  section: str = "", page: str = "1"):
+        if isinstance(request.query_params.get("find"), str):   # a card's Logs link (a company): kept server side too
+            return RedirectResponse(href(request.query_params, anchor="files-title",
+                                         search=stashed(request.query_params.get("find"))), status_code=303)
         context = layout("failures", "Failures and logs")
         if not _redaction_complete(home):
             context["hidden"] = DETAILS_HIDDEN
             return templates.TemplateResponse(request, "failures.html", context)
         params, stream_older, file_older = choices(request)
+        if params.get("search") and params.get("search") not in searches:   # L13: restarted, or pushed out
+            context["log_search_ended"] = True
+            params = {key: value for key, value in params.items() if key != "search"}
         secrets = secrets_of(home, config, token)
         loop = overview.loop_state(setup_steps.scheduler_running(home))
         focus = section if section in {key for key, _ in GROUPS} | {"scheduler", NEEDS_YOU} else None
@@ -2344,9 +2394,17 @@ def register(app, templates, layout, home, root, config, token, database, connec
             root, logs, context["logs"]["component"], context["logs"]["day"], zone, params.get("runs_part"),
             number(params, "runs_page"), names if isinstance(names, dict) else None)
         import log_downloads
-        context["log_files"], context["log_files_paging"] = log_downloads.files_paged(
-            root, logs, context["logs"]["component"], context["logs"]["level"], context["logs"]["day"], zone,
-            number(params, "log_files_page"), session_names)
+        find = searches.get(params.get("search") or "", "")
+        job = (params.get("job") or "").strip()[:300]
+        about = (params.get("about") or "").strip()[:40]
+        found = overview.snapshot(database, lambda connection: log_downloads.operations_paged(
+            overview.Reader(connection), root, logs, context["logs"]["component"], context["logs"]["day"], find, job,
+            zone, number(params, "log_files_page"), about), connect_read_only)
+        context["log_ops"], context["log_ops_paging"] = found if isinstance(found, tuple) else ([], fp_paging())
+        context["log_find"], context["log_job"] = find, job or about
+        context["link_job"], context["link_about"] = job, about
+        context["log_job_words"] = next((entry["about"] for entry in context["log_ops"] if entry.get("about")), None) \
+            if job or about else None
         if run:
             found = find_run(run, secrets, file_older, params)
             for entry in (found or {}).get("files") or []:
@@ -2424,6 +2482,21 @@ def register(app, templates, layout, home, root, config, token, database, connec
             return PlainTextResponse(DETAILS_HIDDEN, status_code=403)
         zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
         name, body = log_downloads.support_zip(root, logs, secrets_of(home, config, token), zone, names=session_names)
+        return attachment(name, body, "application/zip")
+
+    @app.get("/failures/operation.zip")
+    def failures_operation(id: str = ""):
+        """Every file of one operation on the Logs list, whole and redacted (named by its id only)."""
+        import log_downloads
+        if not _redaction_complete(home):
+            return PlainTextResponse(DETAILS_HIDDEN, status_code=403)
+        zone = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+        entry = overview.snapshot(database, lambda connection: log_downloads.find_operation(
+            overview.Reader(connection), root, logs, id, zone), connect_read_only)
+        if not isinstance(entry, dict) or not (entry.get("files") or entry.get("records")):
+            return PlainTextResponse("These files are no longer on this computer. Go back to Failures and logs to see "
+                                     "the files you can download.", status_code=404)
+        name, body = log_downloads.operation_zip(root, logs, secrets_of(home, config, token), entry, zone)
         return attachment(name, body, "application/zip")
 
     @app.get("/failures/details.zip")

@@ -367,6 +367,15 @@ a.overview-number:hover, a.overview-number:focus-visible { color: var(--primary)
 .metrics-table.log-files-table td:last-child { text-align: right; vertical-align: middle; }
 .log-files-table td:nth-child(2) { white-space: nowrap; }
 .fail-details-download { margin-top: 8px; }
+.log-ops { list-style: none; padding: 0; margin: 0 0 16px; display: flex; flex-direction: column; gap: 8px; }
+.log-op { padding: 0; }
+.log-op summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 12px 16px; cursor: pointer; }
+.log-op-label { font-weight: 600; overflow-wrap: anywhere; }
+.log-op-outcome { color: var(--muted, inherit); }
+.log-op-download { margin-left: auto; }
+.log-op details > table { margin: 0 16px 12px; width: calc(100% - 32px); }
+.log-op details > p { margin: 0 16px 12px; }
+.log-ops-for { margin: 0 0 12px; }
 .log-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; margin: 0 0 12px; }
 .log-filters label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 0.875rem; min-width: 0; }
 .log-filters select, .log-filters input { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 10px; min-width: 0; max-width: 100%; }

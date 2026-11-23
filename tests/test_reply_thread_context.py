@@ -228,6 +228,33 @@ class ReplyThreadContextTests(unittest.TestCase):
             "SELECT * FROM reply_worker_inputs WHERE task_id=?", (task_id,)))
         self.provider.assert_not_called()
 
+    def test_a_read_that_must_be_trimmed_after_its_thread_changed_is_still_revised(self):
+        """Owner H5, 2026-11-20: a new message can push a saved input over the cap, so the rebuilt
+        input leaves out the résumé text the saved one carried; the read is still revised."""
+        resume = {"source": "resume.pdf", "source_sha256": "c" * 64, "text": "resume line\n" * 3000}
+        with mock.patch.object(worker.reply_resume, "context", return_value=resume):
+            task_id = self.queue()
+            self.record(self.event())
+            self.cycle(effect=worker.Held("CLASSIFICATION_TIMEOUT", retry=True))
+            saved = routing.one(self.database, "SELECT * FROM reply_worker_inputs WHERE task_id=?", (task_id,))
+            self.assertNotIn("context_trimmed_for_size", saved["input"])
+            due = self.task(task_id)["next_at"]
+            new_id = self.record(self.event(text="New outbound before retry. " + "y" * 2000, minute=55))
+            with mock.patch.object(worker, "MAX_INPUT_BYTES", len(saved["input"].encode("utf-8")) + 100):
+                result, execute = self.cycle(due)
+                execute.assert_not_called()
+                self.assert_no_handoff(task_id, "CLASSIFICATION_IMMUTABLE_INPUT_CHANGED")
+                successor_id = result["items"][0]["context_revision_task_id"]
+                self.assertIsNotNone(successor_id)
+                unused, execute = self.cycle(due)
+                execute.assert_called_once()
+                sent = self.prompt_request(execute)
+                self.assertEqual(["candidate_resume.text"], sent["context_trimmed_for_size"]["left_out"])
+                self.assertIsNone(sent["candidate_resume"]["text"])
+                self.assertEqual(new_id, self.context_ids(sent)[0])
+                self.assertEqual("COMPLETE", self.task(successor_id)["status"])
+        self.provider.assert_not_called()
+
     def test_a_codex_era_read_is_revised_when_its_context_changed(self):
         # Review B1, 2026-10-27: a read saved under another route (here REPLY_MAX_TOKENS stands in for the
         # codex executable) still gets its context revision; provenance compares without ASSET_PROVENANCE.
@@ -429,23 +456,38 @@ class ReplyThreadContextTests(unittest.TestCase):
             "SELECT * FROM reply_worker_results WHERE task_id=?", (task_id,)))
         self.provider.assert_not_called()
 
-    def test_prompt_exceeding_the_input_cap_is_held_without_execution(self):
-        """The cap is 131072 bytes since 2026-09-24 (it was 65536); anything larger is still held."""
+    def test_prompt_exceeding_the_input_cap_is_trimmed_to_fit_and_read(self):
+        """The cap is 131072 bytes. Over it, background is left out, largest first, until the input fits
+        (owner H2, 2026-11-20; it used to hold the reply unread). The message itself is never cut."""
         task_id = self.queue()
-        for index in range(8):
-            self.record(self.event(text=f"Message {index}: " + "x" * 18000,
+        for index in range(8):   # a saved message weighs about 5x its text (raw and payload copies)
+            self.record(self.event(text=f"Message {index}: " + "x" * (4000 * (index + 1)),
                                    direction="inbound" if index % 2 == 0 else "outbound", minute=10 + index))
         self.record(self.invitation(text="Original invitation note.", minute=1))
-        request = self.request(task_id)
+        with mock.patch.object(worker, "fit", lambda template, packet: (packet, None)):
+            request = self.request(task_id)   # the input as built, before any trimming
         self.assertEqual(8, len(request["conversation_context"]))
+        self.assertNotIn("context_trimmed_for_size", request)
         prompt = (review.ROOT / "reply-prompt.md").read_text() + "\n\nUNTRUSTED_SOURCE_JSON:\n" + routing.encoded(request)
         self.assertEqual(131072, worker.MAX_INPUT_BYTES)
         self.assertGreater(len(prompt.encode("utf-8")), worker.MAX_INPUT_BYTES)
         result, execute = self.cycle()
-        execute.assert_not_called()
-        self.assert_no_handoff(task_id, "CLASSIFICATION_INPUT_EXCEEDS_LIMIT")
-        self.assertEqual("HELD", result["items"][0]["state"])
-        self.assertEqual(0, self.database.execute("SELECT COUNT(*) FROM worker_compute_reservations").fetchone()[0])
+        self.assertEqual("COMPLETE", self.task(task_id)["status"], result)
+        execute.assert_called_once()
+        self.assertLessEqual(len(execute.call_args.args[1].encode("utf-8")), worker.MAX_INPUT_BYTES)
+        sent = self.prompt_request(execute)
+        self.assertEqual(request["source_snapshot"], sent["source_snapshot"])
+        self.assertEqual(request["raw_message"], sent["raw_message"])
+        self.assertEqual(request["initial_invitation"], sent["initial_invitation"])   # small: kept
+        left_out = sent["context_trimmed_for_size"]["left_out"]
+        self.assertTrue(left_out and all(label.startswith("conversation_context.") for label in left_out))
+        # Largest first: the longest messages (the newest here) went, the shorter ones stayed.
+        kept = [entry["content_sha256"] for entry in sent["conversation_context"]]
+        dropped = [label.split(".", 1)[1] for label in left_out]
+        sizes = {entry["content_sha256"]: len(routing.encoded(entry)) for entry in request["conversation_context"]}
+        self.assertGreater(min(sizes[key] for key in dropped), max(sizes[key] for key in kept))
+        self.assertEqual(len(request["conversation_context"]), len(kept) + len(dropped))
+        self.assertEqual(worker.TRIM_NOTE, sent["context_trimmed_for_size"]["note"])
         self.provider.assert_not_called()
 
 

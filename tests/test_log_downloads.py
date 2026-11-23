@@ -58,8 +58,8 @@ class LogDownloadsTest(unittest.TestCase):
         errors, _ = log_downloads.files_paged(self.root, self.logs, level="stderr")
         self.assertEqual([entry["name"] for entry in errors], ["research.stderr.log"])
         page = self.unlocked("/failures", component="research")
-        self.assertIn("Research, Automotive, search 1", page.text)
-        self.assertNotIn("Old", pages.text_of(page.text).split("Files", 1)[1].split("Runs", 1)[0])
+        self.assertIn("Research · Automotive · stage 1, search", page.text)   # L1: one row per operation
+        self.assertNotIn("Old", pages.text_of(page.text).split("What Sidedoor did", 1)[1].split("Runs", 1)[0])
 
     def test_session_names_show_the_job_never_a_raw_id(self):
         database = base.database_with_schema(self.root)
@@ -80,9 +80,9 @@ class LogDownloadsTest(unittest.TestCase):
         database.commit()
         database.close()
         page = pages.text_of(self.unlocked("/failures").text)
-        self.assertRegex(page, r"Browser session, Acme Motors, Data Analyst, errors, \w{3} \d{1,2} \d{2}:\d{2}")
-        self.assertRegex(page, r"Browser session, errors, \w{3} \d{1,2} \d{2}:\d{2}")
-        files = page.split("Files", 1)[1].split("Runs", 1)[0]
+        self.assertRegex(page, r"Application · Acme Motors, Data Analyst · send try 1 \w{3} \d{1,2} \d{2}:\d{2}")
+        self.assertRegex(page, r"Application \w{3} \d{1,2} \d{2}:\d{2}")   # nothing names it: its kind and time
+        files = page.split("What Sidedoor did", 1)[1].split("Runs", 1)[0]
         for raw in ("k2x9q7", "3f9a2b7c", ATTEMPT, "eb589cfb23"):
             self.assertNotIn(raw, files)
 

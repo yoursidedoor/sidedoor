@@ -46,10 +46,27 @@ def application_context(database, job):
         except (ValueError, TypeError):
             context["receipt_state"] = "UNREADABLE_SAVED_EVIDENCE"
     if "application_attempts" in tables:
-        context["submission_claims"] = routing.rows(database,
+        context["submission_claims"] = [dict(claim, evidence=_without_review(claim["evidence"])) for claim in routing.rows(database,
             "SELECT attempt_id,state,started_at,evidence FROM application_attempts WHERE job_key=? ORDER BY started_at,attempt_id",
-            (job["job_key"],))
+            (job["job_key"],))]
     return context
+
+
+def _without_review(evidence):
+    """An attempt's saved evidence without its pre-submit `review` (owner H1, 2026-11-20).
+
+    The review was about 75% of each attempt (17-21 KB) and pushed a reply about three jobs at one
+    company past reply_worker.MAX_INPUT_BYTES. The answers, their sources and the résumé hash stay.
+    Evidence that is not a JSON object is passed on unchanged.
+    """
+    try:
+        parsed = json.loads(evidence) if isinstance(evidence, str) else None
+    except ValueError:
+        return evidence
+    if not isinstance(parsed, dict) or "review" not in parsed:
+        return evidence
+    parsed.pop("review")
+    return routing.encoded(parsed)
 
 
 def role_context(database, binding, now):

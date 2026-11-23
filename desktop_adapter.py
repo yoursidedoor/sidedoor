@@ -303,10 +303,24 @@ def validate_read_result(database, request, result, now):
     if status not in {"SUBMITTED", "NOT_SUBMITTED"}:
         return
     code = "INDEPENDENT_EMPLOYER_RECEIPT_REQUIRED" if status == "SUBMITTED" else "AUTHORITATIVE_ABSENCE_REQUIRED"
+    # K10/K28: the employer outcome is the AI's structured reading; only its value must be one of the
+    # schema's enum (owner, 2026-11-23: the status/evidence_kind gate on it is deleted).
+    if result.get("employer_outcome") is not None and result["employer_outcome"] not in applications.EMPLOYER_OUTCOMES:
+        raise ValueError(code)
     submit = submission_request(database, request["job_key"], request["attempt_id"])
     if request["operation"] not in {"verify", "reconcile"} or not submit:
         raise ValueError(code)
-    if status == "NOT_SUBMITTED" and database.execute("SELECT 1 FROM desktop_requests WHERE job_key=? AND operation='submit' AND state IN ('PENDING','CLAIMED')",
+    if status == "SUBMITTED":
+        # K28 (owner, 2026-11-23, picks a+b): a SUBMITTED receipt read is the AI's answer, taken as
+        # given; it can never open a second application. Deleted for it: the observed_at window,
+        # employer/requisition/candidate/job binding, freshness, independent_read, job_key/attempt_id
+        # echo, verified_receipt, and the sent message's recipient and send-time checks against this
+        # attempt. What it must still be: a read of this submit (above) that names a receipt route.
+        if result.get("evidence_kind") not in {"employer_confirmation_email", "authenticated_ats_application_record",
+                                               "sent_application_email"}:
+            raise ValueError(code)
+        return
+    if database.execute("SELECT 1 FROM desktop_requests WHERE job_key=? AND operation='submit' AND state IN ('PENDING','CLAIMED')",
                                                       (request["job_key"],)).fetchone():
         raise ValueError("SUBMISSION_STILL_INFLIGHT")
     job = json.loads(submit["payload"])["job"]
@@ -319,27 +333,15 @@ def validate_read_result(database, request, result, now):
                                  (attempt["started_at"], request["created_at"], submit["armed_at"] or submit["created_at"])))
     except (KeyError, TypeError, ValueError):
         after_attempt = False
-    # An employer confirmation email carries no requisition id (see verified_receipt): the
-    # email route binds on job_key and attempt_id below, which this product issued and can
-    # check, instead of a field the evidence cannot contain.
-    # Only a SUBMITTED receipt may take an email route (and so skip the requisition match): an
-    # absence is always matched on the requisition, whatever label the read gave itself.
-    email_receipt = status == "SUBMITTED" and result.get("evidence_kind") in {"employer_confirmation_email", "sent_application_email"}
-    requisition_keys = ("job_key", "employer", "candidate_email") if email_receipt else (
-        "job_key", "employer", "requisition", "candidate_email")
-    # employer_accepted, not a raw fold (owner, 2026-09-21): a page rendering a legal name
-    # is not a different employer, and `.get(key, "")` defaults only when the key is ABSENT,
-    # so a present-and-null employer reached normalized(None) and raised TypeError here.
-    # The read's employer judgement (employer_matches_expected) settles a SUBMITTED receipt
-    # (owner, 2026-10-07, item 1); a "not submitted" result, which could open a second
-    # application, still needs the employer exactly as recorded.
-    employer_read = result if status == "SUBMITTED" else {key: value for key, value in result.items()
-                                                          if key != "employer_matches_expected"}
+    # Only a NOT_SUBMITTED read reaches here (K28). employer_accepted, not a raw fold (owner,
+    # 2026-09-21); a "not submitted" result, which could open a second application, needs the
+    # employer exactly as recorded, so the read's own employer judgement is set aside.
+    employer_read = {key: value for key, value in result.items() if key != "employer_matches_expected"}
     identity_matches = (application_destination.employer_accepted(employer_read, job)
-                        and (email_receipt
-                             or str(result.get("requisition") or "").strip().casefold() == job["requisition"])
+                        and str(result.get("requisition") or "").strip().casefold() == job["requisition"]
                         and result.get("candidate_email") == job["candidate_email"]
-                        and all(read_job.get(key) == job.get(key) for key in requisition_keys))
+                        and all(read_job.get(key) == job.get(key)
+                                for key in ("job_key", "employer", "requisition", "candidate_email")))
     if (not after_attempt or not identity_matches or not applications.fresh(result, now)
             or result.get("independent_read") is not True
             or any(not isinstance(result.get(key), str) or not result[key].strip()
@@ -347,41 +349,19 @@ def validate_read_result(database, request, result, now):
             or result.get("job_key", job["job_key"]) != job["job_key"]
             or result.get("attempt_id", submit["attempt_id"]) != submit["attempt_id"]):
         raise ValueError(code)
-    if status == "SUBMITTED":
-        if (not applications.verified_receipt(result, job, now)
-                or result.get("evidence_kind") not in {"employer_confirmation_email", "authenticated_ats_application_record",
-                                                       "sent_application_email"}):
-            raise ValueError(code)
-        if result.get("evidence_kind") == "sent_application_email":
-            # Authoritative, from this attempt's own saved review rather than anything the read
-            # reports about itself: the sent message must be this attempt's email application,
-            # addressed to exactly the recipient quoted from the official posting, and sent no
-            # earlier than the instant the arm opened - nothing this attempt sent can predate it.
-            try:
-                target = applications.email_application(json.loads(attempt["evidence"]).get("review"))
-                sent_at = dt.datetime.fromisoformat(str(result.get("sent_at")).replace("Z", "+00:00"))
-                armed = dt.datetime.fromisoformat(submit["armed_at"])
-            except (TypeError, ValueError, KeyError, AttributeError):
-                raise ValueError(code)
-            recipients = result.get("email_to")
-            if (target is None or not isinstance(recipients, list) or len(recipients) != 1
-                    or not isinstance(recipients[0], str)
-                    or recipients[0].strip().casefold() != target["address"].casefold() or sent_at < armed):
-                raise ValueError(code)
-    else:
-        # Absence no longer demands an authenticated ATS record (owner, 2026-09-21). Most
-        # employers give a signed-out candidate no account and therefore no such record, so
-        # the label made absence unprovable for exactly the jobs that needed it and parked
-        # them on SUBMISSION_OUTCOME_UNKNOWN forever. evidence_kind is a string the reader
-        # supplies about itself - nothing verifies it, unlike the quotes quote_observed
-        # checks against real tool output - so requiring it bought no safety. What does the
-        # work is kept: authoritative_absence, no_inflight, independent_read, a non-empty
-        # source, the attempt/job binding, freshness, and the SUBMISSION_STILL_INFLIGHT
-        # read above. applications.reconcile (:1767) has always accepted absence on exactly
-        # these terms; this validator was the stricter duplicate that fired first.
-        if (result.get("job_key") != job["job_key"] or result.get("attempt_id") != submit["attempt_id"]
-                or result.get("authoritative_absence") is not True or result.get("no_inflight") is not True):
-            raise ValueError(code)
+    # Absence no longer demands an authenticated ATS record (owner, 2026-09-21). Most
+    # employers give a signed-out candidate no account and therefore no such record, so
+    # the label made absence unprovable for exactly the jobs that needed it and parked
+    # them on SUBMISSION_OUTCOME_UNKNOWN forever. evidence_kind is a string the reader
+    # supplies about itself - nothing verifies it, unlike the quotes quote_observed
+    # checks against real tool output - so requiring it bought no safety. What does the
+    # work is kept: authoritative_absence, no_inflight, independent_read, a non-empty
+    # source, the attempt/job binding, freshness, and the SUBMISSION_STILL_INFLIGHT
+    # read above. applications.reconcile (:1767) has always accepted absence on exactly
+    # these terms; this validator was the stricter duplicate that fired first.
+    if (result.get("job_key") != job["job_key"] or result.get("attempt_id") != submit["attempt_id"]
+            or result.get("authoritative_absence") is not True or result.get("no_inflight") is not True):
+        raise ValueError(code)
 
 
 def completed_result(database, request, now):

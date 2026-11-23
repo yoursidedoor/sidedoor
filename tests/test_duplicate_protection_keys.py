@@ -251,12 +251,10 @@ class ReceiptExecutionParityTests(unittest.TestCase):
 
     def test_a_different_employer_receipt_is_still_rejected_everywhere(self):
         job_key, receipt, row = self.submitted("Different AI")
-        self.assertFalse(applications.verified_receipt(receipt, row, self.NOW))
         self.assertIsNone(source_records.execution(self.database, {"table": "application_jobs", "key": job_key}, self.NOW))
 
     def test_a_different_requisition_receipt_is_still_rejected_everywhere(self):
         job_key, receipt, row = self.submitted("Example AI", receipt_requisition="role-999")
-        self.assertFalse(applications.verified_receipt(receipt, row, self.NOW))
         self.assertIsNone(source_records.execution(self.database, {"table": "application_jobs", "key": job_key}, self.NOW))
 
     def test_a_missing_or_unverified_receipt_is_still_not_an_execution(self):

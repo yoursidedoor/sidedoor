@@ -243,7 +243,7 @@ class GatherTest(unittest.TestCase):
         # The one needs-you rule: the asked job is a question only, the answered one needs nothing.
         self.assertEqual(view["needs"], {"questions": 1, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0, "sign_ins": 0})
 
-    def test_o19_spent_reconcile_reads_need_the_owner(self):
+    def test_o19_spent_reconcile_reads_need_nobody_k20(self):
         db = self.database
         job(db, "spent", "BLOCKED", "SUBMISSION_OUTCOME_UNKNOWN")
         job(db, "still-reading", "BLOCKED", "SUBMISSION_OUTCOME_UNKNOWN")
@@ -251,8 +251,9 @@ class GatherTest(unittest.TestCase):
         db.execute("UPDATE application_jobs SET reconcile_attempts=4 WHERE job_key='still-reading'")
         db.commit()
         view = self.gather()
-        self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 1, "retrying": 1})
-        self.assertEqual(view["needs"], {"questions": 0, "applications": 1, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0, "sign_ins": 0})
+        # K20 (owner, 2026-11-23): spent outcome checks drop out of every count; never "Waiting to retry".
+        self.assertEqual(view["right_now"], {"confirming": 0, "blocked": 0, "retrying": 1})
+        self.assertEqual(view["needs"], {"questions": 0, "applications": 0, "applications_held": 0, "messages": 0, "couldnt_send": 0, "notes": 0, "sign_ins": 0})
 
     def scheduler(self, scheduler, pause=None):
         if pause:

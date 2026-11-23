@@ -384,15 +384,22 @@ def submitted_today(reader, start, end):
 PARKED_CODE = "APPLICATION_BROWSER_INVESTIGATION_EXHAUSTED"   # application_recovery.CLAIMS_EXHAUSTED_BLOCKER
 
 
+def outcome_check_spent(code, reads):
+    """K20 (owner, 2026-11-23: "sidedoor should auto drop it from the count/card when the retry verification
+    check is exhausted"): SUBMISSION_OUTCOME_UNKNOWN once the reconcile reads are spent, exactly the test
+    `applications.reconcile` stops reading at (`reconcile_attempts >= RECONCILE_MAX_ATTEMPTS`, next_at NULL).
+    Such a job needs nobody and is not retrying: it is in neither of `_blocked`'s lists, counted nowhere,
+    and Applications shows it as a plain line with nothing to do (`applications_page.SPENT_TODO`)."""
+    import applications as jobs
+    return str(code or "") == "SUBMISSION_OUTCOME_UNKNOWN" and (reads or 0) >= jobs.RECONCILE_MAX_ATTEMPTS
+
+
 def _blocked(reader):
     """(owner holds, automatic waits): BLOCKED jobs by `applications.job_route`, as job keys.
 
-    One more hold needs the owner although its route is RECONCILE (O19): SUBMISSION_OUTCOME_UNKNOWN
-    once the reconcile reads are spent. `applications.reconcile` stops reading at exactly that
-    test, `reconcile_attempts >= RECONCILE_MAX_ATTEMPTS` (its `spent`), and holds the job with
-    next_at NULL and the next action "check the ATS account or confirmation inbox yourself", so the
-    same test is used here. (With application recovery disabled the code also stops earlier, after
-    the fast reads; that case still shows as waiting to retry.)"""
+    A job whose outcome checks are spent (`outcome_check_spent`) is in neither list (K20). (With
+    application recovery disabled the code also stops earlier, after the fast reads; that case still
+    shows as waiting to retry.)"""
     import applications as jobs
     owner, waiting = [], []
     for key, code, reads in reader.rows("SELECT job_key,blocker,reconcile_attempts FROM application_jobs WHERE state='BLOCKED'",
@@ -400,10 +407,11 @@ def _blocked(reader):
         code = str(code or "")
         if code == jobs.APPLICATION_APPROVED:
             continue   # approved on Approvals and due: neither a hold nor a retry wait (owner, 2026-10-24)
-        spent = code == "SUBMISSION_OUTCOME_UNKNOWN" and (reads or 0) >= jobs.RECONCILE_MAX_ATTEMPTS
+        if outcome_check_spent(code, reads):
+            continue   # K20: neither: it needs nobody and is not retrying (`outcome_check_spent`)
         # A job parked because its reads of the posting are spent is never retried on its own (the cycle
         # skips it; only a reopen releases it): it needs the user, never "Waiting to retry" (owner, 2026-11-14).
-        (owner if spent or code == PARKED_CODE or jobs.job_route(code, "BLOCKED") == "OWNER" else waiting).append(key)
+        (owner if code == PARKED_CODE or jobs.job_route(code, "BLOCKED") == "OWNER" else waiting).append(key)
     return owner, waiting
 
 

@@ -45,3 +45,7 @@ dist/
 # Local venv for the dashboard's pinned packages (pyproject.toml dependencies) and its tests.
 .venv-dashboard/
 .coverage
+
+# Per-machine test file timings written by tests/run_parallel.py
+tests/.parallel_timings.json
+tests/.parallel_timings.tmp
