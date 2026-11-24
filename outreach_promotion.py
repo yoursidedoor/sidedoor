@@ -29,6 +29,7 @@ Claims and uncertain/terminal actions are never rewritten or released.
 import hashlib
 import json
 from pathlib import Path
+import html
 import re
 import sqlite3
 
@@ -348,6 +349,8 @@ def without_dashes(text):
     """
     if not isinstance(text, str):
         return text
+    if "&" in text:
+        text = html.unescape(text)   # "&amp;" copied from web-page input goes out as "&" (owner Q7 a, 2026-11-23)
     # An en dash between two digits is a range ("2\u20133 years"), written as a hyphen.
     text = re.sub(r"(?<=\d)\u2013(?=\d)", "-", text)
     return " ".join(_DASH_RUN.sub(_dash_replacement, text).split())

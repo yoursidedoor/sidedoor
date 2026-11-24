@@ -64,9 +64,14 @@ def backlog(inbound_at):
 
 
 def without_dashes(text):
-    """The outreach composer's em/en dash normalisation, keeping the reply's line breaks."""
+    """The outreach composer's em/en dash normalisation, keeping the reply's line breaks. Web-page
+    character codes the AI copied from its input ("&amp;") are turned back into characters (owner Q7 a,
+    2026-11-23)."""
+    import html
     import outreach_promotion
 
+    if isinstance(text, str) and "&" in text:
+        text = html.unescape(text)
     if not isinstance(text, str) or not any(character in text for character in outreach_promotion.DASH_CHARACTERS):
         return text
     return "\n".join(outreach_promotion.without_dashes(line) for line in text.split("\n"))
@@ -160,12 +165,7 @@ def _action(database, config, task_id, now):
     # that a definite reading advances on its own, this would fire on conversations it never
     # touched before and stop the reply - the exact thing this round exists to prevent. It asks
     # for a summary only when the packet actually carries the role evidence one needs.
-    summarisable = any((scope or {}).get("role_context", {}).get("evidence_id")
-                       for scope in (request.get("job_scope") or []) if isinstance(scope, dict))
-    if (config.get("conversion", {}).get("champion_handoff_enabled") is True
-            and decision["label"] == "AGREEMENT" and handoff.get("can_advance_conversion") is True
-            and decision.get("champion_handoff") is None and summarisable):
-        raise ValueError("CHAMPION_SUMMARY_REQUIRED_BEFORE_REPLY_SLOT")
+    # Q2 a (owner, 2026-11-23): a reply no longer waits for an advocate summary the model did not write.
     # The conversation must be one the harness manages (owner, 2026-09-23). `engagement`
     # ingests the whole authenticated inbox, so without this a stranger's message is a
     # candidate for an automatic reply - and live data showed exactly that shape: 8 people with

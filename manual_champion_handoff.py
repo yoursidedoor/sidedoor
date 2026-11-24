@@ -256,11 +256,16 @@ def blocked(fixture, variation):
         require(not any(item["blocker"] == "CLASSIFICATION_OUTPUT_SCHEMA_INVALID"
                         for item in fixture.records("reply_worker_attempts")),
                 "Provider scenario blocked only because speaker_context schema is not integrated")
-    require(not fixture.requests, variation + " reached shared sender")
-    require(not fixture.records("conversion_summaries"), variation + " generated an unsupported champion summary")
+    # Q2 a (owner, 2026-11-23): none of these holds the reply any more. It goes out once, as the model
+    # wrote it; what the variation decides is only whether an advocate summary record is filed.
+    sent = len(fixture.requests)
+    summaries = len(fixture.records("conversion_summaries"))
+    filed = {"deadline_due", "ROLE_ASSOCIATION", "CANDIDATE_FACTS"}   # the model's agreement stands
+    require(summaries == (1 if variation in filed else 0), variation + " filed the wrong summary records")
+    require(sent == 1, variation + " reply did not go out once")
     fixture.restart()
     fixture.cycle(seconds=1)
-    require(not fixture.requests, variation + " escaped blocker after restart")
+    require(len(fixture.requests) == 1, variation + " sent a second reply after restart")
 
 
 def final_guard(fixture, variation):
@@ -283,11 +288,14 @@ def final_guard(fixture, variation):
 
     fixture.after_inspection = change_after_inspection
     fixture.cycle()
-    require(not fixture.requests, "Final guard ignored " + variation)
+    # Q2 a (owner, 2026-11-23): a summary that stops matching no longer holds the reply; a closed
+    # recipient or role still does.
+    expected = 1 if variation in {"revoked", "agreement_revoked"} else 0
+    require(len(fixture.requests) == expected, "Final guard wrong for " + variation)
     require(fixture.records("conversion_summaries"), "Guard scenario never prepared a champion action")
     fixture.restart()
     fixture.cycle(seconds=1)
-    require(not fixture.requests, "Restart ignored " + variation)
+    require(len(fixture.requests) == expected, "Restart changed the outcome for " + variation)
 
 
 def same_inbound_ack(fixture):
@@ -396,54 +404,33 @@ def unapplied_agreement(fixture):
     with fixture.database:
         referrals.record(fixture.database, referral[0]["contact_id"], "AGREED", "offline-later-message",
                          "Yes, still happy to refer you.", NEXT_ACTION, DEADLINE, fixture.now.isoformat(), {})
-    result = reply_execution.promote(fixture.database, fixture.config, fixture.now)
-    require(not fixture.actions() and not fixture.records("conversion_summaries"),
-            "Agreement from another message authorized champion promotion")
-    require("CHAMPION_PERSON_REFERRAL_AGREEMENT_REQUIRED" in json.dumps(result),
-            "Wrong blocker for an agreement not bound to this decision")
+    reply_execution.promote(fixture.database, fixture.config, fixture.now)
+    # Q2 a: the reply is queued; an agreement from another message only means no summary record.
+    actions = fixture.actions()
+    require(len(actions) == 1 and not fixture.records("conversion_summaries"),
+            "Agreement from another message authorized champion promotion, or held the reply")
+    require("CHAMPION_PERSON_REFERRAL_AGREEMENT_REQUIRED" in json.dumps(actions[0]),
+            "The skipped summary's reason was not kept on the reply")
     fixture.cycle()
-    require(not fixture.requests and not fixture.records("conversion_summaries"),
+    require(len(fixture.requests) == 1 and not fixture.records("conversion_summaries"),
             "Scheduled cycle promoted a summary from an unbound agreement")
 
 
 def omitted_summary(fixture, exhausted=False):
+    """Q2 a (owner, 2026-11-23): an agreement without an advocate summary is no longer sent back to the
+    model for one; the reading completes on its first attempt and the reply goes out once."""
     fixture.seed(handoff=False)
     fixture.cycle()
     task = routing.one(fixture.database, "SELECT * FROM workflow_tasks WHERE worker='pipeline_routing_review'")
-    require(task["status"] == "RETRY_WAIT" and task["blocker"] == "CHAMPION_SUMMARY_REQUIRED",
-            "Eligible acknowledgment omission did not schedule bounded interpretation retry: " +
-            repr({key: task[key] for key in ("status", "blocker", "attempts", "next_at")}))
-    require(task["effect"] == "READ" and task["attempts"] == 1 and task["next_at"], "Omission consumed a write or lacked a retry deadline")
-    require(not fixture.actions() and not fixture.requests and not fixture.records("reply_worker_results"),
-            "Acknowledgment-only eligible agreement burned a reply slot")
-    failed_attempts = fixture.records("reply_worker_attempts")
-    require(len(failed_attempts) == 1 and failed_attempts[0]["blocker"] == "CHAMPION_SUMMARY_REQUIRED",
-            "Missing summary did not retain its failed inference evidence")
+    require(task["status"] == "COMPLETE" and task["attempts"] == 1,
+            "Omitted summary still held the reading: " + repr({key: task[key] for key in ("status", "blocker", "attempts")}))
     fixture.cycle(seconds=1)
-    require(fixture.records("reply_worker_attempts") == failed_attempts, "Summary retry ignored next_at")
+    require(len(fixture.requests) == 1 and not fixture.records("conversion_summaries"),
+            "The reply without a summary did not go out exactly once")
     fixture.restart()
-    if not exhausted:
-        fixture.decisions["message-1"]["handoff"] = True
-    fixture.cycle(seconds=900)
-    if exhausted:
-        fixture.cycle(seconds=3600)
-        final = routing.one(fixture.database, "SELECT * FROM workflow_tasks WHERE task_id=?", (task["task_id"],))
-        require(final["status"] == "EXHAUSTED" and final["attempts"] == 3 and final["next_at"] is None,
-                "Omitted-summary inference retries were not bounded at three")
-        attempts = fixture.records("reply_worker_attempts")
-        require(len(attempts) == 3 and all(item["blocker"] == "CHAMPION_SUMMARY_REQUIRED" for item in attempts),
-                "Summary retries lost failed attempt evidence")
-        fixture.restart()
-        fixture.cycle(seconds=3600)
-        require(fixture.records("reply_worker_attempts") == attempts and not fixture.actions() and not fixture.requests,
-                "Exhausted omitted-summary task retried or burned a reply slot after restart")
-    else:
-        assert_single_handoff(fixture)
-        require(fixture.records("reply_worker_attempts")[:1] == failed_attempts, "Successful recovery overwrote failed inference")
-        fixture.cycle(seconds=1)
-        require(fixture.actions()[0]["state"] == "CONFIRMED_SENT", "Corrected summary did not reconcile")
-    final = routing.one(fixture.database, "SELECT * FROM workflow_tasks WHERE task_id=?", (task["task_id"],))
-    require(final["deadline"] == task["deadline"], "Retry extended the original interpretation deadline")
+    fixture.cycle(seconds=3600 if exhausted else 900)
+    require(len(fixture.requests) == 1 and len(fixture.records("reply_worker_attempts")) == 1,
+            "Restart read the message again or sent a second reply")
 
 
 def legacy_ack_promotion_guard(fixture):
@@ -458,9 +445,9 @@ def legacy_ack_promotion_guard(fixture):
         orchestrator.conversion_cycle(fixture.root, fixture.database, fixture.config, "manual-legacy-agreement")
     fixture.config["conversion"]["champion_handoff_enabled"] = True
     result = reply_execution.promote(fixture.database, fixture.config, fixture.now)
-    require("CHAMPION_SUMMARY_REQUIRED_BEFORE_REPLY_SLOT" in json.dumps(result), "Legacy eligible acknowledgment escaped the promotion guard")
-    require(not fixture.actions() and not fixture.requests and not fixture.records("conversion_summaries"),
-            "Legacy eligible acknowledgment acquired the reserved summary reply slot")
+    # Q2 a: a reply no longer waits for a summary the model did not write.
+    require("CHAMPION_SUMMARY_REQUIRED_BEFORE_REPLY_SLOT" not in json.dumps(result) and len(fixture.actions()) == 1
+            and not fixture.records("conversion_summaries"), "Legacy agreement without a summary was still held")
 
 
 def unscoped_ack(fixture):

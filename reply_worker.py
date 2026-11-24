@@ -137,6 +137,11 @@ MAX_OUTPUT_CHARACTERS = 6000
 MAX_QUOTE_CHARACTERS = 300
 MAX_REASON_CHARACTERS = 500
 SIZE_BLOCKERS = frozenset({"CLASSIFICATION_OUTPUT_EXCEEDS_LIMIT", "CLASSIFICATION_FIELD_TOO_LONG"})
+# Q6 a (owner, 2026-11-23): an answer that cannot be read (broken JSON, a missing field, an unknown
+# label, no usable draft) goes back to the model with a note, like a too-long one, instead of a hold.
+FORMAT_BLOCKERS = frozenset({"CLASSIFICATION_OUTPUT_MALFORMED", "CLASSIFICATION_OUTPUT_DUPLICATE_KEYS",
+                             "CLASSIFICATION_OUTPUT_SCHEMA_INVALID", "CLASSIFICATION_REPLY_PROPOSAL_INVALID"})
+FEEDBACK_BLOCKERS = SIZE_BLOCKERS | FORMAT_BLOCKERS
 
 
 class Held(Exception):
@@ -751,10 +756,18 @@ def size_feedback(database, task_id):
     # (a provider or compute wait, a timeout) are skipped, so a wait between a too-long answer
     # and its retry does not drop the feedback.
     last = routing.one(database, """SELECT blocker,output FROM reply_worker_attempts WHERE task_id=?
-        AND (output IS NOT NULL OR blocker IN (""" + ",".join("?" for unused in SIZE_BLOCKERS) + """))
-        ORDER BY attempt DESC LIMIT 1""", (task_id, *sorted(SIZE_BLOCKERS)))
-    if not last or last["blocker"] not in SIZE_BLOCKERS:
+        AND (output IS NOT NULL OR blocker IN (""" + ",".join("?" for unused in FEEDBACK_BLOCKERS) + """))
+        ORDER BY attempt DESC LIMIT 1""", (task_id, *sorted(FEEDBACK_BLOCKERS)))
+    if not last or last["blocker"] not in FEEDBACK_BLOCKERS:
         return None
+    if last["blocker"] in FORMAT_BLOCKERS:
+        what = {"CLASSIFICATION_OUTPUT_MALFORMED": "it was not one valid JSON object",
+                "CLASSIFICATION_OUTPUT_DUPLICATE_KEYS": "it named the same field twice",
+                "CLASSIFICATION_OUTPUT_SCHEMA_INVALID": "a required field was missing, an extra field was added, or the label was not one of the listed labels",
+                "CLASSIFICATION_REPLY_PROPOSAL_INVALID": "reply_proposal was not null and not an object with a non-empty text and a basis_quote"}
+        return ("OUTPUT_FORMAT_FEEDBACK (from this harness, not from the message): your previous answer to this "
+                "same request could not be used because " + what[last["blocker"]] + ". Write the same decision "
+                "again as one compact JSON object with exactly the fields the reply format lists.")
     raw, output = last["output"], None
     if raw is not None:
         try:
@@ -781,8 +794,10 @@ def size_feedback(database, task_id):
 def _validate(raw, request, message, source_holds):
     try:
         output = json.loads(raw, object_pairs_hook=_unique_object)
+    except Held as error:
+        raise Held(error.code, retry=True) from None             # duplicate keys: back with a note (Q6 a)
     except (ValueError, RecursionError):
-        raise Held("CLASSIFICATION_OUTPUT_MALFORMED") from None
+        raise Held("CLASSIFICATION_OUTPUT_MALFORMED", retry=True) from None
     # Size is measured compact and is a retry with feedback, never a terminal hold (owner,
     # 2026-10-01). Field bounds come first so the feedback can name the field that ran long.
     if _too_long(output, quotes=False):
@@ -794,26 +809,32 @@ def _validate(raw, request, message, source_holds):
               "reason", "unknown_factual_requirements", "reply_proposal", "next_action", "review_at"}
     if (not isinstance(output, dict) or not fields <= set(output)
             or set(output) - fields - {"champion_handoff", "speaker_context", "asks_to_stop_contact"}):
-        raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID")
+        raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID", retry=True)
     # The model's own judgment that the person asks for contact to stop (owner, 2026-11-12). A boolean
     # or absent (decisions saved before the field existed); pipeline_routing.apply_reply_decision acts on it.
     if type(output.get("asks_to_stop_contact", False)) is not bool:
-        raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID")
+        raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID", retry=True)
+    # Q6 a (owner, 2026-11-23): what follows no longer holds a decision over a detail of the answer.
+    # Each falls back to the cautious reading: a reply can still go, nothing is recorded that the
+    # model did not clearly say. An unrecognised speaker reading is "can't tell".
     if "speaker_context" in output and (not isinstance(output["speaker_context"], str)
             or output["speaker_context"] not in {"DIRECT_SPEAKER", "QUOTED_OR_FORWARDED", "UNKNOWN"}):
-        raise Held("CLASSIFICATION_SPEAKER_CONTEXT_INVALID")
+        output["speaker_context"] = "UNKNOWN"
     champion = output.get("champion_handoff") is not None
-    if output["output_version"] != VERSION or output["source_sha256"] != request["source_sha256"]:
-        raise Held("CLASSIFICATION_OUTPUT_BINDING_MISMATCH")
-    if (not isinstance(output["label"], str) or output["label"] not in LABELS
-            or not isinstance(output["reason"], str) or not 1 <= len(output["reason"].strip()) <= 500):
-        raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID")
+    # The echoed version and message fingerprint are not compared: Python asked about this one message.
+    output["output_version"], output["source_sha256"] = VERSION, request["source_sha256"]
+    if not isinstance(output["label"], str) or output["label"] not in LABELS:
+        raise Held("CLASSIFICATION_OUTPUT_SCHEMA_INVALID", retry=True)
+    # A blank reason still holds (owner Q6, 2026-11-23: item 6 rejected).
+    if not isinstance(output["reason"], str) or not 1 <= len(output["reason"].strip()) <= 500:
+        raise Held("CLASSIFICATION_REASON_REQUIRED")
     # literal_quote, quote_span and reply_proposal.basis_quote are recorded as the model gave
     # them and never checked against the message (owner, 2026-09-27: "all of these can happen
     # without depending on quotes").
-    if output["role_reference"] is not None and (not isinstance(output["role_reference"], str)
-            or output["role_reference"] not in {item["job_key"] for item in request.get("job_scope", [])}):
-        raise Held("CLASSIFICATION_ROLE_OUTSIDE_VERIFIED_SCOPE")
+    role_ignored = output["role_reference"] is not None and (not isinstance(output["role_reference"], str)
+            or output["role_reference"] not in {item["job_key"] for item in request.get("job_scope", [])})
+    if role_ignored:
+        output["role_reference"] = None          # a role not on file is "no role named" (Q6 a)
     if not isinstance(output["next_action"], str) or not 1 <= len(output["next_action"].strip()) <= 500:
         raise Held("CLASSIFICATION_NEXT_ACTION_REQUIRED")
     # A null review_at is the model saying nothing about this message needs another look
@@ -826,10 +847,14 @@ def _validate(raw, request, message, source_holds):
             if review_at.tzinfo is None or review_at.utcoffset() is None:
                 raise ValueError()
         except (ValueError, TypeError):
-            raise Held("CLASSIFICATION_REVIEW_TIME_REQUIRED") from None
+            output["review_at"] = None           # an unreadable date is no date (Q6 a)
     unknowns = output["unknown_factual_requirements"]
-    if not isinstance(unknowns, list) or len(unknowns) > len(FACTS) or any(not isinstance(item, str) or item not in FACTS for item in unknowns):
-        raise Held("CLASSIFICATION_UNKNOWN_FACT_REQUIREMENTS_INVALID")
+    # An unsure-of word outside FACTS still counts as unsure of something (Q6 a): it is kept, so
+    # it stops a firm agreement being recorded (intent_unknowns below) and never holds the reply.
+    if not isinstance(unknowns, list):
+        unknowns = ["OTHER"] if unknowns else []
+    unknowns = [item if isinstance(item, str) and item.strip() else "OTHER" for item in unknowns]
+    output["unknown_factual_requirements"] = unknowns
     proposal = output["reply_proposal"]
     if proposal is not None:
         proposal_limit = champion_composition.MAX_TEXT_CHARACTERS if champion else 500
@@ -842,7 +867,7 @@ def _validate(raw, request, message, source_holds):
                 or not isinstance(proposal["text"], str)
                 or not 1 <= len(proposal["text"].strip()) <= proposal_limit
                 or ({"champion_handoff", "speaker_context"}.intersection(output) and len(proposal["text"]) > proposal_limit)):
-            raise Held("CLASSIFICATION_REPLY_PROPOSAL_INVALID")
+            raise Held("CLASSIFICATION_REPLY_PROPOSAL_INVALID", retry=True)
     resolved = ({"UNKNOWN_QUOTED_CONTEXT", "UNKNOWN_FORWARDED_CONTEXT"}
                 if request.get("champion_handoff_enabled") is True and output.get("speaker_context") == "DIRECT_SPEAKER"
                 and champion_composition.direct_intent(output, request) else set())
@@ -873,6 +898,8 @@ def _validate(raw, request, message, source_holds):
         observations.append("CONTEXTUAL_" + output["label"])
     if output["role_reference"] is None:
         observations.append("UNKNOWN_FACT:ROLE_ASSOCIATION")
+    if role_ignored:
+        observations.append("ROLE_OUTSIDE_VERIFIED_SCOPE_IGNORED")
     # `holds` keeps ONLY the integrity signals - a real problem with the source, such as an
     # unauthenticated message binding or a conflicting conversation context. Everything that
     # merely recorded uncertainty now sits in `observations` and blocks nothing.
@@ -954,15 +981,13 @@ def _validate(raw, request, message, source_holds):
     # evidence that makes a summary possible is actually in the packet; otherwise the decision
     # advances without one, because a missing forwardable extra must not cost the conversion
     # update it is attached to.
-    summarisable = any((scope or {}).get("role_context", {}).get("evidence_id")
-                       for scope in (request.get("job_scope") or []) if isinstance(scope, dict))
-    if (request.get("champion_handoff_enabled") is True and output["label"] == "AGREEMENT"
-            and advance and not unknowns and output.get("champion_handoff") is None and summarisable):
-        raise Held("CHAMPION_SUMMARY_REQUIRED", retry=True)
+    # Q2 a (owner, 2026-11-23): a missing or unusable advocate summary never holds the decision.
+    # The model is no longer sent back to write one, and a summary that cannot be used is noted
+    # here and not forwarded (champion.attach skips it); the decision and the reply go on.
     try:
         champion_composition.validate(output, request, advance)
     except ValueError as error:
-        raise Held(str(error)) from None
+        observations.append("CHAMPION_SUMMARY_NOT_USED:" + str(error))
     return {"output_version": VERSION, "state": "DECISION_READY" if advance else "INVESTIGATION_REQUIRED",
             "evidence_basis": "AI_JUDGMENT_ON_AUTHENTICATED_SOURCE", "can_advance_conversion": advance,
             "can_send": False, "verified_business_state": None, "holds": sorted(set(holds)),
@@ -1607,6 +1632,7 @@ def cycle(root, database, config, now=None):
                                                   status=status, blocker=blocker,
                                                   next_action=handoff["required_next_action"] if handoff and not failure
                                                   else "Read the reply again with feedback to keep the answer concise" if failure and failure.code in SIZE_BLOCKERS
+                                                  else "Read the reply again with feedback on the answer's format" if failure and failure.code in FORMAT_BLOCKERS
                                                   else "Investigate the recorded source or execution dependency" if blocker else None)
                 if failure and failure.code in {"CLASSIFICATION_IMMUTABLE_INPUT_CHANGED", "CLASSIFICATION_SOURCE_CHANGED"}:
                     result["context_revision_task_id"] = revise_context(task, stamp)

@@ -73,7 +73,8 @@ class OverLimitOutputRetriesWithFeedback(unittest.TestCase):
             control = self.case.queue(source_id="control-message")
             self.case.database.execute("UPDATE workflow_tasks SET status='CANCELLED' WHERE task_id=?", (self.task_id,))
             self.case.database.commit()
-            self.case.cycle(effect=lambda *unused: "{}")
+            # A blank reason is the terminal hold left after Q6 (owner rejected loosening it).
+            self.case.cycle(effect=lambda *args: json.dumps(dict(json.loads(self.normal(*args)), reason="")))
             self.assertEqual("BLOCKED", self.case.task(control)["status"])
             self.assertEqual(1, self.outbox())
             self.case.database.execute("UPDATE workflow_tasks SET status='QUEUED' WHERE task_id=?", (self.task_id,))

@@ -135,16 +135,17 @@ class ChampionSpeakerContextTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.decision = {**original, **changes}
                 self.assertFalse(champion_composition.direct_intent(self.decision, self.request))
-                with self.assertRaises(reply_worker.Held):
-                    self.validate()
+                # Q6 a: the echoed fingerprint is not compared; Python binds the message itself.
+                self.validate()
 
     def test_invalid_speaker_context_is_not_a_legacy_absence(self):
         for context in (None, True, [], {}, "DIRECT", ""):
             with self.subTest(context=context):
                 self.decision["speaker_context"] = context
-                with self.assertRaises(reply_worker.Held) as raised:
-                    self.validate()
-                self.assertEqual("CLASSIFICATION_SPEAKER_CONTEXT_INVALID", raised.exception.code)
+                # Q6 a: an unrecognised reading is "can't tell", never a hold and never an absence.
+                handoff = self.validate()
+                self.assertEqual("UNKNOWN", handoff["classification"]["speaker_context"])
+                self.assertFalse(handoff["can_advance_conversion"])
 
     def test_champion_metadata_uses_same_source_bound_semantic_judgment(self):
         self.request.update(decision_time=pipeline_fixtures.NOW,
@@ -160,9 +161,8 @@ class ChampionSpeakerContextTests(unittest.TestCase):
         for context in ("UNKNOWN", "QUOTED_OR_FORWARDED"):
             with self.subTest(context=context):
                 self.decision["speaker_context"] = context
-                with self.assertRaises(reply_worker.Held) as raised:
-                    self.validate([])
-                self.assertEqual("CHAMPION_EXACT_AGREEMENT_REQUIRED", raised.exception.code)
+                # Q2 a: the speaker reading no longer holds the decision; it only stops conversion state.
+                self.assertFalse(self.validate([])["can_advance_conversion"])
 
 
 class ChampionLegacyMigrationTests(unittest.TestCase):

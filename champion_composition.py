@@ -258,29 +258,15 @@ def validate(decision, request, can_advance_conversion):
         raise ValueError("CHAMPION_HANDOFF_SCHEMA_INVALID")
     if request.get("champion_handoff_enabled") is not True:
         raise ValueError("CHAMPION_HANDOFF_DISABLED")
-    if (decision["label"] != "AGREEMENT" or can_advance_conversion is not True
-            or decision["unknown_factual_requirements"]
-            or decision["role_reference"] != champion["job_key"]):
-        raise ValueError("CHAMPION_EXACT_AGREEMENT_REQUIRED")
+    # Q2 a (owner, 2026-11-23: "There should no python comparisons on this blocking the progress"):
+    # the checks of the model's answer that stood here (label and unknowns against the summary,
+    # role_reference against job_key, speaker attribution, a review date within 7 days, the
+    # next_action length) are removed; the summary is taken as the model gave it. What remains only
+    # finds the job it names. The caller records a failure here as an observation; it never holds
+    # the decision or the reply.
     matches = [item for item in request.get("job_scope", []) if item["job_key"] == champion["job_key"]]
     if len(matches) != 1:
         raise ValueError("CHAMPION_SINGLE_VERIFIED_ROLE_REQUIRED")
-    if not direct_intent(decision, request):
-        raise ValueError("CHAMPION_DIRECT_MESSAGE_REQUIRED")
     role = matches[0].get("role_context") or {}
     if not isinstance(role.get("evidence_id"), str) or not role["evidence_id"].strip():
         raise ValueError("CHAMPION_ROLE_EVIDENCE_REQUIRED")
-    proposal = decision["reply_proposal"]
-    if (not isinstance(proposal, dict) or not isinstance(proposal.get("text"), str)
-            or not proposal["text"].strip() or len(proposal["text"]) > MAX_TEXT_CHARACTERS):
-        raise ValueError("CHAMPION_REPLY_PROPOSAL_REQUIRED")
-    try:
-        decision_time = dt.datetime.fromisoformat(request["decision_time"])
-        review_at = dt.datetime.fromisoformat(decision["review_at"])
-        if (decision_time.tzinfo is None or review_at.tzinfo is None
-                or not decision_time < review_at <= decision_time + dt.timedelta(days=7)):
-            raise ValueError()
-    except (ValueError, KeyError, TypeError, OverflowError):
-        raise ValueError("CHAMPION_BOUNDED_REVIEW_TIME_REQUIRED") from None
-    if not isinstance(decision.get("next_action"), str) or not 1 <= len(decision["next_action"].strip()) <= 500:
-        raise ValueError("CHAMPION_NEXT_ACTION_REQUIRED")

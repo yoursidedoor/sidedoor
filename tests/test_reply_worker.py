@@ -214,17 +214,22 @@ class ReplyWorkerTests(unittest.TestCase):
         self.assertEqual(referral, [tuple(row) for row in self.database.execute("SELECT contact_id,state,history FROM referrals")])
 
     def test_invented_metadata_and_boolean_facts_rejected(self):
+        # Q6 a (owner, 2026-11-23): an extra field goes back to the model with a note; a role not on
+        # file is "no role named" and the decision completes.
         variants = [
-            (lambda output: output.update(verified_referral=True), "CLASSIFICATION_OUTPUT_SCHEMA_INVALID"),
-            (lambda output: output.update(role_reference="invented-role"), "CLASSIFICATION_ROLE_OUTSIDE_VERIFIED_SCOPE"),
+            (lambda output: output.update(verified_referral=True), "CLASSIFICATION_OUTPUT_SCHEMA_INVALID", "RETRY_WAIT"),
+            (lambda output: output.update(role_reference="invented-role"), None, "COMPLETE"),
         ]
-        for index, (mutate, blocker) in enumerate(variants):
+        for index, (mutate, blocker, status) in enumerate(variants):
             with self.subTest(index=index):
                 task_id = self.enqueue(source_id="invalid-" + str(index))
                 self.mutate_output = mutate
                 self.run_cycle()
                 self.assertEqual(blocker, self.task(task_id)["blocker"])
-                self.assertEqual("BLOCKED", self.task(task_id)["status"])
+                self.assertEqual(status, self.task(task_id)["status"])
+                if status == "COMPLETE":
+                    self.assertIsNone(self.handoff(task_id)["classification"]["role_reference"])
+                    self.assertIn("ROLE_OUTSIDE_VERIFIED_SCOPE_IGNORED", self.handoff(task_id)["observations"])
 
     def test_unknown_flags_and_unknown_facts_remain_specific_observations(self):
         for index, flags in enumerate(({"quoted": None}, {"forwarded": "unknown"}, {"quoted": True})):
@@ -368,7 +373,7 @@ class ReplyWorkerTests(unittest.TestCase):
                 task_id = self.enqueue(source_id="malformed-" + str(index))
                 self.raw = raw
                 self.run_cycle()
-                self.assertEqual("BLOCKED", self.task(task_id)["status"])
+                self.assertEqual("RETRY_WAIT", self.task(task_id)["status"])      # back with a note (Q6 a)
                 self.assertNotIn("private-error", self.task(task_id)["result"])
         self.assertEqual(0, self.database.execute("SELECT COUNT(*) FROM reply_worker_results").fetchone()[0])
 
@@ -449,7 +454,7 @@ class ReplyWorkerTests(unittest.TestCase):
                 output["verified_referral"] = True
         self.mutate_output = first_only
         self.run_cycle()
-        self.assertEqual(["BLOCKED", "COMPLETE"], sorted(self.task(task_id)["status"] for task_id in tasks))
+        self.assertEqual(["COMPLETE", "RETRY_WAIT"], sorted(self.task(task_id)["status"] for task_id in tasks))
 
     def test_missing_authentication_prevents_model_even_with_a_scoped_task(self):
         task_id = self.enqueue()
@@ -473,14 +478,20 @@ class ReplyWorkerTests(unittest.TestCase):
         self.assertEqual(0, self.database.execute("SELECT COUNT(*) FROM conversion_events WHERE kind LIKE 'REFERRAL_%'").fetchone()[0])
 
     def test_invalid_unknown_requirements_and_source_hash_remain_held(self):
-        variants = [("unknown_factual_requirements", False, "CLASSIFICATION_UNKNOWN_FACT_REQUIREMENTS_INVALID"),
-                    ("unknown_factual_requirements", ["made up requirement"], "CLASSIFICATION_UNKNOWN_FACT_REQUIREMENTS_INVALID"),
-                    ("source_sha256", "f" * 64, "CLASSIFICATION_OUTPUT_BINDING_MISMATCH")]
-        for index, (field, value, blocker) in enumerate(variants):
+        # Q6 a (owner, 2026-11-23): none of these holds. An unsure-word outside the list is kept as
+        # unsure-of-something, so no firm agreement is recorded; the echoed fingerprint is not compared.
+        variants = [("unknown_factual_requirements", False, []),
+                    ("unknown_factual_requirements", ["made up requirement"], ["made up requirement"]),
+                    ("source_sha256", "f" * 64, None)]
+        for index, (field, value, kept) in enumerate(variants):
             task_id = self.enqueue(source_id="unknown-" + str(index))
-            self.mutate_output = lambda output: output.update({field: value})
+            self.mutate_output = lambda output: output.update({field: value}, label="AGREEMENT")
             self.run_cycle()
-            self.assertEqual(blocker, self.task(task_id)["blocker"])
+            self.assertEqual("COMPLETE", self.task(task_id)["status"])
+            if kept is not None:
+                self.assertEqual(kept, self.handoff(task_id)["classification"]["unknown_factual_requirements"])
+            if kept:
+                self.assertFalse(self.handoff(task_id)["can_advance_conversion"])
 
     def test_large_input_is_held_and_caller_transaction_is_not_committed(self):
         task_id = self.enqueue("message " * 4000)

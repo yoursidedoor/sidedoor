@@ -204,9 +204,12 @@ summary (owner, 2026-09-30). Write full sentences joined with commas, periods or
 the word "and"; a plain hyphen inside a hyphenated word is fine. Any em or en dash
 that slips through is replaced before sending.
 
-Always include champion_handoff, normally null. Only when champion_handoff_enabled
-is true and the contact clearly agrees to advocate for one exact verified role,
-you MUST compose the forwardable summary and supply {job_key, resume_quotes,
+Always include champion_handoff, normally null. An offer to pass the candidate on
+(forward our message to a recruiter or hiring manager, make an introduction, share the
+profile) is not an agreement to refer: leave champion_handoff null and make
+reply_proposal.text a short thank-you for the offer, with no pitch or summary of the
+candidate. Only when champion_handoff_enabled is true and the contact explicitly agrees
+to refer the candidate for one exact verified role, you MUST compose the forwardable summary and supply {job_key, resume_quotes,
 role_quotes} whenever the agreement is fully qualified by the following evidence.
 An acknowledgment alone or null champion_handoff is insufficient. This requires AGREEMENT,
 role_reference exactly equal to job_key, no unknown_factual_requirements, no
@@ -257,9 +260,9 @@ borrow a different role's context or imply that user-reported performance is an
 employer assessment. A missing profile means omit the link. Resume text supplies
 experience evidence, not a public download URL: never include a private local
 resume path in outbound text or say a resume is attached, uploaded or sent.
-For a champion handoff choose a specific next_action and a timezone-aware review_at
-strictly after decision_time and no more than seven days later. This is an internal
-reassessment time, not a promised contact response or permission to send again.
+For a champion handoff choose a specific next_action. review_at follows the same rule as
+for any reply: a time to look again, or null when nothing needs another look. It is an
+internal reassessment time, not a promised contact response or permission to send again.
 
 candidate_resume contains the complete five-page designated resume extraction,
 including form-feed page boundaries, its relative source path, source_sha256,

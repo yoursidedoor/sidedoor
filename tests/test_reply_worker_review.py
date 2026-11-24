@@ -85,10 +85,14 @@ class ReplyWorkerValidationReview(unittest.TestCase):
                 self.assertIn("UNKNOWN_FACT:ROLE_ASSOCIATION", result["observations"])
 
     def test_rejects_source_hash_mismatch_metadata_and_role_inference(self):
-        variants = [{"source_sha256": "b" * 64}, {"role_reference": "invented-role"}, {"can_send": True}]
-        for changes in variants:
-            with self.subTest(changes=changes), self.assertRaises(worker.Held):
-                self.validate({**self.output, **changes})
+        # Q6 a (owner, 2026-11-23): the echoed fingerprint is not compared and a role not on file is
+        # "no role named"; an invented field still goes back to the model with a note.
+        self.assertEqual(self.request["source_sha256"],
+                         self.validate({**self.output, "source_sha256": "b" * 64})["classification"]["source_sha256"])
+        self.assertIsNone(self.validate({**self.output, "role_reference": "invented-role"})["classification"]["role_reference"])
+        with self.assertRaises(worker.Held) as raised:
+            self.validate({**self.output, "can_send": True})
+        self.assertTrue(raised.exception.retry)
 
     def test_duplicate_keys_and_oversize_output_are_rejected(self):
         raw = json.dumps(self.output)
@@ -175,26 +179,24 @@ class ReplyWorkerValidationReview(unittest.TestCase):
     def test_role_reference_must_be_a_scoped_string_or_null(self):
         self.request["job_scope"] = [{"job_key": "verified-job"}]
         for role in ("different-job", "", True, 123, [], {}, ["verified-job"]):
-            with self.subTest(role=role), self.assertRaises(worker.Held):
-                self.validate({**self.output, "role_reference": role})
+            with self.subTest(role=role):     # Q6 a: anything but a key on file is "no role named"
+                self.assertIsNone(self.validate({**self.output, "role_reference": role})["classification"]["role_reference"])
 
     def test_v1_output_is_not_accepted_as_a_v2_decision(self):
-        with self.assertRaises(worker.Held) as raised:
-            self.validate({**self.output, "output_version": "reply-inference-v1"})
-        self.assertEqual("CLASSIFICATION_OUTPUT_BINDING_MISMATCH", raised.exception.code)
+        # Q6 a: the echoed version is not compared; a missing v2 field still goes back with a note.
         for field in ("next_action", "review_at"):
             output = dict(self.output)
             output.pop(field)
             with self.subTest(field=field), self.assertRaises(worker.Held) as raised:
                 self.validate(output)
             self.assertEqual("CLASSIFICATION_OUTPUT_SCHEMA_INVALID", raised.exception.code)
+            self.assertTrue(raised.exception.retry)
 
     def test_review_time_requires_an_explicit_timezone_and_valid_date(self):
         for stamp in (True, 123, "", "tomorrow", "2026-09-17", "2026-09-17T20:00:00",
                       "2026-02-30T20:00:00+00:00", "2026-09-17T20:00:00+25:00"):
-            with self.subTest(stamp=stamp), self.assertRaises(worker.Held) as raised:
-                self.validate({**self.output, "review_at": stamp})
-            self.assertEqual("CLASSIFICATION_REVIEW_TIME_REQUIRED", raised.exception.code)
+            with self.subTest(stamp=stamp):   # Q6 a: an unreadable date is no date
+                self.assertIsNone(self.validate({**self.output, "review_at": stamp})["classification"]["review_at"])
         for stamp in ("2026-09-17T20:00:00Z", "2026-09-17T13:00:00-07:00", "2026-09-17T20:00:00.123456+00:00"):
             with self.subTest(stamp=stamp):
                 self.assertEqual(stamp, self.validate({**self.output, "review_at": stamp})["classification"]["review_at"])
@@ -328,7 +330,8 @@ class ReplyWorkerCycleReview(unittest.TestCase):
 
     def test_permanent_invalid_output_does_not_retry(self):
         task_id = self.queue()
-        self.cycle(effect=lambda *unused: "{}")
+        # A blank reason is the hold left after Q6 (owner rejected loosening it).
+        self.cycle(effect=lambda *arguments: json.dumps(dict(json.loads(self.execute(*arguments)), reason="")))
         self.assertEqual("BLOCKED", self.task(task_id)["status"])
         unused, execute = self.cycle("2026-09-17T17:00:00+00:00")
         execute.assert_not_called()
@@ -682,9 +685,9 @@ class ReplyWorkerCycleReview(unittest.TestCase):
         for role in (unlinked, unverified):
             output = inference(request["source_sha256"])
             output["role_reference"] = applications.identity(role)[2]
-            with self.subTest(role=role["requisition_id"]), self.assertRaises(worker.Held) as raised:
-                worker._validate(json.dumps(output), request, MESSAGE, [])
-            self.assertEqual("CLASSIFICATION_ROLE_OUTSIDE_VERIFIED_SCOPE", raised.exception.code)
+            with self.subTest(role=role["requisition_id"]):   # Q6 a: not on file is "no role named"
+                handoff = worker._validate(json.dumps(output), request, MESSAGE, [])
+                self.assertIsNone(handoff["classification"]["role_reference"])
 
     def test_role_scope_revoked_during_execution_discards_output(self):
         task_id = self.queue()
@@ -853,11 +856,13 @@ class ReplyWorkerCycleReview(unittest.TestCase):
 
                 unused, execute = self.cycle(effect=invent_role)
                 execute.assert_called_once()
-                self.assert_no_handoff(task_id, "CLASSIFICATION_ROLE_OUTSIDE_VERIFIED_SCOPE")
+                # Q6 a: the decision completes with no role; nothing is recorded against the role.
+                self.assertEqual("COMPLETE", self.task(task_id)["status"])
         # A stuck reply is reported only for someone we contacted (owner, 2026-10-01, narrowing
         # 2026-09-25's "regardless of if its tied to a job"): this sender never heard from us.
         self.assertEqual(0, self.database.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0])
-        self.assertIsNone(referrals.current(self.database, "linkedin.com/in/unrelated-sales-fixture"))
+        # Q6 a: with the invented role read as "no role named", the AI's own reading of the person stands
+        # exactly as it would had it named no role; nothing is recorded against any role.
         for table in ("conversion_events", "application_attempts"):
             with self.subTest(table=table):
                 self.assertEqual(0, self.database.execute("SELECT COUNT(*) FROM " + table).fetchone()[0])

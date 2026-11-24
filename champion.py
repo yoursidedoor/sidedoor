@@ -13,17 +13,13 @@ def describe(database, config, action, request, handoff, now):
         return None
     if config.get("conversion", {}).get("champion_handoff_enabled") is not True:
         raise ValueError("CHAMPION_HANDOFF_DISABLED")
-    if (decision["label"] != "AGREEMENT" or handoff.get("can_advance_conversion") is not True
-            or decision["unknown_factual_requirements"] or not decision.get("reply_proposal")):
-        raise ValueError("CHAMPION_VERIFIED_AGREEMENT_REQUIRED")
+    # Q2 a (owner, 2026-11-23): the model's label, unknowns, review date and role_reference are no
+    # longer compared here. `attach` turns any failure below into "no summary", never a held reply.
     stamp = conversion.timestamp(now)
-    # A blank review date is allowed (owner, 2026-09-24); only a dated one can be already due.
-    deadline = conversion.timestamp(decision["review_at"]) if decision["review_at"] else None
-    if deadline is not None and deadline <= stamp:
-        raise ValueError("CHAMPION_REVIEW_DUE_REASSESS_BEFORE_SEND")
+    deadline = conversion.timestamp(decision["review_at"]) if decision.get("review_at") else None
     job_key = proposal["job_key"]
     matches = [item for item in request["job_scope"] if item["job_key"] == job_key]
-    if len(matches) != 1 or decision["role_reference"] != job_key:
+    if len(matches) != 1:
         raise ValueError("CHAMPION_EXACT_ROLE_REQUIRED")
     scope = matches[0]
     job = conversion._job(database, job_key)
@@ -80,7 +76,13 @@ def describe(database, config, action, request, handoff, now):
 
 
 def attach(database, config, action, request, handoff, now):
-    summary = describe(database, config, action, request, handoff, now)
+    # Q2 a (owner, 2026-11-23): the advocate summary is an extra on the reply. If it cannot be bound
+    # to current records the reply goes out without it, and the reason is kept on the action.
+    try:
+        summary = describe(database, config, action, request, handoff, now)
+    except (ValueError, KeyError, TypeError) as error:
+        action["champion_summary_skipped"] = str(error)
+        return action
     if summary is not None:
         action.update(champion_summary_id=summary["summary_id"], champion_job_key=summary["job_key"],
                       champion_deadline=summary["provenance"]["deadline"],
@@ -90,6 +92,8 @@ def attach(database, config, action, request, handoff, now):
 
 
 def persist(database, config, action, request, handoff, now):
+    if not action.get("champion_summary_id"):
+        return                       # attach used no summary for this reply
     summary = describe(database, config, action, request, handoff, now)
     if summary is None:
         return
